@@ -109,6 +109,22 @@ build/
     └── my-plugin.snplg        ← This is the installable plugin package
 ```
 
+### Moving the Project Directory
+
+If you move the project folder to a new path, the Gradle build cache stores absolute paths and becomes stale. Clean it before rebuilding:
+
+```powershell
+# Run from the project root
+Remove-Item -Recurse -Force android\.gradle, android\app\build, android\build -ErrorAction SilentlyContinue
+.\buildPlugin.ps1
+```
+
+Without this step, Gradle reports:
+```
+No matching variant of project :react-native-fs was found. The consumer was configured to find a library ... but: No variants exist.
+```
+even though the source code and dependencies are unchanged.
+
 ---
 
 ## §4 Install to Device
