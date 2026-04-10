@@ -206,7 +206,7 @@ import { PluginManager } from 'sn-plugin-lib';
 import { checkPendingButton } from './index';
 
 function App(): React.JSX.Element {
-  const [screen, setScreen] = useState<'main' | 'send' | 'bubble'>('main');
+  const [screen, setScreen] = useState<'main' | 'lasso-action'>('main');
 
   useEffect(() => {
     const handleButton = (buttonId: number) => {
@@ -214,14 +214,9 @@ function App(): React.JSX.Element {
         // Toolbar button → main panel
         setScreen('main');
       } else if (buttonId === 200) {
-        // Lasso button → go directly to send screen, never show main
-        setScreen('send');
+        // Lasso button → go directly to lasso screen, never show main
+        setScreen('lasso-action');
         // ... extract lasso content here
-      } else if (buttonId === 201) {
-        // Lasso AI button → background work + close view
-        doBackgroundWork().then(() => {
-          enterBubble();   // shows native overlay, then closePluginView()
-        });
       }
     };
 
@@ -245,7 +240,7 @@ function App(): React.JSX.Element {
 - Register `registerButtonListener` in `index.js` at module level, not inside `App.tsx`.
 - `pendingButtonId` must be a plain module variable, not React state (it lives outside the component lifecycle).
 - Call `checkPendingButton()` as the *first* side-effect in the mount `useEffect` to avoid even one render frame on the wrong screen.
-- For buttons that should do background work + close (no UI): call `PluginManager.closePluginView()` (or `enterBubble()`) inside the async handler; the user sees no UI at all.
+- For buttons that should do background work + close (no UI): call `PluginManager.closePluginView()` inside the async handler; the user sees no UI at all.
 
 ---
 
