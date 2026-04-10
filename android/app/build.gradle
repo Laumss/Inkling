@@ -1,0 +1,145 @@
+apply plugin: "com.android.application"
+apply plugin: "org.jetbrains.kotlin.android"
+apply plugin: "com.facebook.react"
+
+// Custom task: Build APK and remove specified so libraries
+def processCustomApk(String buildType) {
+    println "Build type: ${buildType}"
+
+    def apkDir = file("${buildDir}/outputs/apk/${buildType}")
+    def originalApk = file("${apkDir}/app-${buildType}.apk")
+    def customApk = file("${apkDir}/app-${buildType}-custom.apk")
+
+    if (!originalApk.exists()) {
+        throw new GradleException("Original APK file does not exist: ${originalApk.absolutePath}")
+    }
+
+    println "Starting to process ${buildType.toUpperCase()} APK: ${originalApk.absolutePath}"
+
+    def tempDir = file("${buildDir}/temp/apk-custom-${buildType}")
+    if (tempDir.exists()) {
+        delete tempDir
+    }
+    tempDir.mkdirs()
+
+    try {
+        copy {
+            from zipTree(originalApk)
+            into tempDir
+        }
+
+        def libDir = file("${tempDir}/lib")
+        if (libDir.exists()) {
+            libDir.listFiles().each { archDir ->
+                if (archDir.isDirectory() && archDir.name != 'arm64-v8a') {
+                    println "Deleting architecture directory: ${archDir.name}"
+                    delete archDir
+                }
+            }
+
+            def arm64Dir = file("${libDir}/arm64-v8a")
+            if (arm64Dir.exists()) {
+                def filesToDelete = [
+                    'libc++_shared.so',
+                    'libfbjni.so',
+                    'libhermes.so',
+                    'libhermestooling.so',
+                    'libimagepipeline.so',
+                    'libjsi.so',
+                    'libnative-filters.so',
+                    'libnative-imagetranscoder.so',
+                    'libreactnative.so'
+                ]
+
+                filesToDelete.each { fileName ->
+                    def soFile = file("${arm64Dir}/${fileName}")
+                    if (soFile.exists()) {
+                        println "Deleting so file: ${fileName}"
+                        delete soFile
+                    }
+                }
+
+                println "Remaining files in arm64-v8a directory:"
+                arm64Dir.listFiles().each { file ->
+                    if (file.isFile()) {
+                        println "  - ${file.name}"
+                    }
+                }
+            }
+        }
+
+        ant.zip(destfile: customApk, basedir: tempDir)
+
+        println "Custom ${buildType.toUpperCase()} APK generated: ${customApk.absolutePath}"
+        println "Original APK size: ${(originalApk.length() / 1024 / 1024).round(2)} MB"
+        println "Custom APK size: ${(customApk.length() / 1024 / 1024).round(2)} MB"
+
+    } finally {
+        delete tempDir
+    }
+}
+
+['Debug', 'Release'].each { variant ->
+    def buildType = variant.toLowerCase()
+
+    tasks.register("buildCustomApk${variant}") {
+        group = 'custom'
+        description = "Build ${variant} APK and remove specified so libraries"
+        dependsOn "assemble${variant}"
+
+        doLast {
+            processCustomApk(buildType)
+        }
+    }
+}
+
+react {
+    autolinkLibrariesWithApp()
+}
+
+def enableProguardInReleaseBuilds = false
+
+def jscFlavor = 'io.github.react-native-community:jsc-android:2026004.+'
+
+android {
+    ndkVersion rootProject.ext.ndkVersion
+    buildToolsVersion rootProject.ext.buildToolsVersion
+    compileSdk rootProject.ext.compileSdkVersion
+
+    namespace "com.screenshot_crop"
+    defaultConfig {
+        applicationId "com.screenshot_crop"
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        versionCode 2
+        versionName "0.2.0"
+    }
+    signingConfigs {
+        debug {
+            storeFile file('debug.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.debug
+        }
+        release {
+            signingConfig signingConfigs.debug
+            minifyEnabled enableProguardInReleaseBuilds
+            proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
+        }
+    }
+}
+
+dependencies {
+    implementation("com.facebook.react:react-android")
+
+    if (hermesEnabled.toBoolean()) {
+        implementation("com.facebook.react:hermes-android")
+    } else {
+        implementation jscFlavor
+    }
+}

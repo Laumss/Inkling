@@ -1,0 +1,11 @@
+{
+    "pluginID": "docscreenshot",
+    "pluginKey": "supernote_docscreenshot",
+    "iconPath": "./assets/toolbar_icon.png",
+    "desc": "Screenshot and insert images",
+    "name": "Doc Screenshot",
+    "versionCode": "1",
+    "versionName": "0.1.0",
+    "jsMainPath": "index",
+    "author": "Laumss"
+}

@@ -2,6 +2,8 @@
 
 A Claude skill for AI-assisted Supernote plugin development, based on official documentation and changelogs (release 0.2.0).
 
+Also an example plugin Doc Screenshot.
+
 ## What is this?
 
 A **skill** for Claude Code / Claude.ai / other platforms that supports a similar skill format. It provides:
@@ -32,7 +34,7 @@ Claude will automatically reference this documentation when helping you code.
 
 ## Disclaimer
 
-This skill is **not official**. It's a personal tool I built for my own Supernote plugin projects, shared in case others find it useful.
+This skill and this plugin is **not official**. It's a personal tool I built for my own Supernote plugin projects, shared in case others find it useful.
 
 ## License
 
