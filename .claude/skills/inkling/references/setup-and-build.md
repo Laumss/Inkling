@@ -244,117 +244,7 @@ Get-Content $logFile | Select-Object -Last 50
 
 ---
 
-## §5b Real-Device Testing via LocalSend HTTP
-
-For features that inject content (text insertion, file upload), you can trigger them **from the PC over the LAN** without touching the device, enabling fast automated test cycles.
-
-### Prerequisites
-
-- Supernote on the same LAN as the dev machine
-- Plugin installed and running, receive mode active (button 201 toggled on)
-- Python available on the dev machine
-
-### Scripts
-
-Two scripts live in the project root:
-
-| Script | Purpose |
-|--------|---------|
-| `test-send.ps1` | Send a text string or file to the device via LocalSend v2 HTTP |
-| `test-run.ps1` | Full cycle: clear logs → send → wait → pull file log → analyze |
-| `log-analyze.py` | Parse the plugin file log (`/sdcard/INBOX/localsend-plugin.log`) into a structured summary |
-
-### Send Text from PC
-
-```powershell
-# Send a string (UTF-8 safe via byte array)
-.\test-send.ps1 "Insert this text"
-
-# Send a file
-.\test-send.ps1 -File .\test-data\long-test.txt
-
-# Custom IP
-.\test-send.ps1 "text" -Host_ 192.168.x.x
-```
-
-### Full Test Cycle (one command)
-
-```powershell
-# Default wait 25s
-.\test-run.ps1 -File .\test-data\long-test.txt
-
-# Short text, quick wait
-.\test-run.ps1 "short test" -Wait 10
-```
-
-### Analyze Existing Log
-
-```powershell
-# Pull and analyze manually
-adb -s <device> pull //sdcard/INBOX/localsend-plugin.log y:\tmp\plugin.log
-python log-analyze.py y:\tmp\plugin.log
-
-# Pipe logcat for JS-level events only
-adb -s <device> logcat -d -s ReactNativeJS:V | python log-analyze.py
-```
-
-### Log Analyzer Output
-
-The analyzer produces a structured summary:
-
-```
-============================================================
-  SUPERNOTE PLUGIN LOG SUMMARY
-============================================================
-[11:24:19] START  mode=nospacing page=1
-[11:24:19] RECV   source=LocalSend len=3805
-
-  Insertions : 10 ok / 0 fail / 0 timeout
-  Pages used : [1, 2]
-
-  Per-page insert positions:
-  Page    #    top  bottom  textLen  preview
-  ----  ---  -----  ------  -------
-     1    1     80     433      236  act=433  The development of...
-     1    2    433     685      177  act=685   This fundamental...
-     ...
-[11:24:24] PAGE FULL → creating page 2
-[11:24:24] PAGE CREATED template=style_white
-[11:24:24] PAUSED waiting for page 2
-[11:29:43] FLUSH resumed on page 2
-============================================================
-```
-
-Key fields in the per-page table:
-- **top/bottom**: estimated rect passed to `insertText`
-- **act=**: `actualBottom` read back from `getLastElement` after insertion
-- **act=?**: readback returned null (type mismatch or API returned different element)
-
-### Windows Git Bash Path Gotcha
-
-Git Bash on Windows translates `/sdcard/` to a Windows path (e.g. `D:/Windows Kits/Git/sdcard/`). Use double-slash to suppress this:
-
-```bash
-# Wrong — Git Bash mangles the path
-adb -s device pull /sdcard/INBOX/localsend-plugin.log ./
-
-# Correct
-adb -s device pull //sdcard/INBOX/localsend-plugin.log ./
-adb -s device shell "ls //sdcard/INBOX/"
-```
-
-### Two Log Sources
-
-| Source | How to access | Contains |
-|--------|--------------|----------|
-| `adb logcat -s ReactNativeJS:V` | Live or `-d` snapshot | `console.log/warn/error`, lifecycle events, dequeue, page turn messages |
-| `/sdcard/INBOX/localsend-plugin.log` | `adb pull //sdcard/...` | `FileLogger` events: TextInsert, InsertPos, BoxCalc, TextPreprocess, Crop, Enhance — everything that needs structured key=value data |
-
-`FileLogger.log()` writes to **both** logcat and the file. `FileLogger.logEvent()` / `logTextInserted()` write to **file only** — they won't appear in logcat.
-
----
-
-## §5c Including Third-Party Native Modules (node_change Pattern)
+## §5b Including Third-Party Native Modules (node_change Pattern)
 
 Plugins can bundle third-party React Native libraries that require Android native code (`.java`/`.kt`). The standard approach used by Ratta's own demo is the **`node_change/` directory pattern**.
 
@@ -389,17 +279,17 @@ After a native build, `build/generated/PluginConfig.json` will look like:
 
 ```json
 {
-  "pluginID": "51407189123aea95",
-  "pluginKey": "plugin_sticker",
-  "name": { "en": "Sticker", "zh_CN": "贴纸", "zh_TW": "貼紙", "ja": "ステッカー" },
+  "pluginID": "98blcl1mp5fxamrm",
+  "pluginKey": "my-plugin",
+  "name": { "en": "My Plugin", "zh_CN": "我的插件", "zh_TW": "我的插件", "ja": "マイプラグイン" },
   "desc": { "en": "...", "zh_CN": "..." },
   "iconPath": "/icon.png",
-  "versionName": "0.1.102",
-  "versionCode": "1832",
+  "versionName": "0.1.0",
+  "versionCode": "1",
   "jsMainPath": "index",
   "nativeCodePackage": "/app.npk",
   "reactPackages": [
-    "com.ratta.supernote.plugin.sticker.lib.StickerLibPackage",
+    "com.example.myplugin.MyPluginPackage",
     "org.pgsqlite.SQLitePluginPackage"
   ]
 }
@@ -412,14 +302,14 @@ The `name` and `desc` fields in `PluginConfig.json` support either a plain strin
 ```json
 {
   "name": {
-    "en": "Sticker",
-    "zh_CN": "贴纸",
-    "zh_TW": "貼紙",
-    "ja": "ステッカー"
+    "en": "My Plugin",
+    "zh_CN": "我的插件",
+    "zh_TW": "我的插件",
+    "ja": "マイプラグイン"
   },
   "desc": {
-    "en": "Create and insert stickers.",
-    "zh_CN": "创建并插入贴纸。"
+    "en": "A helpful plugin for notes.",
+    "zh_CN": "一个实用的笔记插件。"
   }
 }
 ```
