@@ -1306,5 +1306,6 @@ function Resolve-ClassesDir {
     if ($candidates -and $candidates.Count -gt 0) { return $candidates[0].FullName }
     return ''
 }
-# Execute main function
+# Execute main functione
 Main
+adb -s 192.168.176.62:33939   push "Y:\Inkling\build\outputs\docscreenshot.snplg" "/storage/emulated/0/MyStyle/plugin_screenshot.snplg" 2>&1
