@@ -2,8 +2,9 @@
  * CropOverlay — Viewfinder-style crop interface.
  *
  * - Black header: Cancel / Confirm
- * - White footer: Full Screen / Add to History
- * - Dashed crop frame with white hollow corners and edge handles centered on border
+ * - White footer: Long Screenshot / Add to History
+ * - Black dotted border with hollow L-shaped corners and hollow edge handles
+ *   (white fill covers dots beneath; black outline visible)
  * - Dimmed regions outside crop box
  */
 
@@ -31,11 +32,12 @@ interface CropOverlayProps {
   imageUri: string;
   originalWidth: number;
   originalHeight: number;
-  onConfirm: (crop: CropResult) => void;
-  onFullScreen: () => void;
-  onAddToHistory: () => void;
+  onConfirm: (crop: CropResult, stayOpen: boolean) => void;
+  onLongScreenshot: () => void;
+  onAddToHistory: (crop: CropResult, stayOpen: boolean) => void;
   onClose: () => void;
   disabled?: boolean;
+  hasStitchSession?: boolean;
 }
 
 const HEADER_HEIGHT = 56;
@@ -43,11 +45,11 @@ const FOOTER_HEIGHT = 56;
 const IMAGE_PADDING = 16;
 const EDGE_HIT_ZONE = 40;
 const MIN_CROP_SIZE = 50;
-const DIM_OPACITY = 0.35;
-const CORNER_SIZE = 20;
-const CORNER_THICKNESS = 3;
+const DIM_OPACITY = 0.45;
+const CORNER_SIZE = 30;
+const CORNER_THICKNESS = 12;
 const HANDLE_LONG = 32;
-const HANDLE_SHORT = 8;
+const HANDLE_SHORT = 12;
 
 type DragMode =
   | 'move' | 'top' | 'bottom' | 'left' | 'right'
@@ -59,12 +61,16 @@ export const CropOverlay: React.FC<CropOverlayProps> = ({
   originalWidth,
   originalHeight,
   onConfirm,
-  onFullScreen,
+  onLongScreenshot,
   onAddToHistory,
   onClose,
   disabled = false,
+  hasStitchSession = false,
 }) => {
   const screen = Dimensions.get('window');
+  const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [stayOpen, setStayOpen] = useState(false);
 
   const imageArea = useMemo(() => {
     const availW = screen.width - IMAGE_PADDING * 2;
@@ -106,8 +112,10 @@ export const CropOverlay: React.FC<CropOverlayProps> = ({
   const cropBoxRef = useRef(cropBox);
   const dragModeRef = useRef<DragMode>(null);
   const dragStartRef = useRef({ x: 0, y: 0, box: { x: 0, y: 0, w: 0, h: 0 } });
+  const imageAreaRef = useRef(imageArea);
 
   useEffect(() => { cropBoxRef.current = cropBox; }, [cropBox]);
+  useEffect(() => { imageAreaRef.current = imageArea; }, [imageArea]);
 
   const detectDragMode = useCallback((touchX: number, touchY: number): DragMode => {
     const box = cropBoxRef.current;
@@ -130,27 +138,27 @@ export const CropOverlay: React.FC<CropOverlayProps> = ({
     return null;
   }, []);
 
-  const clampBox = useCallback((box: { x: number; y: number; w: number; h: number }) => {
+  /** Always read imageArea from ref so PanResponder never uses a stale closure */
+  const clampBoxLive = (box: { x: number; y: number; w: number; h: number }) => {
+    const ia = imageAreaRef.current;
     let { x, y, w, h } = box;
-    w = Math.max(MIN_CROP_SIZE, Math.min(w, imageArea.w));
-    h = Math.max(MIN_CROP_SIZE, Math.min(h, imageArea.h));
-    x = Math.max(imageArea.x, Math.min(x, imageArea.x + imageArea.w - w));
-    y = Math.max(imageArea.y, Math.min(y, imageArea.y + imageArea.h - h));
+    w = Math.max(MIN_CROP_SIZE, Math.min(w, ia.w));
+    h = Math.max(MIN_CROP_SIZE, Math.min(h, ia.h));
+    x = Math.max(ia.x, Math.min(x, ia.x + ia.w - w));
+    y = Math.max(ia.y, Math.min(y, ia.y + ia.h - h));
     return { x, y, w, h };
-  }, [imageArea]);
+  };
 
   const panResponder = useRef(
     PanResponder.create({
-      onStartShouldSetPanResponder: () => !disabled,
-      onMoveShouldSetPanResponder: () => !disabled,
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
       onPanResponderGrant: (evt: GestureResponderEvent) => {
-        if (disabled) return;
         const { pageX, pageY } = evt.nativeEvent;
         dragModeRef.current = detectDragMode(pageX, pageY);
         dragStartRef.current = { x: pageX, y: pageY, box: { ...cropBoxRef.current } };
       },
       onPanResponderMove: (_: GestureResponderEvent, gesture: PanResponderGestureState) => {
-        if (disabled) return;
         const mode = dragModeRef.current;
         if (!mode) return;
         const { dx, dy } = gesture;
@@ -177,28 +185,44 @@ export const CropOverlay: React.FC<CropOverlayProps> = ({
           case 'bottom-right':
             newBox.w = orig.w + dx; newBox.h = orig.h + dy; break;
         }
-        setCropBox(clampBox(newBox));
+        setCropBox(clampBoxLive(newBox));
       },
       onPanResponderRelease: () => { dragModeRef.current = null; },
     })
   ).current;
 
   const getCropResult = useCallback((): CropResult => {
-    const scaleX = originalWidth / imageArea.w;
-    const scaleY = originalHeight / imageArea.h;
-    const relX = cropBox.x - imageArea.x;
-    const relY = cropBox.y - imageArea.y;
+    const ia = imageAreaRef.current;
+    const scaleX = originalWidth / ia.w;
+    const scaleY = originalHeight / ia.h;
+    const relX = cropBox.x - ia.x;
+    const relY = cropBox.y - ia.y;
     const origX = Math.max(0, Math.round(relX * scaleX));
     const origY = Math.max(0, Math.round(relY * scaleY));
     const origW = Math.min(originalWidth - origX, Math.round(cropBox.w * scaleX));
     const origH = Math.min(originalHeight - origY, Math.round(cropBox.h * scaleY));
     return { offsetX: origX, offsetY: origY, width: Math.max(1, origW), height: Math.max(1, origH) };
-  }, [cropBox, imageArea, originalWidth, originalHeight]);
+  }, [cropBox, originalWidth, originalHeight]);
 
   const handleConfirm = useCallback(() => {
     if (disabled) return;
-    onConfirm(getCropResult());
-  }, [disabled, onConfirm, getCropResult]);
+    onConfirm(getCropResult(), stayOpen);
+    if (stayOpen) {
+      if (toastTimer.current) clearTimeout(toastTimer.current);
+      setToastMsg('Queued for Insert');
+      toastTimer.current = setTimeout(() => setToastMsg(null), 1500);
+    }
+  }, [disabled, onConfirm, getCropResult, stayOpen]);
+
+  const handleAddToHistory = useCallback(() => {
+    if (disabled) return;
+    onAddToHistory(getCropResult(), stayOpen);
+    if (stayOpen) {
+      if (toastTimer.current) clearTimeout(toastTimer.current);
+      setToastMsg('Saved to History');
+      toastTimer.current = setTimeout(() => setToastMsg(null), 1500);
+    }
+  }, [disabled, onAddToHistory, getCropResult, stayOpen]);
 
   const dims = useMemo(() => {
     const relCropX = cropBox.x - imageArea.x;
@@ -237,7 +261,7 @@ export const CropOverlay: React.FC<CropOverlayProps> = ({
             width: imageArea.w,
             height: imageArea.h,
           }}
-          resizeMode="contain"
+          resizeMode="stretch"
         />
 
         <View
@@ -276,7 +300,7 @@ export const CropOverlay: React.FC<CropOverlayProps> = ({
           }]}
           pointerEvents="none"
         >
-          {/* L-shaped corner brackets — white, centered on border */}
+          {/* L-shaped corner brackets — hollow (white fill + black border, covers dots) */}
           <View style={[st.cornerH, { top: CO, left: CO }]} />
           <View style={[st.cornerV, { top: CO, left: CO }]} />
           <View style={[st.cornerH, { top: CO, right: CO }]} />
@@ -286,7 +310,7 @@ export const CropOverlay: React.FC<CropOverlayProps> = ({
           <View style={[st.cornerH, { bottom: CO, right: CO }]} />
           <View style={[st.cornerV, { bottom: CO, right: CO }]} />
 
-          {/* Edge midpoint handles — white hollow, centered on border */}
+          {/* Edge midpoint handles — filled black */}
           <View style={[st.edgeMidH, { top: -HANDLE_SHORT / 2, left: '50%', marginLeft: -HANDLE_LONG / 2 }]} />
           <View style={[st.edgeMidH, { bottom: -HANDLE_SHORT / 2, left: '50%', marginLeft: -HANDLE_LONG / 2 }]} />
           <View style={[st.edgeMidV, { left: -HANDLE_SHORT / 2, top: '50%', marginTop: -HANDLE_LONG / 2 }]} />
@@ -296,13 +320,33 @@ export const CropOverlay: React.FC<CropOverlayProps> = ({
 
       {/* Footer */}
       <View style={st.footer}>
-        <Pressable onPress={disabled ? undefined : onFullScreen} style={st.footerBtn}>
-          <Text style={st.footerBtnText}>Full Screen</Text>
+        <Pressable
+          onPress={disabled ? undefined : () => setStayOpen(v => !v)}
+          style={[st.toggleBtn, stayOpen && st.toggleBtnActive]}
+        >
+          <View style={[st.toggleBox, stayOpen && st.toggleBoxChecked]}>
+            {stayOpen && <Text style={st.toggleCheck}>✓</Text>}
+          </View>
+          <Text style={st.toggleLabel}>Multi</Text>
         </Pressable>
-        <Pressable onPress={disabled ? undefined : onAddToHistory} style={st.footerBtn}>
+        <Pressable onPress={disabled ? undefined : onLongScreenshot} style={st.footerBtn}>
+          <Text style={st.footerBtnText}>
+            {hasStitchSession ? '✦ Long Screenshot' : 'Long Screenshot'}
+          </Text>
+        </Pressable>
+        <Pressable onPress={disabled ? undefined : handleAddToHistory} style={st.footerBtn}>
           <Text style={st.footerBtnText}>Add to History</Text>
         </Pressable>
       </View>
+
+      {/* Toast */}
+      {toastMsg && (
+        <View style={st.toastContainer} pointerEvents="none">
+          <View style={st.toast}>
+            <Text style={st.toastText}>{toastMsg}</Text>
+          </View>
+        </View>
+      )}
     </View>
   );
 };
@@ -339,16 +383,48 @@ const st = StyleSheet.create({
     backgroundColor: '#fff',
     borderTopWidth: 1,
     borderTopColor: '#ccc',
+    paddingHorizontal: 8,
   },
   footerBtn: {
-    paddingVertical: 10,
-    paddingHorizontal: 24,
+    paddingVertical: 8,
+    paddingHorizontal: 16,
     borderWidth: 1,
     borderColor: '#000',
     backgroundColor: '#fff',
   },
   footerBtnText: {
     fontSize: 17,
+    color: '#000',
+  },
+
+  toggleBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    gap: 6,
+  },
+  toggleBtnActive: {},
+  toggleBox: {
+    width: 22,
+    height: 22,
+    borderWidth: 2,
+    borderColor: '#000',
+    backgroundColor: '#fff',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  toggleBoxChecked: {
+    backgroundColor: '#000',
+  },
+  toggleCheck: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '700',
+    marginTop: -1,
+  },
+  toggleLabel: {
+    fontSize: 15,
     color: '#000',
   },
 
@@ -373,40 +449,61 @@ const st = StyleSheet.create({
 
   cropFrame: {
     position: 'absolute',
-    borderWidth: 1,
-    borderStyle: 'dashed',
-    borderColor: '#999',
+    borderWidth: 2,
+    borderStyle: 'dotted',
+    borderColor: '#000',
   },
 
+  /* Corners & handles: white opaque fill covers dots, black border outlines them */
   cornerH: {
     position: 'absolute',
     width: CORNER_SIZE,
     height: CORNER_THICKNESS,
     backgroundColor: '#fff',
+    borderWidth: 2,
+    borderColor: '#000',
   },
   cornerV: {
     position: 'absolute',
     width: CORNER_THICKNESS,
     height: CORNER_SIZE,
     backgroundColor: '#fff',
+    borderWidth: 2,
+    borderColor: '#000',
   },
 
   edgeMidH: {
     position: 'absolute',
     width: HANDLE_LONG,
     height: HANDLE_SHORT,
+    backgroundColor: '#fff',
     borderWidth: 2,
-    borderColor: '#fff',
-    backgroundColor: 'transparent',
-    borderRadius: 2,
+    borderColor: '#000',
   },
   edgeMidV: {
     position: 'absolute',
     width: HANDLE_SHORT,
     height: HANDLE_LONG,
+    backgroundColor: '#fff',
     borderWidth: 2,
-    borderColor: '#fff',
-    backgroundColor: 'transparent',
-    borderRadius: 2,
+    borderColor: '#000',
+  },
+
+  toastContainer: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: FOOTER_HEIGHT + 20,
+    alignItems: 'center',
+    zIndex: 100,
+  },
+  toast: {
+    backgroundColor: '#000',
+    paddingHorizontal: 20,
+    paddingVertical: 8,
+  },
+  toastText: {
+    color: '#fff',
+    fontSize: 16,
   },
 });

@@ -24,7 +24,21 @@ export const StagingService = {
     }
   },
 
-  /** Stage for insertion (queued LIFO) and save to history. */
+  /** Stage for insertion queue ONLY (not visible in history). */
+  async stageToQueueOnly(sourceUri: string, opts?: { deleteSrcAfter?: boolean }): Promise<boolean> {
+    try {
+      await StagingService.ensureDir();
+      const src = sourceUri.replace('file://', '');
+      const ts = Date.now();
+      await RNFS.copyFile(src, `${QUEUE_DIR}/${ts}.png`);
+      if (opts?.deleteSrcAfter) {
+        try { await RNFS.unlink(src); } catch (_) {}
+      }
+      return true;
+    } catch (_) { return false; }
+  },
+
+  /** Stage for insertion (queued LIFO) AND save to history. */
   async stage(sourceUri: string, opts?: { deleteSrcAfter?: boolean }): Promise<boolean> {
     try {
       await StagingService.ensureDir();
