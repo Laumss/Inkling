@@ -1309,4 +1309,4 @@ function Resolve-ClassesDir {
 
 # Execute main function
 Main
-adb   push "Y:\A5 X2\docs\supernote-quicktoolbar\build\outputs\Inkling.snplg" "/storage/emulated/0/MyStyle/plugin_localsend.snplg" 2>&1 
+adb push "Y:\Inkling\build\outputs\Inkling.snplg" "/storage/emulated/0/MyStyle/plugin_inkling.snplg" 2>&1 

@@ -354,51 +354,18 @@ Available when `element.type === 800`. **Main layer only.**
 
 ## RecogResultData
 
-**⚠️ Misleading name — this is NOT recognized text.**
-
-Despite the name, `Element.recognizeResult` does **not** contain OCR text output.
-It only carries the bounding-region geometry that the firmware's recognizer used
-to classify the stroke region (e.g. shape vs. text region detection).
+Handwriting recognition result.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `predict_name` | `string` | Region classification label (e.g. `"others"`, `"title"`). NOT the recognized text. |
-| `up_left_point_x` | `number` | Top-left corner x (pixel) |
-| `up_left_point_y` | `number` | Top-left corner y (pixel) |
-| `key_point_x` | `number` | Key/center point x (pixel) |
-| `key_point_y` | `number` | Key/center point y (pixel) |
-| `down_right_point_x` | `number` | Bottom-right corner x (pixel) |
-| `down_right_point_y` | `number` | Bottom-right corner y (pixel) |
-
-**There is NO field on `Element` that exposes the OCR text** — even in a
-real-time-recognition note, the host app's recognized text is held in private
-state and is not serialized into the plugin-visible `Element`.
-
-**About `type=600` Link with `category=1` (trail link)**: SDK type definitions
-suggest that recognized strokes get "promoted" to a trail link with `fullText`
-populated. **Empirically this does not occur for ordinary handwritten content
-in real-time recognition notes** — `getLassoElements()` returns the strokes as
-`type=0` even after the host app has recognized them. The trigger conditions for
-trail-link promotion are unclear (possibly limited to special elements like
-explicit titles/todos). Do not rely on this path.
-
-**To get OCR text from strokes, you MUST call `PluginCommAPI.recognizeElements(elements, pageSize)`.**
-Each call re-runs the firmware OCR engine (~1–2 s for a small stroke set).
-There is no caching API: repeated calls re-run OCR every time.
-This delay is identical for normal notes and real-time recognition notes —
-the plugin cannot benefit from the host app's background recognition.
+| `data` | `RecognData[]` | Recognition candidates |
 
 ### RecognData
 
-`RecognData` is a stroke trajectory sample point (the *input* to OCR, not the
-output). It appears in `Stroke.recognPoints: ElementDataAccessor<RecognData>`.
-
 | Field | Type | Description |
 |-------|------|-------------|
-| `X` | `number` | Sample point x |
-| `Y` | `number` | Sample point y |
-| `Flag` | `number` | Pen-state flag at this sample |
-| `timestamp` | `number` | Relative sample timestamp |
+| `text` | `string` | Recognized text |
+| `score` | `number` | Confidence score |
 
 ---
 

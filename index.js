@@ -1,128 +1,59 @@
-import { AppRegistry, Image, DeviceEventEmitter } from 'react-native';
+/**
+ * Screenshot Crop Plugin — Entry Point
+ *
+ * DOC button (id:100, showType:1): close → screencap → reopen
+ * NOTE button (id:200, showType:0): insert staged image or open history
+ *
+ * @format
+ */
+
+import { AppRegistry, Image, NativeModules, DeviceEventEmitter } from 'react-native';
 import App from './App';
 import { name as appName } from './app.json';
 import { PluginManager } from 'sn-plugin-lib';
-import { ensureInit } from './components/BackgroundService';
-import { setPendingButton } from './pendingButton';
-import { warmupCache, getCachedConfig, getCachedClips, injectClipStatus, loadClips } from './components/ToolPresets';
-import FloatingToolbarBridge from './components/FloatingToolbarBridge';
-import { executeAction } from './components/ToolActions';
-import { setLocale } from './components/i18n';
-import * as PenLasso from './components/PenLasso';
+
+const { ScreenshotModule } = NativeModules;
+
+let pendingButtonId = null;
+let lastCaptureTime = 0;
+const CAPTURE_DEBOUNCE = 3000;
 
 AppRegistry.registerComponent(appName, () => App);
 
 PluginManager.init();
-ensureInit();
-warmupCache();
-
-PluginManager.registerLangListener({
-  onMsg(msg) {
-    const lang = msg.lang || '';
-    const locale = lang.toLowerCase().startsWith('zh') ? 'zh' : 'en';
-    setLocale(locale);
-  },
-});
-
-FloatingToolbarBridge.onTitlePenLassoAction(() => {
-  console.log('[index]: onTitlePenLassoAction → arm pen lasso');
-  PenLasso.arm().catch(e => console.error('[index]: PenLasso.arm error:', e));
-});
-
-FloatingToolbarBridge.onToolTap(async ({ toolAction }) => {
-  console.log('[index]: onToolTap action=', toolAction);
-
-  if (toolAction === 'lasso_send') {
-    FloatingToolbarBridge.openPanel('nativeSendHelper');
-    return;
-  }
-
-  const result = await executeAction(toolAction);
-  console.log('[index]: executeAction result=', result);
-
-  if (typeof result === 'string' &&
-      (result.startsWith('Saved to clip') || (result.startsWith('Clip') && result.endsWith('cleared')))) {
-    const newClips = await loadClips();
-    const config = getCachedConfig();
-    if (config) {
-      FloatingToolbarBridge.updateTools(injectClipStatus(config.tools, newClips, null));
-    }
-  }
-});
-
-FloatingToolbarBridge.onToolLongPress(async ({ toolId }) => {
-  if (toolId.startsWith('clip_')) {
-    const slot = toolId.split('_')[1];
-    await executeAction(`clip_clear_${slot}`);
-    const newClips = await loadClips();
-    const config = getCachedConfig();
-    if (config) {
-      FloatingToolbarBridge.updateTools(injectClipStatus(config.tools, newClips, null));
-    }
-  }
-});
-
-let lastCaptureTime = 0;
-const CAPTURE_DEBOUNCE = 3000;
 
 PluginManager.registerButtonListener({
   onButtonPress(event) {
-    console.log('[index]: button id=', event.id);
-
-    if (event.id === 300) {
+    if (event.id === 100) {
       const now = Date.now();
       if (now - lastCaptureTime < CAPTURE_DEBOUNCE) return;
       lastCaptureTime = now;
-      const { NativeModules } = require('react-native');
-      const { ScreenshotModule } = NativeModules;
-      if (ScreenshotModule) {
-        ScreenshotModule.captureAndReopen(3000).catch(() => {});
-      }
-      setPendingButton(event.id);
-      DeviceEventEmitter.emit('quickToolbarButton', { id: event.id });
-      return;
+      ScreenshotModule.captureAndReopen(3000).catch(() => {});
     }
 
-    if (event.id === 100) {
-      if (FloatingToolbarBridge.isShowingSync()) {
-        console.log('[index]: toolbar visible → destroyAll');
-        FloatingToolbarBridge.destroyAll();
-        return;
-      }
-
-      setPendingButton(event.id);
-      const config = getCachedConfig();
-      const clips = getCachedClips();
-      if (config && clips) {
-        FloatingToolbarBridge.show(injectClipStatus(config.tools, clips, null));
-      } else {
-        const { getAvailableTools } = require('./components/ToolPresets');
-        const defaultClips = { '1': null, '2': null, '3': null, '4': null, '5': null, '6': null };
-        FloatingToolbarBridge.show(injectClipStatus(getAvailableTools().slice(0, 8), defaultClips, null));
-        warmupCache().then(() => {
-          const c = getCachedConfig();
-          const cl = getCachedClips();
-          if (!c || !cl) return;
-          FloatingToolbarBridge.updateTools(injectClipStatus(c.tools, cl, null));
-        });
-      }
-      return;
-    }
-    setPendingButton(event.id);
-    DeviceEventEmitter.emit('quickToolbarButton', { id: event.id });
+    pendingButtonId = event.id;
+    DeviceEventEmitter.emit('screenshotCropButton', { id: event.id });
   },
 });
 
-PluginManager.registerButton(1, ['NOTE'], {
+export const checkPendingButton = () => {
+  const val = pendingButtonId;
+  pendingButtonId = null;
+  return val;
+};
+
+// DOC context: screenshot crop
+PluginManager.registerButton(1, ['DOC'], {
   id: 100,
-  name: 'Inkling',
-  icon: Image.resolveAssetSource(require('./assets/toolbar_icon.png')).uri,
-  showType: 0,
+  name: 'Screenshot Crop',
+  icon: Image.resolveAssetSource(require('./assets/screenshot_crop.png')).uri,
+  showType: 1,
 });
 
-PluginManager.registerButton(1, ['DOC'], {
-  id: 300,
-  name: JSON.stringify({ en: 'Screenshot Crop', zh_CN: '截图裁切' }),
-  icon: Image.resolveAssetSource(require('./assets/toolbar_icon.png')).uri,
+// NOTE context: insert staged or open history
+PluginManager.registerButton(1, ['NOTE'], {
+  id: 200,
+  name: 'Insert Screenshot',
+  icon: Image.resolveAssetSource(require('./assets/screenshot_crop.png')).uri,
   showType: 1,
 });

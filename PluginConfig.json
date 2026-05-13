@@ -1,9 +1,9 @@
 {
-    "pluginID": "Inkling",
-    "pluginKey": "inkling_quicktoolbar",
+    "pluginID": "docscreenshot",
+    "pluginKey": "supernote_docscreenshot",
     "iconPath": "./assets/toolbar_icon.png",
-    "desc": "Floating quick toolbar for Supernote NOTE app.\n\nDraggable overlay with customizable tool buttons, edge snapping, auto horizontal/vertical layout, minimize/expand, and 10 preset slots.\n\nTools: layer switching, visibility toggle, insert images, insert text, and more.",
-    "name": "Inkling",
+    "desc": "Screenshot and insert images",
+    "name": "Doc Screenshot",
     "versionCode": "1",
     "versionName": "0.1.0",
     "jsMainPath": "index",

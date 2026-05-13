@@ -244,25 +244,157 @@ function App(): React.JSX.Element {
 
 ---
 
-## Pattern 6: Native System Floating Window
+## Pattern 6: Native System Floating Window (TYPE_APPLICATION_OVERLAY)
 
-→ See [`floating-window.md`](floating-window.md) for TYPE_APPLICATION_OVERLAY overlay architecture, FloatingBubbleBridge API, foreground detection, and enter-bubble flow.
+**Use case**: Persistent status bubble that survives `closePluginView()` — e.g., background processing indicator.
+
+**Architecture**: Custom Android `NativeModule` → `WindowManager.addView()` with `TYPE_APPLICATION_OVERLAY`. Requires `SYSTEM_ALERT_WINDOW` on package `com.ratta.supernote.pluginhost`.
+
+### FloatingBubbleBridge.ts — API surface
+
+```ts
+import { NativeModules, NativeEventEmitter } from 'react-native';
+const { FloatingBubble } = NativeModules;
+
+// Methods
+FloatingBubbleBridge.isAvailable       // boolean — native module registered?
+FloatingBubbleBridge.show(statusText)  // show or update bubble
+FloatingBubbleBridge.hide()            // remove from screen
+FloatingBubbleBridge.updateText(text)  // update text without recreating
+FloatingBubbleBridge.setPageHeight(h)  // for drag→EMR coordinate mapping
+FloatingBubbleBridge.setScreenHeight(h)
+FloatingBubbleBridge.checkPermission() // → Promise<boolean>
+FloatingBubbleBridge.requestPermission() // open system overlay settings
+
+// Events (via NativeEventEmitter)
+FloatingBubbleBridge.onTap(cb)              // bubble tapped
+FloatingBubbleBridge.onDragEnd(cb)          // cb({screenY, pageY}) — pageY pre-converted to EMR
+FloatingBubbleBridge.onPermissionDenied(cb) // show() called without permission
+```
+
+### Enter bubble flow
+
+```ts
+const ok = await FloatingBubbleBridge.checkPermission();
+if (ok) {
+  FloatingBubbleBridge.setPageHeight(pageHeightEMR);
+  FloatingBubbleBridge.setScreenHeight(screenHeight);
+  FloatingBubbleBridge.show(statusText);
+  setTimeout(() => PluginManager.closePluginView(), 150); // wait for native render
+} else {
+  FloatingBubbleBridge.requestPermission();
+}
+```
+
+### Critical notes
+- Always `FloatingBubbleBridge.hide()` at the top of mount `useEffect` — cleans up stale bubbles from previous session.
+- 150ms delay before `closePluginView()` is required: `show()` dispatches via `handler.post`; closing too early freezes before render.
+- When `onBubbleTap` fires, native has already called `showPluginView()` — do NOT call it again from JS.
+- `pageY` from `onDragEnd` is pre-converted to EMR by the native module.
 
 ---
 
-## Pattern 7: Multi-language Button Names
+## Pattern 7 — Multi-language Button Names
 
-→ See [`i18n.md`](i18n.md) for `registerButton` JSON name format and `editDataTypes` reference.
+The `name` field in `registerButton` is not a plain string — it's an embedded JSON string that displays the matching name based on device language.
+
+```ts
+// index.js
+import { Image } from 'react-native';
+import { PluginManager } from 'sn-plugin-lib';
+
+PluginManager.registerButton(1, [], {
+  id: 100,
+  // name must be a serialized JSON string — NOT a plain string
+  name: JSON.stringify({
+    en: 'Sticker',
+    zh_CN: '贴纸',
+    zh_TW: '貼紙',
+    ja: 'ステッカー',
+  }),
+  icon: Image.resolveAssetSource(require('./assets/icon.png')).uri,
+  color: 0xffffff,
+  bgColor: 0x000000,
+});
+
+// Lasso button with editDataTypes — only shows when specific element types are selected
+PluginManager.registerButton(2, [], {
+  id: 200,
+  name: JSON.stringify({ en: 'New Sticker', zh_CN: '新建贴纸', zh_TW: '新建貼紙', ja: '新しいステッカー' }),
+  icon: Image.resolveAssetSource(require('./assets/icon.png')).uri,
+  bgColor: 0x000000,
+  editDataTypes: [0, 5],  // 0=stroke, 5=geometry — button only shows when these types are lasso-selected
+});
+```
+
+**`editDataTypes` values** (type=2 lasso buttons only):
+
+| Value | Element Type |
+|-------|-------------|
+| 0 | Stroke (trail) |
+| 1 | Title |
+| 2 | Picture |
+| 3 | Text box |
+| 4 | Link |
+| 5 | Geometry |
 
 ---
 
-## Pattern 8: Orientation & Screen Size Adaptation
+## Pattern 8 — Orientation & Screen Size Adaptation
 
-→ See [`floating-window.md`](floating-window.md) for three-listener rotation pattern and device screen width constants.
+Supernote devices can rotate and have different screen sizes. Always handle both.
+
+```tsx
+// StickerPage.tsx
+import React, { useEffect, useRef, useState } from 'react';
+import { DeviceEventEmitter, Dimensions } from 'react-native';
+import { NativePluginManager } from 'sn-plugin-lib';
+
+const MyPage = () => {
+  const [rotation, setRotation] = useState<number | null>(null);
+  const [screenWidth, setScreenWidth]   = useState(Dimensions.get('window').width);
+  const [screenHeight, setScreenHeight] = useState(Dimensions.get('window').height);
+
+  useEffect(() => {
+    // 1. Get initial orientation on mount
+    NativePluginManager.getOrientation().then(r => setRotation(r));
+
+    // 2. Listen for rotation events
+    const rotSub = DeviceEventEmitter.addListener(
+      'plugin_event_rotation',
+      (msg: { rotation: number }) => setRotation(msg.rotation),
+    );
+
+    // 3. Listen for dimension changes
+    const dimSub = Dimensions.addEventListener('change', ({ window: { width, height } }) => {
+      setScreenWidth(width);
+      setScreenHeight(height);
+    });
+
+    return () => {
+      rotSub.remove();
+      dimSub.remove();
+    };
+  }, []);
+
+  // Known device screen widths (portrait):
+  //   A5X  (portrait) : 994  | (landscape) : 1325
+  //   Manta (portrait): 1024 | (landscape) : 1365
+  //   Nomad / A6X      : smaller values
+  const wd = Math.round(screenWidth);
+  const isManta = wd === 1024 || wd === 1365;
+  const isA5X   = wd === 994  || wd === 1325;
+
+  // Apply device-specific styles
+  const styles = isManta ? stylesLG : isA5X ? stylesMD : stylesXS;
+
+  return <View style={{ width: screenWidth, height: screenHeight }}>...</View>;
+};
+```
 
 ---
 
-## Pattern 9: Plugin Lifecycle — Reset State on Close
+## Pattern 9 — Plugin Lifecycle: Reset State on Close
 
 Use `addPluginLifeListener` to reset UI state whenever the plugin panel is closed. Without this, re-opening the panel may show stale UI from a previous session.
 
@@ -288,107 +420,280 @@ useEffect(() => {
 
 ---
 
-## Pattern 10: Language Switching with i18next
+## Pattern 10 — Language Switching with i18next
 
-→ See [`i18n.md`](i18n.md) for `registerLangListener` setup and i18next init config.
+Listen to `registerLangListener` and update i18next dynamically. Note the underscore-to-dash conversion.
+
+```ts
+// src/i18n/index.ts
+import i18n from 'i18next';
+import { initReactI18next } from 'react-i18next';
+import * as RNLocalize from 'react-native-localize';
+import { PluginManager } from 'sn-plugin-lib';
+import en from './locales/en_US.json';
+import zhCN from './locales/zh_CN.json';
+import zhTW from './locales/zh_TW.json';
+import ja from './locales/ja_JP.json';
+
+const resources = {
+  en:    { translation: en },
+  'zh-CN': { translation: zhCN },
+  'zh-TW': { translation: zhTW },
+  ja:    { translation: ja },
+};
+
+// Initial language from device locale
+const systemLang = (RNLocalize.getLocales()[0]?.languageTag ?? 'en');
+
+// Listen for language changes from the host app
+PluginManager.registerLangListener({
+  onMsg: (msg: { lang: string }) => {
+    // msg.lang uses underscores: "zh_CN" → i18next needs dashes: "zh-CN"
+    const nextLng = msg.lang.replace('_', '-');
+    if (nextLng !== i18n.language) {
+      i18n.changeLanguage(nextLng);
+    }
+  },
+});
+
+i18n.use(initReactI18next).init({
+  resources,
+  lng: systemLang,
+  fallbackLng: 'en',
+  interpolation: { escapeValue: false },
+});
+
+export default i18n;
+```
 
 ---
 
-## Pattern 11: SQLite Local Storage
+## Pattern 11 — SQLite Local Storage in a Plugin
 
-→ See [`sqlite.md`](sqlite.md) for `react-native-sqlite-storage` setup, `node_change/` pattern, and sandboxed DB path.
+Plugins can use SQLite for persistent data storage via `react-native-sqlite-storage`. The database path must be prefixed with `plugins/<pluginID>/` to stay within the plugin's sandboxed directory.
+
+### Setup
+
+Place a patched copy of the library under `node_change/react-native-sqlite-storage/` and reference it in `package.json`:
+
+```json
+{
+  "dependencies": {
+    "react-native-sqlite-storage": "file:./node_change/react-native-sqlite-storage"
+  }
+}
+```
+
+The `node_change/` directory holds third-party npm packages that need source-level patches to work inside the plugin environment. The build script (`buildPlugin.sh`) auto-detects native code there and compiles it into `app.npk`.
+
+### Database Initialization
+
+```ts
+// src/db/index.ts
+import SQLite from 'react-native-sqlite-storage';
+import PluginConfig from '../../PluginConfig.json';
+
+// DB path prefix — keeps files inside the plugin's sandbox
+const PLUGIN_ID = PluginConfig.pluginID;
+const DB_LOCATION = `plugins/${PLUGIN_ID}/`;
+
+let db: SQLite.SQLiteDatabase | null = null;
+
+export async function initDB() {
+  db = SQLite.openDatabase(
+    { name: 'my_plugin.db', location: DB_LOCATION },
+    () => console.log('DB opened'),
+    (err) => console.error('DB open error', err),
+  );
+  // Create tables
+  await runSQL(`CREATE TABLE IF NOT EXISTS Items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    path TEXT NOT NULL,
+    created_at INTEGER
+  )`);
+}
+
+export function runSQL(sql: string, args: any[] = []): Promise<{ rows: any[]; insertId?: number }> {
+  return new Promise((resolve, reject) => {
+    db!.transaction(tx => {
+      tx.executeSql(
+        sql, args,
+        (_, result) => resolve({ rows: result.rows.raw(), insertId: result.insertId }),
+        (_, err)    => { reject(err); return false; },
+      );
+    });
+  });
+}
+```
 
 ---
 
-## Pattern 12: i18n Extract-Translate-Convert Workflow
+## Pattern 12 — i18n Extract-Translate-Convert Workflow
 
-→ See [`i18n.md`](i18n.md) for the full three-phase workflow: scan → .lang intermediate → JSON locales → source rewrite.
+**Trigger**: User says "help me internationalize", "extract hardcoded strings", "add multi-language support", "i18n this file", or uploads `.js`/`.tsx` files and asks for translation.
 
 ---
 
-## Pattern 13: Page-Anchored Sequential Text Insertion
-
-**Problem**: `PluginNoteAPI.insertText` always writes to the **currently displayed page**. When inserting text across multiple pages (e.g., receiving streamed text from a phone), the plugin must: (a) create new pages when the current page fills up, (b) wait for the user to flip to the new page before continuing, and (c) detect if the user switches notes or modifies page structure externally.
-
-### Core state machine
+### Overall Flow
 
 ```
-[Active: inserting on targetPage]
-    │
-    ├─ page full → insertNotePage() + reloadFile()
-    │   └─ [Page-Wait: timerRef=null, _isPageWait=true]
-    │       ├─ user flips to targetPage → resume inserting
-    │       ├─ 30s timeout → relocate targetPage to currentPage
-    │       └─ note switched / pages changed externally → stop
-    │
-    ├─ getCurrentPageNum() !== targetPage before insertText
-    │   └─ [Page-Wait] (same as above)
-    │
-    └─ queue empty → [Idle: timerRef=null, _isPageWait=false]
-        └─ new enqueue() → resume inserting
+Source code (.js/.tsx)
+      │
+      ▼ Phase 1 — Scan & extract
+  Intermediate file (.lang)    ← Human-editable intermediate format, key=value lines
+      │
+      ▼ Phase 2 — Convert
+  JSON locale files            ← src/i18n/locales/{zh_CN,en_US,zh_TW,ja_JP}.json
+      │
+      ▼ Phase 3 — Rewrite source
+  Modified source files        ← Hardcoded strings → t('key'), inject useTranslation hook
 ```
 
-### Key principles
+---
 
-1. **Pre-insert page verification**: Before every `insertText`, call `getCurrentPageNum()`. If it doesn't match `targetPage`, return to page-wait state instead of inserting onto the wrong page.
+### Phase 1 — Scan Rules
 
-2. **`enqueue()` must respect page-wait**: When new text arrives during page-wait (`_isPageWait=true`), it goes into the queue but does NOT wake the scheduler. Only the polling loop (`_checkPageAndResume`) can resume after detecting the user has navigated to `targetPage`.
+#### Include (these are UI text)
 
-3. **Page-wait polling** (via `NativePageCheckerBridge` or `setInterval`):
-   ```ts
-   // Simplified logic inside the polling callback:
-   const currentPage = await getCurrentPageNum();
-   if (_isPageWait && currentPage === targetPage) {
-     _isPageWait = false;
-     // wait 1.5s for UI to stabilize, then resume
-     await refreshOccupiedRanges();
-     scheduleNext();
-   }
-   ```
+| Type | Code example | Include? |
+|------|-------------|----------|
+| JSX text node | `<Text>OK</Text>` | Yes |
+| JSX string prop | `placeholder="Enter name"` | Yes (UI-related props only) |
+| state setter call | `setModalTitle('New Group')` | Yes |
+| toast / alert message | `setToastText('Deleted')` | Yes |
+| Parameterized message | `` `${name} was deleted` `` | Yes → convert to `%1$s was deleted` |
 
-4. **Timeout fallback** (30s, not 8s): If the user never flips to the new page, after 30s relocate `targetPage` to wherever the user currently is, refresh occupied ranges, and resume. This prevents permanent deadlock without inserting onto the wrong page.
+**Included prop names**: `placeholder`, `title`, `label`, `message`, `text`, `hint`, `description`, `emptyText`, `helperText`
 
-5. **Note context monitoring** (throttled, every ~5s):
-   ```ts
-   // Inside the polling callback, every N ticks:
-   const filePath = await getCurrentFilePath();
-   if (filePath !== this.notePath) {
-     stop(); onNoteChanged('note_switched', ...); return;
-   }
-   const totalPages = await getNoteTotalPageNum(this.notePath);
-   if (totalPages !== this._expectedTotalPages) {
-     stop(); onNoteChanged('pages_changed', ...); return;
-   }
-   ```
-   When the plugin itself creates pages via `insertNotePage`, increment `_expectedTotalPages` so it isn't treated as an external change.
+#### Exclude (do not translate)
 
-6. **Page annotation logging**: Every `insertText` success should log which page it targeted, for debugging:
-   ```ts
-   FileLogger.logEvent('PageAnnotation',
-     `text inserted to page=${targetPage} currentPage=${currentPage}`);
-   ```
+| Type | Example | Reason |
+|------|---------|--------|
+| Already wrapped in i18n | `t('btn.ok')` | Already handled |
+| console.* content | `console.log('init DB')` | Dev logs |
+| Technical strings | `'plugin_sticker'`, `'sticker_group_'` | Keys/identifiers |
+| File paths / URLs | `'/sticker/'`, `'https://...'` | Not translatable |
+| Pure numbers or symbols | `'0'`, `'/'`, `'\n'` | No meaning |
+| Regex / format templates | `'%'`, `'.sticker'` | Format tokens |
+| English-only technical names | `'ReactNativeJS'`, `'Database OPENED'` | Logs/system |
 
-### Anti-patterns to avoid
+#### Key naming convention
 
-- ❌ Resuming insertion after a fixed timeout (e.g. 8s) without checking `currentPage === targetPage`
-- ❌ Waking the scheduler from `enqueue()` during page-wait state
-- ❌ Assuming `insertText` writes to the page you specify — there is no page parameter
-- ❌ Not detecting note file switches during long-running background insertion
+```
+<screen>.<component>.<element>
+```
+
+| Source | Key example |
+|--------|------------|
+| Common buttons (shared) | `btn.ok`, `btn.cancel`, `btn.close`, `btn.delete`, `btn.rename` |
+| Modal title/content | `modal.create_group.title`, `modal.delete.message` |
+| Toast / Snackbar | `toast.delete_success`, `toast.import_failed` |
+| Error messages | `error.file_not_found`, `error.name_conflict` |
+| Page / Screen | `page.sticker.title`, `page.create.placeholder_name` |
+| Parameterized messages | `toast.progress` = `Completed %1$s%%`, `msg.killed_by` = `%1$s was killed by %2$s` |
+
+**Rules**:
+- All lowercase, `_` between words, `.` for hierarchy
+- Same-meaning strings share one key across pages (e.g. all "OK" buttons use `btn.ok`)
+- Parameters use `%1$s`, `%2$s` (numbered from 1); numeric params also use `%1$s`
 
 ---
 
-## Pattern 14: Pen Lasso — Stroke to Rectangular Lasso
+### .lang intermediate format spec
 
-→ See [`pen-emr.md`](pen-emr.md) for pen lasso flow, coordinate system, and critical ordering constraints.
+```lang
+# === <filename or screen name> ===
+
+# <component / feature block description>
+<key>=<text in current language>
+
+# Parameterized example
+toast.progress=%1$s / %2$s completed
+msg.killed_by=%1$s was killed by %2$s
+```
+
+**Rules**:
+- One entry per line, `key=value`, no spaces around `=`
+- `#` lines are comments noting source file/context for translators
+- Each key appears only once (deduplicate, keep the comment from first occurrence)
+- Blank lines separate feature blocks
+- Don't put translated text in the key (`ok=OK` not `OK=OK`)
 
 ---
 
-## Pattern 15: EMR Pen Disable Architecture & Release
+### Phase 2 — .lang → i18next JSON conversion rules
 
-→ See [`pen-emr.md`](pen-emr.md) for full EMR disable internals, the `PluginApp.showPluginView` state pair, reflection-based release, and debugging methodology.
+| .lang input | JSON output |
+|------------|-----------|
+| `btn.ok=OK` | `"btn.ok": "OK"` |
+| `msg.killed_by=%1$s was killed by %2$s` | `"msg.killed_by": "{{param1}} was killed by {{param2}}"` |
+| `toast.progress=%1$s/%2$s` | `"toast.progress": "{{param1}}/{{param2}}"` |
+| `# comment line` | *(discarded)* |
+| blank line | *(discarded)* |
+
+**Parameter conversion**: `%N$s` / `%N$d` → `{{paramN}}` (N is the numeric index)
+
+**Output file paths** (standard Supernote plugin structure):
+
+```
+src/i18n/locales/
+  zh_CN.json   ← Chinese Simplified (primary language, all values filled)
+  en_US.json   ← English (same keys, values translated to English)
+  zh_TW.json   ← Chinese Traditional
+  ja_JP.json   ← Japanese
+```
+
+When generating: output `zh_CN.json` first (with translations), then for other locales keep all keys but either mark values as `"TODO: <zh_CN value>"` as a translation hint, or have Claude translate them directly.
 
 ---
 
-## Pattern 16: Scoped Pen Disable Around a Pen Operation
+### Phase 3 — Source file rewrite rules
 
-→ See [`pen-emr.md`](pen-emr.md) for the engage/release recipe, dual-pipeline explanation, and timing requirements.
+#### Add hook (top of each component that uses `t()`)
+
+```ts
+// 1. Top-level import (if not already present)
+import { useTranslation } from 'react-i18next';
+
+// 2. First line inside the component function body
+const { t } = useTranslation();
+```
+
+#### Replacement rules
+
+```tsx
+// Before
+<Text>OK</Text>
+<TextInput placeholder="Enter name" />
+setModalTitle('New Group');
+setToastText(`${count} items deleted`);
+
+// After
+<Text>{t('btn.ok')}</Text>
+<TextInput placeholder={t('page.create.placeholder_name')} />
+setModalTitle(t('modal.create_group.title'));
+setToastText(t('toast.delete_count', { param1: count }));
+```
+
+**i18next parameterized call**: `t('key', { param1: val1, param2: val2 })`
+
+---
+
+### Full example (compact)
+
+**Input**: `<Text>Sticker Library</Text>` / `setToastText('Deleted')` / `` setModalMessage(`Delete ${groupName}?`) ``
+
+**Phase 1** → `.lang`: `page.sticker_base.title=Sticker Library` / `toast.delete_success=Deleted` / `modal.delete.message=Delete %1$s?`
+
+**Phase 2** → `en_US.json`: `"modal.delete.message": "Delete {{param1}}?"` (`%N$s` → `{{paramN}}`)
+
+**Phase 3** → source: `{t('page.sticker_base.title')}` / `t('toast.delete_success')` / `t('modal.delete.message', { param1: groupName })`
+
+---
+
+### Claude's steps
+
+1. **Scan**: Find hardcoded strings file by file → 2. **Deduplicate + assign keys** → 3. **Output .lang** → 4. **Output JSON** (primary language + other locales) → 5. **Output modified source** → 6. **Check Pattern 10** (i18next init config)
+
+Single file: .lang + JSON + modified code all in one pass. Full project: merge .lang → JSON → modify files one by one.
