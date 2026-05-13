@@ -218,7 +218,7 @@ import { PluginFileAPI } from 'sn-plugin-lib';
 | `getElementCounts` | `(pageNum, filePath) → APIResponse<number>` | Count elements on a page. |
 | `getElementNumList` | `(pageNum, filePath, elementType) → APIResponse<number[]>` | List element nums by type. |
 | `getElement` | `(filePath, page, numInPage) → APIResponse<Element>` | Get single element by page position. |
-| `getLastElement` | `() → APIResponse<Element>` | Get the last element on the current page. |
+| `getLastElement` | `() → APIResponse<Element>` | Get the last element on the **current displayed page**. Takes no parameters — always operates on the page the user is currently viewing. |
 
 ### Page Management
 
@@ -276,7 +276,7 @@ import { PluginNoteAPI } from 'sn-plugin-lib';
 
 | Method | Signature | Notes |
 |--------|-----------|-------|
-| `insertText` | `(textBox) → APIResponse<boolean>` | Insert text box. Pixel coords for `textRect`. NOTE main layer only. Supports undo/redo. |
+| `insertText` | `(textBox) → APIResponse<boolean>` | Insert text box into the **currently displayed page** (no page parameter). Pixel coords for `textRect`. NOTE main layer only. Supports undo/redo. **⚠️ If the user flips to a different page, insertText writes there — always verify `getCurrentPageNum()` before calling.** |
 | `getLassoText` | `() → APIResponse<TextBox[]>` | Get lasso-selected text boxes. |
 | `modifyLassoText` | `(textBox) → APIResponse<boolean>` | Modify a single lasso-selected text box. |
 

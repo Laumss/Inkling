@@ -1,13 +1,3 @@
-/**
- * CropOverlay — Viewfinder-style crop interface.
- *
- * - Black header: Cancel / Confirm
- * - White footer: Long Screenshot / Add to History
- * - Black dotted border with hollow L-shaped corners and hollow edge handles
- *   (white fill covers dots beneath; black outline visible)
- * - Dimmed regions outside crop box
- */
-
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import {
   View,
@@ -138,7 +128,6 @@ export const CropOverlay: React.FC<CropOverlayProps> = ({
     return null;
   }, []);
 
-  /** Always read imageArea from ref so PanResponder never uses a stale closure */
   const clampBoxLive = (box: { x: number; y: number; w: number; h: number }) => {
     const ia = imageAreaRef.current;
     let { x, y, w, h } = box;
@@ -235,12 +224,10 @@ export const CropOverlay: React.FC<CropOverlayProps> = ({
     };
   }, [cropBox, imageArea]);
 
-  // Offset to place crop frame elements centered on the dashed border
-  const CO = -(CORNER_THICKNESS - 1) / 2;  // corner offset from edge
+  const CO = -(CORNER_THICKNESS - 1) / 2;
 
   return (
     <View style={st.root}>
-      {/* Header */}
       <View style={st.header}>
         <Pressable onPress={disabled ? undefined : onClose} style={st.headerBtn}>
           <Text style={st.headerBtnText}>Cancel</Text>
@@ -250,7 +237,6 @@ export const CropOverlay: React.FC<CropOverlayProps> = ({
         </Pressable>
       </View>
 
-      {/* Image + crop area */}
       <View style={st.imageContainer} {...panResponder.panHandlers}>
         <Image
           source={{ uri: imageUri }}
@@ -274,7 +260,6 @@ export const CropOverlay: React.FC<CropOverlayProps> = ({
           pointerEvents="none"
         />
 
-        {/* Dim overlay */}
         <View
           style={[st.dimContainer, {
             left: imageArea.x,
@@ -290,7 +275,6 @@ export const CropOverlay: React.FC<CropOverlayProps> = ({
           <View style={[st.dim, dims.right]} />
         </View>
 
-        {/* Crop frame */}
         <View
           style={[st.cropFrame, {
             left: cropBox.x,
@@ -300,7 +284,6 @@ export const CropOverlay: React.FC<CropOverlayProps> = ({
           }]}
           pointerEvents="none"
         >
-          {/* L-shaped corner brackets — hollow (white fill + black border, covers dots) */}
           <View style={[st.cornerH, { top: CO, left: CO }]} />
           <View style={[st.cornerV, { top: CO, left: CO }]} />
           <View style={[st.cornerH, { top: CO, right: CO }]} />
@@ -310,7 +293,6 @@ export const CropOverlay: React.FC<CropOverlayProps> = ({
           <View style={[st.cornerH, { bottom: CO, right: CO }]} />
           <View style={[st.cornerV, { bottom: CO, right: CO }]} />
 
-          {/* Edge midpoint handles — filled black */}
           <View style={[st.edgeMidH, { top: -HANDLE_SHORT / 2, left: '50%', marginLeft: -HANDLE_LONG / 2 }]} />
           <View style={[st.edgeMidH, { bottom: -HANDLE_SHORT / 2, left: '50%', marginLeft: -HANDLE_LONG / 2 }]} />
           <View style={[st.edgeMidV, { left: -HANDLE_SHORT / 2, top: '50%', marginTop: -HANDLE_LONG / 2 }]} />
@@ -318,7 +300,6 @@ export const CropOverlay: React.FC<CropOverlayProps> = ({
         </View>
       </View>
 
-      {/* Footer */}
       <View style={st.footer}>
         <Pressable
           onPress={disabled ? undefined : () => setStayOpen(v => !v)}
@@ -339,7 +320,6 @@ export const CropOverlay: React.FC<CropOverlayProps> = ({
         </Pressable>
       </View>
 
-      {/* Toast */}
       {toastMsg && (
         <View style={st.toastContainer} pointerEvents="none">
           <View style={st.toast}>
@@ -454,7 +434,6 @@ const st = StyleSheet.create({
     borderColor: '#000',
   },
 
-  /* Corners & handles: white opaque fill covers dots, black border outlines them */
   cornerH: {
     position: 'absolute',
     width: CORNER_SIZE,
@@ -507,3 +486,4 @@ const st = StyleSheet.create({
     fontSize: 16,
   },
 });
+
