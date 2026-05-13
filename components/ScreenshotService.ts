@@ -1,25 +1,9 @@
-/**
- * ScreenshotService — Reusable screenshot capture & processing service.
- *
- * Provides a clean API for:
- *   1. Capturing the current document page via Supernote SDK
- *   2. Getting the real image dimensions
- *   3. Cropping a region from the captured image
- *
- * Primary strategy: native screencap command (captures e-ink display)
- * Fallback: find the most recent screenshot file on disk
- */
-
 import { Image, NativeModules, Dimensions } from 'react-native';
 import RNFS from 'react-native-fs';
 import ImageEditor from '@react-native-community/image-editor';
 import { PluginManager } from 'sn-plugin-lib';
 
 const { ScreenshotModule } = NativeModules;
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
 
 export interface CropRegion {
   offsetX: number;
@@ -38,48 +22,31 @@ export interface DeviceDimensions {
   height: number;
 }
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
 const SCREENSHOT_DIRS = [
   '/sdcard/SCREENSHOT',
   '/sdcard/EXPORT',
   '/sdcard/INBOX'
 ];
 
-// ---------------------------------------------------------------------------
-// ScreenshotService
-// ---------------------------------------------------------------------------
-
 export const ScreenshotService = {
-  /**
-   * Detect the real device dimensions based on Supernote device type.
-   * Returns { width, height } in pixels.
-   */
+
   async getDeviceDimensions(): Promise<DeviceDimensions> {
     const screen = Dimensions.get('window');
     const landscape = screen.width > screen.height;
 
     try {
       const dt = await PluginManager.getDeviceType();
-      // deviceType 5 = Manta (A5X2 / larger screen)
+
       if (dt === 5) {
         return landscape ? { width: 2560, height: 1920 } : { width: 1920, height: 2560 };
       }
     } catch (_) {}
-    // Default: A5X / A6X2 standard resolution
+
     return landscape ? { width: 1872, height: 1404 } : { width: 1404, height: 1872 };
   },
 
-  /**
-   * Capture the current document page. Strategies:
-   *
-   * 1. Native screencap command (system-level screenshot, captures e-ink display)
-   * 2. Most recent screenshot file on disk (fallback)
-   */
   async capture(): Promise<string> {
-    // Strategy 1: Native screencap via ScreenshotModule
+
     try {
       if (ScreenshotModule) {
         const outPath = await ScreenshotModule.takeScreenshot();
@@ -87,7 +54,6 @@ export const ScreenshotService = {
       }
     } catch (_) {}
 
-    // Strategy 2: Most recent screenshot file (any age)
     type Entry = { path: string; mtime: number };
     const all: Entry[] = [];
 
@@ -119,9 +85,6 @@ export const ScreenshotService = {
     );
   },
 
-  /**
-   * Pick the most recent existing screenshot file (without capturing).
-   */
   async pickLatest(): Promise<string> {
     type Entry = { path: string; mtime: number };
     const all: Entry[] = [];
@@ -152,9 +115,6 @@ export const ScreenshotService = {
     return `file://${all[0].path}`;
   },
 
-  /**
-   * Get the real pixel dimensions of an image at the given URI.
-   */
   getImageSize(uri: string): Promise<ImageSize> {
     return new Promise((resolve, reject) => {
       Image.getSize(
@@ -165,9 +125,6 @@ export const ScreenshotService = {
     });
   },
 
-  /**
-   * Crop a region from the source image and return the URI of the cropped result.
-   */
   async crop(sourceUri: string, region: CropRegion): Promise<string> {
     const result = await ImageEditor.cropImage(sourceUri, {
       offset: { x: region.offsetX, y: region.offsetY },

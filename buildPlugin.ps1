@@ -751,14 +751,14 @@ function Build-AndroidApk {
                 }
             }
             
-            # Execute gradle build
-            $process = Start-Process -FilePath $gradlewPath -ArgumentList 'buildCustomApkDebug' -WorkingDirectory $androidDir -Wait -PassThru -NoNewWindow
-            $buildResult = $process.ExitCode
+            # Execute gradle build (use direct invocation to avoid stdout buffer deadlock)
+            & cmd.exe /c gradlew.bat buildCustomApkDebug
+            $buildResult = $LASTEXITCODE
         }
         elseif (Get-Command 'gradle' -ErrorAction SilentlyContinue) {
             Write-ColorOutput 'Using gradle to execute buildCustomApkDebug task...' 'Green'
-            $process = Start-Process -FilePath 'gradle' -ArgumentList 'buildCustomApkDebug' -Wait -PassThru -NoNewWindow
-            $buildResult = $process.ExitCode
+            & gradle buildCustomApkDebug
+            $buildResult = $LASTEXITCODE
         }
         else {
             Write-ColorOutput 'Neither gradle nor gradlew.bat found, cannot build APK' 'Red'
@@ -1306,6 +1306,7 @@ function Resolve-ClassesDir {
     if ($candidates -and $candidates.Count -gt 0) { return $candidates[0].FullName }
     return ''
 }
-# Execute main functione
+
+# Execute main function
 Main
-adb -s 192.168.176.62:33939   push "Y:\Inkling\build\outputs\docscreenshot.snplg" "/storage/emulated/0/MyStyle/plugin_screenshot.snplg" 2>&1
+adb   push "Y:\A5 X2\docs\supernote-quicktoolbar\build\outputs\Inkling.snplg" "/storage/emulated/0/MyStyle/plugin_localsend.snplg" 2>&1 
