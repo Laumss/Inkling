@@ -1,3 +1,10 @@
+/**
+ * StagingService — Insertion queue + history.
+ *
+ * Queue:   /sdcard/SCREENSHOT/.plugin_staging/queue/{timestamp}.png  (LIFO)
+ * History: /sdcard/SCREENSHOT/.plugin_history/{timestamp}.png
+ */
+
 import RNFS from 'react-native-fs';
 
 const STAGING_DIR = '/sdcard/SCREENSHOT/.plugin_staging';
@@ -17,6 +24,7 @@ export const StagingService = {
     }
   },
 
+  /** Stage for insertion queue ONLY (not visible in history). */
   async stageToQueueOnly(sourceUri: string, opts?: { deleteSrcAfter?: boolean }): Promise<boolean> {
     try {
       await StagingService.ensureDir();
@@ -30,6 +38,7 @@ export const StagingService = {
     } catch (_) { return false; }
   },
 
+  /** Stage for insertion (queued LIFO) AND save to history. */
   async stage(sourceUri: string, opts?: { deleteSrcAfter?: boolean }): Promise<boolean> {
     try {
       await StagingService.ensureDir();
@@ -45,6 +54,7 @@ export const StagingService = {
     } catch (_) { return false; }
   },
 
+  /** Save to history only, not queued for insertion. */
   async saveToHistoryOnly(sourceUri: string): Promise<boolean> {
     try {
       await StagingService.ensureDir();
@@ -55,6 +65,7 @@ export const StagingService = {
     } catch (_) { return false; }
   },
 
+  /** Get the most recent queued image path (LIFO), or null. */
   async getNextQueued(): Promise<string | null> {
     try {
       await StagingService.ensureDir();
@@ -64,12 +75,13 @@ export const StagingService = {
         .sort((a, b) => {
           const ta = parseInt(a.name.replace('.png', ''), 10);
           const tb = parseInt(b.name.replace('.png', ''), 10);
-          return ta - tb;
+          return tb - ta; // newest first
         });
       return pngs.length > 0 ? pngs[0].path : null;
     } catch (_) { return null; }
   },
 
+  /** Remove the most recent queued image after insertion. */
   async dequeue(): Promise<void> {
     const path = await StagingService.getNextQueued();
     if (path) {
@@ -94,6 +106,7 @@ export const StagingService = {
     } catch (_) {}
   },
 
+  /** Get history entries, newest first. */
   async getHistory(): Promise<HistoryEntry[]> {
     try {
       await StagingService.ensureDir();

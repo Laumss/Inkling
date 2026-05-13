@@ -231,18 +231,6 @@ Write-Host "Logs saved to $logFile" -ForegroundColor Cyan
 Get-Content $logFile | Select-Object -Last 50
 ```
 
-### Native Code (Kotlin/Java) Deployment Pitfalls
-
-When modifying Kotlin/Java files (e.g. `FloatingToolbarModule.kt`, `LocalSendModule.kt`, `NativeImagePanel.kt`):
-
-1. **Gradle incremental build may skip recompilation** — if only Kotlin files changed but Gradle doesn't detect it, the old `.class` files remain in the APK. **Fix**: run `cd android && .\gradlew.bat clean` before building, then `.\buildPlugin.ps1`.
-
-2. **Plugin host process caches old native code** — pushing a new `.snplg` to the device does NOT force the plugin host process (`com.ratta.supernote.pluginhost`) to reload native code. The old dex stays in memory until the process restarts. **Fix**: after pushing the snplg, run `adb shell am force-stop com.ratta.supernote.pluginhost`, then reopen the plugin from the Note app sidebar.
-
-3. **How to verify new native code is running** — check the PID in logcat. If it changed after force-stop, the new code is loaded. Also add `Log.i(TAG, ...)` lines in your Kotlin code and confirm they appear in logcat.
-
-4. **JS-only changes don't need force-stop** — changes to `.tsx`/`.ts` files are bundled into `Inkling.bundle` which is reloaded each time the plugin view opens. Only native (Kotlin/Java) changes require the process restart.
-
 ### Common Error Patterns in Logs
 
 | Log Message Pattern | Likely Cause | Fix |

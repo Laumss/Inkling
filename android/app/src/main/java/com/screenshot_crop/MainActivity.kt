@@ -1,4 +1,4 @@
-package com.supernote_quicktoolbar
+package com.screenshot_crop
 
 import com.facebook.react.ReactActivity
 import com.facebook.react.ReactActivityDelegate
@@ -6,8 +6,7 @@ import com.facebook.react.defaults.DefaultNewArchitectureEntryPoint.fabricEnable
 import com.facebook.react.defaults.DefaultReactActivityDelegate
 
 class MainActivity : ReactActivity() {
-
-    override fun getMainComponentName(): String = "supernote_quicktoolbar"
+    override fun getMainComponentName(): String = "screenshot_crop"
 
     override fun createReactActivityDelegate(): ReactActivityDelegate =
         DefaultReactActivityDelegate(this, mainComponentName, fabricEnabled)

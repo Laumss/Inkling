@@ -1,4 +1,4 @@
-package com.supernote_quicktoolbar
+package com.screenshot_crop
 
 import android.content.Intent
 import android.graphics.Bitmap
@@ -15,6 +15,20 @@ import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 
+/**
+ * Native module for screenshot capture.
+ *
+ * captureAndReopen():
+ *   1. Saves the current Activity's Intent (for restart)
+ *   2. Starts a background thread (survives bridge destruction)
+ *   3. Thread finishes the Activity (closes plugin view)
+ *   4. Thread takes screencap (document is now visible)
+ *   5. Thread waits delayMs (e-ink settle)
+ *   6. Thread restarts the plugin Activity
+ *   7. On next mount, JS calls getPendingPath() to retrieve the screenshot
+ *
+ * pendingPath is a companion object (static) so it survives bridge restarts.
+ */
 class ScreenshotModule(reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext) {
 
@@ -23,74 +37,94 @@ class ScreenshotModule(reactContext: ReactApplicationContext) :
     companion object {
         @Volatile
         var pendingPath: String? = null
-
-        @Volatile
-        var pendingLassoPath: String? = null
     }
 
     private val cacheDir: String
         get() = reactApplicationContext.cacheDir.absolutePath
 
+    /** Simple screencap — call when plugin view is already closed. */
     @ReactMethod
     fun takeScreenshot(promise: Promise) {
-        android.util.Log.i("ScreenshotModule", "[LASSO-DBG/Kt] takeScreenshot invoked")
         Thread {
             try {
                 val ts = System.currentTimeMillis()
                 val outPath = "$cacheDir/screenshot_crop_$ts.png"
-                android.util.Log.i("ScreenshotModule", "[LASSO-DBG/Kt] takeScreenshot running screencap -> $outPath")
                 val process = Runtime.getRuntime().exec(arrayOf("screencap", "-p", outPath))
                 val exitCode = process.waitFor()
                 val file = File(outPath)
-                android.util.Log.i("ScreenshotModule", "[LASSO-DBG/Kt] screencap exit=$exitCode size=${file.length()}")
                 if (exitCode == 0 && file.exists() && file.length() > 500) {
                     promise.resolve(outPath)
                 } else {
                     promise.reject("SCREENCAP_FAILED", "exit=$exitCode size=${file.length()}")
                 }
             } catch (e: Exception) {
-                android.util.Log.e("ScreenshotModule", "[LASSO-DBG/Kt] takeScreenshot EX: ${e.message}", e)
                 promise.reject("SCREENCAP_ERROR", e.message, e)
             }
         }.also { it.isDaemon = false }.start()
     }
 
+    /**
+     * Close plugin view → screencap → wait → reopen plugin view.
+     * Runs entirely in a background thread so it survives bridge destruction.
+     * The screenshot path is stored in pendingPath (static) for the next JS instance.
+     */
     @ReactMethod
     fun captureAndReopen(delayMs: Int, promise: Promise) {
         val appContext = reactApplicationContext.applicationContext
         val cachePath = cacheDir
+
+        // Resolve promise immediately (bridge may die soon)
         promise.resolve(true)
 
         Thread {
             try {
+                // Step 0: Wait for activity to become available (max 5s)
                 var activity = currentActivity
                 if (activity == null) {
+                    android.util.Log.i("ScreenshotModule", "Waiting for activity...")
                     for (i in 0 until 50) {
                         Thread.sleep(100)
                         activity = currentActivity
                         if (activity != null) break
                     }
                 }
-                if (activity == null) return@Thread
+                if (activity == null) {
+                    android.util.Log.e("ScreenshotModule", "No activity after waiting 5s")
+                    return@Thread
+                }
 
+                // Save intent before finishing — used to restart the plugin view
                 val restartIntent = Intent(activity.intent).apply {
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
 
+                // Step 1: Close the plugin view
+                android.util.Log.i("ScreenshotModule", "Finishing activity...")
                 activity.finish()
+
+                // Step 2: Wait for activity close + e-ink refresh
                 Thread.sleep(800)
 
+                // Step 3: Take screenshot
                 val ts = System.currentTimeMillis()
                 val outPath = "$cachePath/screenshot_crop_$ts.png"
+                android.util.Log.i("ScreenshotModule", "Taking screencap: $outPath")
                 val proc = Runtime.getRuntime().exec(arrayOf("screencap", "-p", outPath))
                 val exitCode = proc.waitFor()
                 val file = File(outPath)
 
                 if (exitCode == 0 && file.exists() && file.length() > 500) {
                     pendingPath = outPath
+                    android.util.Log.i("ScreenshotModule", "Screenshot saved: $outPath")
+                } else {
+                    android.util.Log.e("ScreenshotModule", "Screencap failed: exit=$exitCode size=${file.length()}")
                 }
 
+                // Step 4: Wait the requested delay (e-ink settle time)
                 Thread.sleep(delayMs.toLong())
+
+                // Step 5: Restart the plugin Activity
+                android.util.Log.i("ScreenshotModule", "Restarting plugin activity...")
                 appContext.startActivity(restartIntent)
 
             } catch (e: Exception) {
@@ -99,36 +133,30 @@ class ScreenshotModule(reactContext: ReactApplicationContext) :
         }.also { it.isDaemon = false }.start()
     }
 
+    /** Called by JS on mount to retrieve the pre-captured screenshot path. */
     @ReactMethod
     fun getPendingPath(promise: Promise) {
         val path = pendingPath
         pendingPath = null
+        android.util.Log.i("ScreenshotModule", "getPendingPath: $path")
         promise.resolve(path)
     }
 
-    @ReactMethod(isBlockingSynchronousMethod = true)
-    fun hasPendingPath(): Boolean = pendingPath != null
-
-    @ReactMethod
-    fun setPendingLassoPath(path: String?) {
-        android.util.Log.i("ScreenshotModule", "[LASSO-DBG/Kt] setPendingLassoPath: $path (prev=$pendingLassoPath)")
-        pendingLassoPath = path
-    }
-
-    @ReactMethod
-    fun getPendingLassoPath(promise: Promise) {
-        val path = pendingLassoPath
-        android.util.Log.i("ScreenshotModule", "[LASSO-DBG/Kt] getPendingLassoPath returning: $path")
-        pendingLassoPath = null
-        promise.resolve(path)
-    }
-
-    @ReactMethod
-    fun peekPendingLassoPath(promise: Promise) {
-        android.util.Log.i("ScreenshotModule", "[LASSO-DBG/Kt] peekPendingLassoPath: $pendingLassoPath")
-        promise.resolve(pendingLassoPath)
-    }
-
+    /**
+     * Composite two images into one based on stitch parameters.
+     *
+     * @param paramsJson JSON string with structure:
+     *   {
+     *     "direction": "vertical"|"horizontal",
+     *     "overlap": number (pixels),
+     *     "topLayerIndex": 0|1,
+     *     "images": [
+     *       { "path": string, "width": int, "height": int,
+     *         "cropTop": float, "cropBottom": float, "cropLeft": float, "cropRight": float },
+     *       { ... }
+     *     ]
+     *   }
+     */
     @ReactMethod
     fun compositeImages(paramsJson: String, promise: Promise) {
         Thread {
@@ -164,10 +192,12 @@ class ScreenshotModule(reactContext: ReactApplicationContext) :
                     )
                 }
 
+                // Decode bitmaps
                 val bitmaps = imgs.map { img ->
                     BitmapFactory.decodeFile(img.path) ?: throw Exception("Failed to decode ${img.path}")
                 }
 
+                // Calculate cropped source rects
                 val srcRects = imgs.mapIndexed { i, img ->
                     Rect(
                         (img.width * img.cropLeft).toInt(),
@@ -180,6 +210,7 @@ class ScreenshotModule(reactContext: ReactApplicationContext) :
                 val effW = srcRects.map { it.width() }
                 val effH = srcRects.map { it.height() }
 
+                // Calculate output canvas size
                 val canvasW: Int
                 val canvasH: Int
                 if (direction == "vertical") {
@@ -195,10 +226,13 @@ class ScreenshotModule(reactContext: ReactApplicationContext) :
                     return@Thread
                 }
 
+                android.util.Log.i("ScreenshotModule", "Compositing: ${canvasW}x${canvasH}, overlap=$overlap, dir=$direction")
+
                 val result = Bitmap.createBitmap(canvasW, canvasH, Bitmap.Config.ARGB_8888)
                 val canvas = Canvas(result)
                 val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
 
+                // Destination rects for each image
                 val dstRects = Array(2) { RectF() }
                 if (direction == "vertical") {
                     dstRects[0].set(0f, 0f, effW[0].toFloat(), effH[0].toFloat())
@@ -208,23 +242,28 @@ class ScreenshotModule(reactContext: ReactApplicationContext) :
                     dstRects[1].set((effW[0] - overlap).toFloat(), 0f, (effW[0] - overlap + effW[1]).toFloat(), effH[1].toFloat())
                 }
 
+                // Draw in layer order: bottom first, top second
                 val drawOrder = if (topLayerIndex == 0) intArrayOf(1, 0) else intArrayOf(0, 1)
                 for (idx in drawOrder) {
                     canvas.drawBitmap(bitmaps[idx], srcRects[idx], dstRects[idx], paint)
                 }
 
+                // Save output
                 val ts = System.currentTimeMillis()
                 val outPath = "$cacheDir/stitch_result_$ts.png"
                 FileOutputStream(outPath).use { fos ->
                     result.compress(Bitmap.CompressFormat.PNG, 100, fos)
                 }
 
+                // Clean up
                 result.recycle()
                 bitmaps.forEach { it.recycle() }
 
+                android.util.Log.i("ScreenshotModule", "Composite saved: $outPath")
                 promise.resolve(outPath)
 
             } catch (e: Exception) {
+                android.util.Log.e("ScreenshotModule", "compositeImages error: ${e.message}", e)
                 promise.reject("COMPOSITE_ERROR", e.message, e)
             }
         }.also { it.isDaemon = false }.start()

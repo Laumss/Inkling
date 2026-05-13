@@ -1,3 +1,10 @@
+/**
+ * StitchSession — Persistent long-screenshot session.
+ *
+ * Stores image paths and stitch parameters across plugin restarts.
+ * Session file: /sdcard/SCREENSHOT/.plugin_staging/stitch_session.json
+ */
+
 import RNFS from 'react-native-fs';
 
 const STAGING_DIR = '/sdcard/SCREENSHOT/.plugin_staging';
@@ -5,23 +12,23 @@ const SESSION_FILE = `${STAGING_DIR}/stitch_session.json`;
 const STITCH_IMAGES_DIR = `${STAGING_DIR}/stitch_images`;
 
 export interface ImageCrop {
-  cropTop: number;
-  cropBottom: number;
-  cropLeft: number;
-  cropRight: number;
+  cropTop: number;    // 0-1 fraction trimmed from top
+  cropBottom: number; // 0-1 fraction trimmed from bottom
+  cropLeft: number;   // 0-1 fraction trimmed from left
+  cropRight: number;  // 0-1 fraction trimmed from right
 }
 
 export interface StitchImage {
-  path: string;
-  width: number;
-  height: number;
-  crop: ImageCrop;
+  path: string;       // absolute file path
+  width: number;      // original pixel width
+  height: number;     // original pixel height
+  crop: ImageCrop;    // per-image crop
 }
 
 export interface StitchParams {
   direction: 'vertical' | 'horizontal';
-  overlap: number;
-  topLayerIndex: number;
+  overlap: number;        // pixels of overlap between images (in original image coords)
+  topLayerIndex: number;  // 0 or 1: which image is on top in overlap zone
 }
 
 export interface StitchSessionData {
@@ -33,7 +40,7 @@ export interface StitchSessionData {
 const DEFAULT_PARAMS: StitchParams = {
   direction: 'vertical',
   overlap: 100,
-  topLayerIndex: 1,
+  topLayerIndex: 1, // newer image on top by default
 };
 
 const DEFAULT_CROP: ImageCrop = {
@@ -50,6 +57,7 @@ export const StitchSession = {
     }
   },
 
+  /** Check if there's an active stitch session. */
   async hasActiveSession(): Promise<boolean> {
     try {
       return await RNFS.exists(SESSION_FILE);
@@ -58,12 +66,13 @@ export const StitchSession = {
     }
   },
 
+  /** Load the current session, or null if none. */
   async load(): Promise<StitchSessionData | null> {
     try {
       if (!(await RNFS.exists(SESSION_FILE))) return null;
       const json = await RNFS.readFile(SESSION_FILE, 'utf8');
       const data = JSON.parse(json) as StitchSessionData;
-
+      // Validate images still exist
       for (const img of data.images) {
         if (!(await RNFS.exists(img.path))) return null;
       }
@@ -73,9 +82,11 @@ export const StitchSession = {
     }
   },
 
+  /** Start a new session with the first image. */
   async startSession(imagePath: string, width: number, height: number): Promise<StitchSessionData> {
     await StitchSession.ensureDir();
 
+    // Copy image to stitch_images dir for persistence
     const ts = Date.now();
     const destPath = `${STITCH_IMAGES_DIR}/${ts}_0.png`;
     const src = imagePath.replace('file://', '');
@@ -96,20 +107,15 @@ export const StitchSession = {
     return session;
   },
 
+  /** Add a second image to the session and return the updated session. */
   async addImage(imagePath: string, width: number, height: number): Promise<StitchSessionData | null> {
     const session = await StitchSession.load();
     if (!session) return null;
 
     await StitchSession.ensureDir();
 
-    if (session.images.length >= 2) {
-      const oldPath = session.images[1].path;
-      try { await RNFS.unlink(oldPath); } catch (_) {}
-      session.images.splice(1);
-    }
-
     const ts = Date.now();
-    const destPath = `${STITCH_IMAGES_DIR}/${ts}_1.png`;
+    const destPath = `${STITCH_IMAGES_DIR}/${ts}_${session.images.length}.png`;
     const src = imagePath.replace('file://', '');
     await RNFS.copyFile(src, destPath);
 
@@ -120,23 +126,11 @@ export const StitchSession = {
       crop: { ...DEFAULT_CROP },
     });
 
-    session.params = { ...DEFAULT_PARAMS };
-
     await RNFS.writeFile(SESSION_FILE, JSON.stringify(session), 'utf8');
     return session;
   },
 
-  async keepFirstOnly(): Promise<void> {
-    const session = await StitchSession.load();
-    if (!session || session.images.length < 2) return;
-
-    try { await RNFS.unlink(session.images[1].path); } catch (_) {}
-    session.images.splice(1);
-    session.params = { ...DEFAULT_PARAMS };
-
-    await RNFS.writeFile(SESSION_FILE, JSON.stringify(session), 'utf8');
-  },
-
+  /** Update stitch parameters. */
   async updateParams(params: Partial<StitchParams>): Promise<void> {
     const session = await StitchSession.load();
     if (!session) return;
@@ -144,6 +138,7 @@ export const StitchSession = {
     await RNFS.writeFile(SESSION_FILE, JSON.stringify(session), 'utf8');
   },
 
+  /** Update crop for a specific image. */
   async updateImageCrop(index: number, crop: Partial<ImageCrop>): Promise<void> {
     const session = await StitchSession.load();
     if (!session || index >= session.images.length) return;
@@ -151,17 +146,19 @@ export const StitchSession = {
     await RNFS.writeFile(SESSION_FILE, JSON.stringify(session), 'utf8');
   },
 
+  /** Save entire session data. */
   async save(session: StitchSessionData): Promise<void> {
     await StitchSession.ensureDir();
     await RNFS.writeFile(SESSION_FILE, JSON.stringify(session), 'utf8');
   },
 
+  /** Clear the session and clean up images. */
   async clearSession(): Promise<void> {
     try {
       if (await RNFS.exists(SESSION_FILE)) {
         await RNFS.unlink(SESSION_FILE);
       }
-
+      // Clean up stitch images
       if (await RNFS.exists(STITCH_IMAGES_DIR)) {
         const files = await RNFS.readDir(STITCH_IMAGES_DIR);
         for (const f of files) {
