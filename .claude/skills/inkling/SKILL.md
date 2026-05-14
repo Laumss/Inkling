@@ -15,8 +15,12 @@ You are an expert Supernote plugin developer. Supernote plugins extend the NOTE 
 |------|-----------|
 | New project / environment setup | `references/setup-and-build.md` |
 | Any API call or type question | `references/api-quick-ref.md` |
-| Common recipes (insert text, lasso ops, coordinate conversion, native overlay, etc.) | `references/patterns.md` |
+| Common recipes (insert text, lasso ops, coordinate conversion, pending button, etc.) | `references/patterns.md` |
 | Type definitions (Element, Stroke, Geometry, TextBox, etc.) | `references/types.md` |
+| Floating window overlay, screen adaptation | `references/floating-window.md` |
+| i18n, multi-language buttons, string extraction workflow | `references/i18n.md` |
+| Pen lasso, EMR pen disable, scoped pen lock | `references/pen-emr.md` |
+| SQLite local storage in plugins | `references/sqlite.md` |
 
 For complex tasks, read multiple files. The reference files contain the **authoritative API signatures and constraints** — do not rely on memory alone.
 
@@ -130,6 +134,21 @@ What do you need to do?
 ├─ Show a persistent overlay that survives closePluginView()
 │  → Native Floating Window (references/patterns.md Pattern 6)
 │
+├─ Disable the EMR pen during a plugin-driven gesture (e.g. pen lasso on overlay)
+│  so strokes don't leak into the .note file
+│  → Scoped Pen Disable (references/patterns.md Pattern 16) + see Pattern 15 for
+│    architecture and the PluginApp.showPluginView reflection release recipe
+│
+├─ Insert text sequentially across pages (e.g. streamed from phone/AI)
+│  → Page-Anchored Sequential Insertion (references/patterns.md Pattern 13)
+│
+├─ OCR-recognise handwritten strokes / text boxes into a string
+│  → PluginCommAPI.recognizeElements(elements, pageSize) (references/api-quick-ref.md §2)
+│     1. getLassoElements() to get the Element array
+│     2. getCurrentFilePath() + getCurrentPageNum() + getPageSize(path, page) for the full page size
+│     3. recognizeElements(elements, pageSize) → APIResponse<string>
+│     4. cancelRecognize() to abort a long-running recognition if needed
+│
 └─ Extract hardcoded strings / add multi-language support (i18n)
    → i18n Extract-Translate-Convert workflow (references/patterns.md Pattern 12)
       Step 1: scan files → .lang intermediate format
@@ -150,17 +169,27 @@ What do you need to do?
 9. **File-level API without saving**: Call `PluginNoteAPI.saveCurrentNote()` before `insertElements`/`modifyElements`/`replaceElements` to persist the in-memory cache first; otherwise data may be inconsistent.
 10. **PluginFileAPI param order is inconsistent**: Read-only queries put page first: `getElements(page, filePath)`, `getElementCounts(pageNum, filePath)`, `getElementNumList(pageNum, filePath, type)`. Write operations put filePath first: `insertElements(filePath, page, elements[])`, `modifyElements(filePath, page, …)`, `replaceElements(…)`, `deleteElements(…)`, `getElement(filePath, page, numInPage)`. Always check the signature.
 11. **Lasso button always shows main screen**: If `registerButtonListener` is set up inside `App.tsx`, there's a timing gap where the button event fires before the listener is registered. Use the **pending button ID** pattern (Pattern 5): store the pressed ID as a module-level variable in `index.js`, then consume it with `checkPendingButton()` as the first thing in the mount `useEffect`.
-12. **Native floating window requires explicit permission**: `TYPE_APPLICATION_OVERLAY` needs `SYSTEM_ALERT_WINDOW`. The package to grant is `com.ratta.supernote.pluginhost` (not the plugin's own package). Always `checkPermission()` before `show()` and fall back to `requestPermission()` if denied.
-13. **closePluginView() before native bubble renders**: After calling `FloatingBubbleBridge.show()`, wait ~150ms before `closePluginView()`. The native side dispatches via `handler.post` on the Android main thread; closing too early freezes the process before the view renders.
-14. **onBubbleTap: showPluginView already called**: When `onBubbleTap` fires in JS, the native side has already called `showPluginView()`. Do not call it again from JS — just update screen state.
-15. **Stale bubble on plugin view open**: Always call `FloatingBubbleBridge.hide()` at the top of the mount `useEffect`. Without this, a bubble from a previous session may linger on screen while the panel is already open.
-16. **`registerLangListener` uses `onMsg` not `onLangChange`**: The callback is `onMsg: (msg) => {}` and language code is at `msg.lang`. The lang value uses underscores (`zh_CN`) — convert with `msg.lang.replace('_', '-')` before passing to i18next.
-17. **`registerButton` name must be a JSON string for localization**: Passing a plain string means the button always shows that literal text regardless of device language. For multi-language support, serialize an object: `name: JSON.stringify({en: 'Sticker', zh_CN: '贴纸', ...})`.
-18. **`onButtonPress` event has a `pressEvent` field**: For lasso toolbar buttons, `event.pressEvent === 3`. Don't rely solely on `id` — check `pressEvent` to confirm the event type before routing.
-19. **`NativePluginManager` vs `PluginManager`**: Two different modules. `NativePluginManager.getPluginDirPath()` returns the plugin's private **data directory** (use for databases, sticker files). Cache this value — it's a slow async native call.
-20. **Rotation needs three listeners**: Use `NativePluginManager.getOrientation()` for initial value on mount, `DeviceEventEmitter.addListener('plugin_event_rotation', ...)` for rotation events, and `Dimensions.addEventListener('change', ...)` for updated pixel dimensions. All three are needed for correct layout.
-21. **`generateStickerThumbnail` takes a Size object**: The third argument is `{width, height}`, not two separate numbers. Call `PluginCommAPI.getStickerSize(path)` first.
-22. **`saveStickerByLasso` takes a full file path**: The argument is the destination file path (e.g. `pluginDir + '/sticker/my.sticker'`), not just a name.
+12. **Native floating window pitfalls**: Permission, render timing, tap handling, stale bubbles, and foreground detection — see Pattern 6 in `references/patterns.md` for all details.
+13. **`registerLangListener` uses `onMsg` not `onLangChange`**: The callback is `onMsg: (msg) => {}` and language code is at `msg.lang`. The lang value uses underscores (`zh_CN`) — convert with `msg.lang.replace('_', '-')` before passing to i18next.
+14. **`registerButton` name must be a JSON string for localization**: Passing a plain string means the button always shows that literal text regardless of device language. For multi-language support, serialize an object: `name: JSON.stringify({en: 'Sticker', zh_CN: '贴纸', ...})`.
+15. **`onButtonPress` event has a `pressEvent` field**: For lasso toolbar buttons, `event.pressEvent === 3`. Don't rely solely on `id` — check `pressEvent` to confirm the event type before routing.
+16. **`NativePluginManager` vs `PluginManager`**: Two different modules. `NativePluginManager.getPluginDirPath()` returns the plugin's private **data directory** (use for databases, sticker files). Cache this value — it's a slow async native call.
+17. **Rotation needs three listeners**: Use `NativePluginManager.getOrientation()` for initial value on mount, `DeviceEventEmitter.addListener('plugin_event_rotation', ...)` for rotation events, and `Dimensions.addEventListener('change', ...)` for updated pixel dimensions. All three are needed for correct layout.
+18. **`generateStickerThumbnail` takes a Size object**: The third argument is `{width, height}`, not two separate numbers. Call `PluginCommAPI.getStickerSize(path)` first.
+19. **`saveStickerByLasso` takes a full file path**: The argument is the destination file path (e.g. `pluginDir + '/sticker/my.sticker'`), not just a name.
+20. **`PluginNoteAPI.insertText` always targets the current displayed page**: There is no page parameter — text is inserted into whichever page the user is currently viewing. If your plugin tracks a `targetPage` for sequential insertion, you **must** call `PluginCommAPI.getCurrentPageNum()` before each `insertText` and verify the user is on the expected page. Inserting without this check will silently place text on the wrong page.
+21. **`getLastElement()` takes no parameters**: The official signature is `getLastElement() → APIResponse<Element>`. It returns the last element of the **currently displayed page**. Do not pass `(page, filePath)` — those parameters are not part of the API.
+22. **Sequential text insertion across pages needs page-wait**: After `insertNotePage()` + `reloadFile()`, do NOT immediately resume inserting. The user must flip to the new page first (since `insertText` targets the displayed page). Use a polling loop (`getCurrentPageNum`) to detect when the user arrives on the target page, then resume. A naïve timeout fallback that blindly resumes will insert text onto the wrong page.
+23. **Note file switch detection**: If your plugin does background work (text insertion, etc.), periodically call `getCurrentFilePath()` to verify the user hasn't switched to a different note. The SDK does not emit a "file changed" event — you must poll.
+24. **External page count changes**: If the user manually adds or removes pages while your plugin tracks a `targetPage`, page indices shift and your target becomes stale. Periodically call `getNoteTotalPageNum(path)` and compare against your expected count to detect external changes.
+25. **`recognizeElements` needs full page size, not lasso rect**: Pass the result of `getPageSize(filePath, pageNum)` as the `size` argument — NOT the lasso bounding rect. Passing the lasso rect causes the firmware to throw `IllegalArgumentException: getRealMaxX, unknown pageSize` and recognition fails entirely.
+26. **`recognizeElements` only supports strokes and text boxes**: Other element types (geometry, pictures, five-stars, links) are silently ignored. Filter your element list or check `getLassoElementTypeCounts()` before calling to avoid confusing empty results.
+27. **`PluginManager.closePluginView()` does NOT fire `notifyClientPluginState(0)`**: The SDK skips the state-0 notification when transitioning the PluginApp to `stop`. Anything the note app does in response to `onPluginState(state=1)` (most importantly `sendFullScreenDisableArea` for the EMR pen lock) will **not be reversed** by `closePluginView` alone. To release such state, first call `PluginApp.showPluginView(0)` by reflection (see Pattern 15), then `closePluginView` for cleanup.
+28. **`NativePluginManager.showPluginView` is no-arg only — defaults to `showType=1`**: There is no public int-arg overload exposed; calling it always opens the plugin view full-screen and triggers `notifyPluginState(1)`. The int-arg overload exists on `PluginApp` itself and is reachable by reflection: `NativePluginManager.pluginApp` field → `pluginApp.showPluginView(0|1)`. This is the only way to programmatically toggle between state:0 and state:1 without tearing down the plugin view.
+29. **`setFullAuto(false)` does NOT cancel a `state:1`-triggered full-screen pen disable**: They are independent code paths in drawAPP. `setFullAuto` writes drawAPP's `fullAuto` flag, while `state:1` runs `HandWriteClient.sendFullScreenDisableArea` which writes the rect list. Only an explicit `state:0` event (which triggers `disableAreaChanged → sendDisableAreaInfo`) will revoke a `sendFullScreenDisableArea` rect. Use `setFullAuto(false)` only as defensive coverage, not as the primary release.
+30. **EMR pen disable does NOT block finger touch**: A `TYPE_APPLICATION_OVERLAY` toolbar above an EMR-disabled plugin view continues to receive touch normally. When designing a pen-lock toggle, **do not hide the toolbar** when entering the locked state — the user needs the same toolbar button to release the lock. The lock is on the digitizer (pen) input pipeline only.
+31. **Two pen input pipelines coexist; an overlay only gates one of them**: `dev/input/pen` events fan out to (a) the standard input pipeline → `View.dispatchTouchEvent` with `SOURCE_STYLUS`, and (b) a hardware direct path → drawAPP native → straight into the active `.note` file. A `WindowManager` overlay can swallow (a) but never (b). Any feature where the user draws inside your plugin's own UI (pen lasso, signature pad, etc.) must engage full-screen EMR disable for the duration — see Pattern 16 — or strokes will silently land in the user's note file. PenGuard snapshot-and-cleanup is only adequate as a fallback for the rare race window.
+32. **`EinkManager.enableFullUiAuto` is misnamed and does NOT control the digitizer on A5X2 (firmware 2025)**: Despite the suggestive method name, it's e-ink regal/refresh control. Empirically verified: it does not gate pen input. Don't waste a round trip on it for pen disable scenarios — use Pattern 15's `PluginApp.showPluginView` state pair instead.
 
 ## When Helping the User
 
