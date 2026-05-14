@@ -1,4 +1,4 @@
-package com.screenshot_crop
+package com.supernote_quicktoolbar
 
 import android.app.Application
 import com.facebook.react.PackageList
@@ -16,7 +16,14 @@ class MainApplication : Application(), ReactApplication {
         object : DefaultReactNativeHost(this) {
             override fun getPackages(): List<ReactPackage> =
                 PackageList(this).packages.apply {
+                    add(FloatingToolbarPackage())
+                    add(LocalSendPackage())
+                    add(BroadcastBridgePackage())
+                    add(FloatingBubblePackage())
+                    add(ImageEnhancerPackage())
+                    add(NativePageCheckerPackage())
                     add(ScreenshotPackage())
+                    add(AiBubblePackage())
                 }
 
             override fun getJSMainModuleName(): String = "index"

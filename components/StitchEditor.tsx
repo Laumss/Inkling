@@ -1,15 +1,3 @@
-/**
- * StitchEditor — Long screenshot compositing editor.
- *
- * Architecture: ONE PanResponder on the preview area.
- * On touch-start it hit-tests against 8 handle zones (2 images × 4 edges).
- * If a handle was hit → drag adjusts that ONE edge's crop fraction.
- * If nothing hit → drag adjusts overlap.
- *
- * This avoids all gesture-competition issues between child PanResponders
- * that plague React Native on Android.
- */
-
 import React, { useState, useRef, useCallback, useMemo, useEffect } from 'react';
 import {
   View,
@@ -29,39 +17,36 @@ import {
   ImageCrop,
 } from './StitchSession';
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
 const HEADER_H = 56;
-const CTRL_H = 160;
+const CTRL_H = 120;
 const PAD = 12;
-const HANDLE_LEN = 40;       // visible bar length
-const HANDLE_THICK = 6;      // visible bar thickness
-const HIT_RADIUS = 36;       // touch hit-test radius from edge midpoint
-const MIN_VISIBLE = 0.05;    // minimum 5% visible per axis
+const HANDLE_LEN = 40;
+const HANDLE_THICK = 6;
+const HIT_RADIUS = 40;
+const MIN_VISIBLE = 0.05;
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-type EdgeId = {
-  imageIndex: number;
-  edge: 'top' | 'bottom' | 'left' | 'right';
-};
-
-interface DragState {
+interface DragEdge {
   kind: 'edge';
   imageIndex: number;
-  edge: 'top' | 'bottom' | 'left' | 'right';
   cropKey: keyof ImageCrop;
   oppositeKey: keyof ImageCrop;
-  startCropVal: number;
-  /** sign: +1 means "screen delta in primary axis → positive crop change" */
+  startVal: number;
   sign: number;
-  /** pixels-per-unit: how many screen pixels = 1.0 crop fraction */
   pxPerUnit: number;
 }
+
+interface DragBoth {
+  kind: 'both';
+  cropKey: keyof ImageCrop;
+  oppositeKey: keyof ImageCrop;
+  startVal0: number;
+  startVal1: number;
+  sign: number;
+  pxPerUnit0: number;
+  pxPerUnit1: number;
+}
+
+type DragState = DragEdge | DragBoth;
 
 interface LayoutResult {
   scale: number;
@@ -69,14 +54,9 @@ interface LayoutResult {
   dispH: number;
   originX: number;
   originY: number;
-  /** Screen-space rects for each image (absolute, includes HEADER_H) */
   rects: Array<{ x: number; y: number; w: number; h: number }>;
   eff: Array<{ w: number; h: number }>;
 }
-
-// ---------------------------------------------------------------------------
-// StitchEditor
-// ---------------------------------------------------------------------------
 
 interface StitchEditorProps {
   session: StitchSessionData;
@@ -94,26 +74,19 @@ export const StitchEditor: React.FC<StitchEditorProps> = ({
   const screen = Dimensions.get('window');
   const previewH = screen.height - HEADER_H - CTRL_H;
 
-  // Local mutable state
   const [images, setImages] = useState<StitchImage[]>(
     () => initialSession.images.map(img => ({ ...img, crop: { ...img.crop } }))
   );
   const [params, setParams] = useState<StitchParams>(() => ({ ...initialSession.params }));
 
-  // Refs mirroring state (for PanResponder callbacks which can't re-capture state)
   const imagesRef = useRef(images);
   const paramsRef = useRef(params);
   useEffect(() => { imagesRef.current = images; }, [images]);
   useEffect(() => { paramsRef.current = params; }, [params]);
 
-  // -------------------------------------------------------------------------
-  // Layout calculation
-  // -------------------------------------------------------------------------
-
   const layout: LayoutResult | null = useMemo(() => {
     if (images.length < 2) return null;
     const dir = params.direction;
-
     const eff = images.map(img => ({
       w: img.width * (1 - img.crop.cropLeft - img.crop.cropRight),
       h: img.height * (1 - img.crop.cropTop - img.crop.cropBottom),
@@ -155,32 +128,37 @@ export const StitchEditor: React.FC<StitchEditorProps> = ({
   const layoutRef = useRef(layout);
   useEffect(() => { layoutRef.current = layout; }, [layout]);
 
-  // -------------------------------------------------------------------------
-  // Compute handle screen positions (for rendering AND hit-testing)
-  // -------------------------------------------------------------------------
+  const handles = useMemo(() => {
+    if (!layout) return null;
+    const isVert = params.direction === 'vertical';
+    const r0 = layout.rects[0];
+    const r1 = layout.rects[1];
 
-  const handlePositions = useMemo(() => {
-    if (!layout) return [];
-    return [0, 1].map(idx => {
-      const r = layout.rects[idx];
-      const midX = r.x + r.w / 2;
-      const midY = r.y + r.h / 2;
+    const juncY = isVert ? (r0.y + r0.h + r1.y) / 2 : (r0.y + r0.h / 2);
+    const juncX = isVert ? (r0.x + r0.w / 2) : (r0.x + r0.w + r1.x) / 2;
+
+    if (isVert) {
       return {
-        top:    { x: midX,      y: r.y },
-        bottom: { x: midX,      y: r.y + r.h },
-        left:   { x: r.x,       y: midY },
-        right:  { x: r.x + r.w, y: midY },
+        outerTop:    { x: r0.x + r0.w / 2, y: r0.y,          horiz: true, type: 'outerAxis' as const, imgIdx: 0, hitEdge: 'top' as const },
+        outerBottom: { x: r1.x + r1.w / 2, y: r1.y + r1.h,   horiz: true, type: 'outerAxis' as const, imgIdx: 1, hitEdge: 'bottom' as const },
+        overlap:     { x: juncX,            y: juncY,          horiz: true, type: 'overlap' as const },
+        perpLeft:    { x: layout.originX,             y: juncY, horiz: false, type: 'perpShared' as const, edge: 'left' as const },
+        perpRight:   { x: layout.originX + layout.dispW, y: juncY, horiz: false, type: 'perpShared' as const, edge: 'right' as const },
       };
-    });
-  }, [layout]);
-
-  // -------------------------------------------------------------------------
-  // Single PanResponder — hit-test on grant, track drag, update state
-  // -------------------------------------------------------------------------
+    } else {
+      return {
+        outerTop:    { x: r0.x,             y: r0.y + r0.h / 2, horiz: false, type: 'outerAxis' as const, imgIdx: 0, hitEdge: 'left' as const },
+        outerBottom: { x: r1.x + r1.w,      y: r1.y + r1.h / 2, horiz: false, type: 'outerAxis' as const, imgIdx: 1, hitEdge: 'right' as const },
+        overlap:     { x: juncX,             y: juncY,            horiz: false, type: 'overlap' as const },
+        perpLeft:    { x: juncX, y: layout.originY,               horiz: true, type: 'perpShared' as const, edge: 'top' as const },
+        perpRight:   { x: juncX, y: layout.originY + layout.dispH, horiz: true, type: 'perpShared' as const, edge: 'bottom' as const },
+      };
+    }
+  }, [layout, params.direction]);
 
   const dragRef = useRef<DragState | null>(null);
   const overlapStartRef = useRef(0);
-  const dragKindRef = useRef<'edge' | 'overlap' | null>(null);
+  const dragKindRef = useRef<'edge' | 'both' | 'overlap' | null>(null);
 
   const pan = useRef(
     PanResponder.create({
@@ -194,108 +172,112 @@ export const StitchEditor: React.FC<StitchEditorProps> = ({
         const p = paramsRef.current;
         if (!lo || imgs.length < 2) return;
 
-        // Determine which edges are "shared boundary" (adjust overlap, not crop)
-        const isSharedBoundary = (idx: number, edge: string): boolean => {
-          if (p.direction === 'vertical') {
-            return (idx === 0 && edge === 'bottom') || (idx === 1 && edge === 'top');
-          } else {
-            return (idx === 0 && edge === 'right') || (idx === 1 && edge === 'left');
-          }
+        const isVert = p.direction === 'vertical';
+        const r0 = lo.rects[0];
+        const r1 = lo.rects[1];
+
+        const juncY = isVert ? (r0.y + r0.h + r1.y) / 2 : (r0.y + r0.h / 2);
+        const juncX = isVert ? (r0.x + r0.w / 2) : (r0.x + r0.w + r1.x) / 2;
+
+        type HandleDef = {
+          x: number; y: number;
+          type: 'outerAxis' | 'overlap' | 'perpShared';
+          imgIdx?: number; hitEdge?: string; edge?: string;
         };
 
-        // Hit-test: find nearest handle within HIT_RADIUS
-        let bestDist = HIT_RADIUS;
-        let bestEdge: EdgeId | null = null;
+        const allHandles: HandleDef[] = isVert ? [
+          { x: r0.x + r0.w / 2, y: r0.y,          type: 'outerAxis', imgIdx: 0, hitEdge: 'top' },
+          { x: r1.x + r1.w / 2, y: r1.y + r1.h,   type: 'outerAxis', imgIdx: 1, hitEdge: 'bottom' },
+          { x: juncX,            y: juncY,          type: 'overlap' },
+          { x: lo.originX,                   y: juncY, type: 'perpShared', edge: 'left' },
+          { x: lo.originX + lo.dispW,        y: juncY, type: 'perpShared', edge: 'right' },
+        ] : [
+          { x: r0.x,             y: r0.y + r0.h / 2, type: 'outerAxis', imgIdx: 0, hitEdge: 'left' },
+          { x: r1.x + r1.w,      y: r1.y + r1.h / 2, type: 'outerAxis', imgIdx: 1, hitEdge: 'right' },
+          { x: juncX,             y: juncY,            type: 'overlap' },
+          { x: juncX, y: lo.originY,                   type: 'perpShared', edge: 'top' },
+          { x: juncX, y: lo.originY + lo.dispH,        type: 'perpShared', edge: 'bottom' },
+        ];
 
-        for (let idx = 0; idx < 2; idx++) {
-          const r = lo.rects[idx];
-          const midX = r.x + r.w / 2;
-          const midY = r.y + r.h / 2;
-          const edges: Array<{ edge: 'top' | 'bottom' | 'left' | 'right'; hx: number; hy: number }> = [
-            { edge: 'top',    hx: midX,      hy: r.y },
-            { edge: 'bottom', hx: midX,      hy: r.y + r.h },
-            { edge: 'left',   hx: r.x,       hy: midY },
-            { edge: 'right',  hx: r.x + r.w, hy: midY },
-          ];
-          for (const e of edges) {
-            const dist = Math.sqrt((pageX - e.hx) ** 2 + (pageY - e.hy) ** 2);
-            if (dist < bestDist) {
-              bestDist = dist;
-              bestEdge = { imageIndex: idx, edge: e.edge };
-            }
-          }
+        let bestDist = HIT_RADIUS;
+        let bestH: HandleDef | null = null;
+        for (const h of allHandles) {
+          const d = Math.sqrt((pageX - h.x) ** 2 + (pageY - h.y) ** 2);
+          if (d < bestDist) { bestDist = d; bestH = h; }
         }
 
-        if (bestEdge && isSharedBoundary(bestEdge.imageIndex, bestEdge.edge)) {
-          // Shared boundary → overlap drag
+        if (!bestH) {
+
           overlapStartRef.current = p.overlap;
           dragKindRef.current = 'overlap';
           dragRef.current = null;
-        } else if (bestEdge) {
-          // Outer edge → SAME image, OPPOSITE edge crop:
-          //   Dragging img1.bottom up → increases img1.cropTop (trims img1 near seam)
-          //   Dragging img0.top down  → increases img0.cropBottom (trims img0 near seam)
-          const hitIdx = bestEdge.imageIndex;
-          const hitEdge = bestEdge.edge;
+          return;
+        }
 
-          // Target: SAME image, opposite edge
-          const targetIdx = hitIdx;
-          const targetEdge = (
-            hitEdge === 'top' ? 'bottom' :
-            hitEdge === 'bottom' ? 'top' :
-            hitEdge === 'left' ? 'right' : 'left'
-          ) as 'top' | 'bottom' | 'left' | 'right';
+        if (bestH.type === 'overlap') {
+          overlapStartRef.current = p.overlap;
+          dragKindRef.current = 'overlap';
+          dragRef.current = null;
 
-          const targetImg = imgs[targetIdx];
-          const cropKey = (`crop${targetEdge.charAt(0).toUpperCase()}${targetEdge.slice(1)}`) as keyof ImageCrop;
-          const oppositeKey = (
-            targetEdge === 'top' ? 'cropBottom' :
-            targetEdge === 'bottom' ? 'cropTop' :
-            targetEdge === 'left' ? 'cropRight' : 'cropLeft'
-          ) as keyof ImageCrop;
+        } else if (bestH.type === 'outerAxis') {
 
-          // Sign based on HIT edge direction (not target):
-          // top/left hit: drag inward (down/right) → positive delta → increases target crop
-          // bottom/right hit: drag inward (up/left) → negative delta → sign=-1 inverts to positive
+          const idx = bestH.imgIdx!;
+          const hitEdge = bestH.hitEdge! as 'top' | 'bottom' | 'left' | 'right';
+          const targetEdge = (hitEdge === 'top' ? 'bottom' : hitEdge === 'bottom' ? 'top' : hitEdge === 'left' ? 'right' : 'left') as 'top' | 'bottom' | 'left' | 'right';
+          const cropKey = `crop${targetEdge.charAt(0).toUpperCase()}${targetEdge.slice(1)}` as keyof ImageCrop;
+          const oppositeKey = `crop${hitEdge.charAt(0).toUpperCase()}${hitEdge.slice(1)}` as keyof ImageCrop;
           const isVertAxis = (hitEdge === 'top' || hitEdge === 'bottom');
           const sign = (hitEdge === 'top' || hitEdge === 'left') ? 1 : -1;
-          const imgPixelSize = isVertAxis ? targetImg.height : targetImg.width;
+          const imgPixelSize = isVertAxis ? imgs[idx].height : imgs[idx].width;
 
           dragRef.current = {
             kind: 'edge',
-            imageIndex: targetIdx,
-            edge: targetEdge,
+            imageIndex: idx,
             cropKey,
             oppositeKey,
-            startCropVal: targetImg.crop[cropKey],
+            startVal: imgs[idx].crop[cropKey],
             sign,
             pxPerUnit: imgPixelSize * lo.scale,
           };
           dragKindRef.current = 'edge';
+
         } else {
-          // No handle hit → overlap drag
-          overlapStartRef.current = p.overlap;
-          dragKindRef.current = 'overlap';
-          dragRef.current = null;
+
+          const edge = bestH.edge! as 'top' | 'bottom' | 'left' | 'right';
+          const cropKey = `crop${edge.charAt(0).toUpperCase()}${edge.slice(1)}` as keyof ImageCrop;
+          const oppositeEdge = (edge === 'top' ? 'bottom' : edge === 'bottom' ? 'top' : edge === 'left' ? 'right' : 'left');
+          const oppositeKey = `crop${oppositeEdge.charAt(0).toUpperCase()}${oppositeEdge.slice(1)}` as keyof ImageCrop;
+          const isVertAxis = (edge === 'top' || edge === 'bottom');
+          const sign = (edge === 'top' || edge === 'left') ? 1 : -1;
+
+          dragRef.current = {
+            kind: 'both',
+            cropKey,
+            oppositeKey,
+            startVal0: imgs[0].crop[cropKey],
+            startVal1: imgs[1].crop[cropKey],
+            sign,
+            pxPerUnit0: (isVertAxis ? imgs[0].height : imgs[0].width) * lo.scale,
+            pxPerUnit1: (isVertAxis ? imgs[1].height : imgs[1].width) * lo.scale,
+          };
+          dragKindRef.current = 'both';
         }
       },
 
       onPanResponderMove: (_: GestureResponderEvent, g: PanResponderGestureState) => {
         if (disabled) return;
 
-        if (dragKindRef.current === 'edge' && dragRef.current) {
+        if (dragKindRef.current === 'edge' && dragRef.current?.kind === 'edge') {
           const d = dragRef.current;
           const imgs = imagesRef.current;
           const img = imgs[d.imageIndex];
           if (!img) return;
 
-          const isVertAxis = (d.edge === 'top' || d.edge === 'bottom');
+          const isVertAxis = (d.cropKey === 'cropTop' || d.cropKey === 'cropBottom');
           const screenDelta = isVertAxis ? g.dy : g.dx;
           const cropDelta = (d.sign * screenDelta) / d.pxPerUnit;
-
-          const oppositeVal = img.crop[d.oppositeKey];
-          const maxVal = 1 - MIN_VISIBLE - oppositeVal;
-          const newVal = Math.max(0, Math.min(maxVal, d.startCropVal + cropDelta));
+          const maxVal = 1 - MIN_VISIBLE - img.crop[d.oppositeKey];
+          const newVal = Math.max(0, Math.min(maxVal, d.startVal + cropDelta));
 
           setImages(prev => {
             const next = [...prev];
@@ -303,6 +285,27 @@ export const StitchEditor: React.FC<StitchEditorProps> = ({
               ...next[d.imageIndex],
               crop: { ...next[d.imageIndex].crop, [d.cropKey]: newVal },
             };
+            return next;
+          });
+
+        } else if (dragKindRef.current === 'both' && dragRef.current?.kind === 'both') {
+          const d = dragRef.current;
+          const imgs = imagesRef.current;
+
+          const isVertAxis = (d.cropKey === 'cropTop' || d.cropKey === 'cropBottom');
+          const screenDelta = isVertAxis ? g.dy : g.dx;
+
+          const delta0 = (d.sign * screenDelta) / d.pxPerUnit0;
+          const delta1 = (d.sign * screenDelta) / d.pxPerUnit1;
+          const max0 = 1 - MIN_VISIBLE - imgs[0].crop[d.oppositeKey];
+          const max1 = 1 - MIN_VISIBLE - imgs[1].crop[d.oppositeKey];
+          const v0 = Math.max(0, Math.min(max0, d.startVal0 + delta0));
+          const v1 = Math.max(0, Math.min(max1, d.startVal1 + delta1));
+
+          setImages(prev => {
+            const next = [...prev];
+            next[0] = { ...next[0], crop: { ...next[0].crop, [d.cropKey]: v0 } };
+            next[1] = { ...next[1], crop: { ...next[1].crop, [d.cropKey]: v1 } };
             return next;
           });
 
@@ -315,7 +318,6 @@ export const StitchEditor: React.FC<StitchEditorProps> = ({
           const isVert = p.direction === 'vertical';
           const screenDelta = isVert ? -g.dy : -g.dx;
           const imgDelta = screenDelta / lo.scale;
-
           const dim0 = isVert
             ? imgs[0].height * (1 - imgs[0].crop.cropTop - imgs[0].crop.cropBottom)
             : imgs[0].width * (1 - imgs[0].crop.cropLeft - imgs[0].crop.cropRight);
@@ -324,25 +326,14 @@ export const StitchEditor: React.FC<StitchEditorProps> = ({
             : imgs[1].width * (1 - imgs[1].crop.cropLeft - imgs[1].crop.cropRight);
           const maxOvl = Math.min(dim0, dim1) * 0.8;
           const newOvl = Math.max(0, Math.min(maxOvl, overlapStartRef.current + imgDelta));
-
           setParams(prev => ({ ...prev, overlap: Math.round(newOvl) }));
         }
       },
 
-      onPanResponderRelease: () => {
-        dragRef.current = null;
-        dragKindRef.current = null;
-      },
-      onPanResponderTerminate: () => {
-        dragRef.current = null;
-        dragKindRef.current = null;
-      },
+      onPanResponderRelease: () => { dragRef.current = null; dragKindRef.current = null; },
+      onPanResponderTerminate: () => { dragRef.current = null; dragKindRef.current = null; },
     })
   ).current;
-
-  // -------------------------------------------------------------------------
-  // Control panel actions
-  // -------------------------------------------------------------------------
 
   const toggleDirection = useCallback(() => {
     setParams(p => ({
@@ -380,11 +371,7 @@ export const StitchEditor: React.FC<StitchEditorProps> = ({
     onConfirm({ ...initialSession, images, params });
   }, [disabled, images, params, initialSession, onConfirm]);
 
-  // -------------------------------------------------------------------------
-  // Render — waiting for second image
-  // -------------------------------------------------------------------------
-
-  if (images.length < 2 || !layout) {
+  if (images.length < 2 || !layout || !handles) {
     return (
       <View style={st.root}>
         <View style={st.header}>
@@ -402,16 +389,13 @@ export const StitchEditor: React.FC<StitchEditorProps> = ({
     );
   }
 
-  // -------------------------------------------------------------------------
-  // Render — editor
-  // -------------------------------------------------------------------------
-
   const isVert = params.direction === 'vertical';
   const drawOrder = params.topLayerIndex === 0 ? [1, 0] : [0, 1];
 
+  const handleEntries = Object.values(handles);
+
   return (
     <View style={st.root}>
-      {/* Header */}
       <View style={st.header}>
         <Pressable onPress={disabled ? undefined : onCancel} style={st.headerBtn}>
           <Text style={st.headerBtnText}>Cancel</Text>
@@ -422,10 +406,8 @@ export const StitchEditor: React.FC<StitchEditorProps> = ({
         </Pressable>
       </View>
 
-      {/* Preview area — SINGLE PanResponder handles everything */}
       <View style={[st.previewContainer, { height: previewH }]} {...pan.panHandlers}>
 
-        {/* Composite border */}
         <View
           style={[st.compositeBorder, {
             left: layout.originX - 1,
@@ -436,14 +418,11 @@ export const StitchEditor: React.FC<StitchEditorProps> = ({
           pointerEvents="none"
         />
 
-        {/* Images in layer order — clipped to show only cropped portion */}
         {drawOrder.map(idx => {
           const r = layout.rects[idx];
           const img = images[idx];
-          // Full image size at display scale
           const fullW = img.width * layout.scale;
           const fullH = img.height * layout.scale;
-          // Offset to skip cropped-out area
           const offsetL = img.crop.cropLeft * img.width * layout.scale;
           const offsetT = img.crop.cropTop * img.height * layout.scale;
           return (
@@ -460,19 +439,13 @@ export const StitchEditor: React.FC<StitchEditorProps> = ({
             >
               <Image
                 source={{ uri: `file://${img.path}` }}
-                style={{
-                  width: fullW,
-                  height: fullH,
-                  marginLeft: -offsetL,
-                  marginTop: -offsetT,
-                }}
+                style={{ width: fullW, height: fullH, marginLeft: -offsetL, marginTop: -offsetT }}
                 resizeMode="stretch"
               />
             </View>
           );
         })}
 
-        {/* Overlap zone indicator */}
         {params.overlap > 0 && (
           <View
             style={[st.overlapZone, isVert ? {
@@ -490,7 +463,6 @@ export const StitchEditor: React.FC<StitchEditorProps> = ({
           />
         )}
 
-        {/* Per-image dashed borders + labels */}
         {[0, 1].map(idx => {
           const r = layout.rects[idx];
           return (
@@ -505,77 +477,40 @@ export const StitchEditor: React.FC<StitchEditorProps> = ({
                 }]}
                 pointerEvents="none"
               />
-              <View
-                style={[st.imgLabel, {
-                  left: r.x + 4,
-                  top: r.y - HEADER_H + 4,
-                }]}
-                pointerEvents="none"
-              >
+              <View style={[st.imgLabel, { left: r.x + 4, top: r.y - HEADER_H + 4 }]} pointerEvents="none">
                 <Text style={st.imgLabelText}>{idx + 1}</Text>
               </View>
             </React.Fragment>
           );
         })}
 
-        {/* Visual handle indicators (non-interactive — PanResponder does hit-testing) */}
-        {handlePositions.map((hp, idx) => {
-          // Determine which edges are shared boundary (only render once)
-          const skipTop = isVert && idx === 1;    // img1 top = shared → already shown as img0 bottom
-          const skipBottom = isVert && idx === 0 && false; // img0 bottom = shared → render it
-          const skipLeft = !isVert && idx === 1;  // img1 left = shared → already shown as img0 right
-          const skipRight = !isVert && idx === 0 && false;
-
-          // Shared boundary uses a wider handle to indicate it controls overlap
-          const isSharedBottom = isVert && idx === 0;
-          const isSharedRight = !isVert && idx === 0;
-
-          return (
-            <React.Fragment key={`vis-handles-${idx}`}>
-              {/* Top */}
-              {!skipTop && (
-                <View style={[st.handleBar, st.handleH, {
-                  left: hp.top.x - HANDLE_LEN / 2,
-                  top: hp.top.y - HEADER_H - HANDLE_THICK / 2,
-                }]} pointerEvents="none" />
-              )}
-              {/* Bottom */}
-              <View style={[st.handleBar, isSharedBottom ? st.handleHShared : st.handleH, {
-                left: hp.bottom.x - (isSharedBottom ? HANDLE_LEN * 0.75 : HANDLE_LEN / 2),
-                top: hp.bottom.y - HEADER_H - HANDLE_THICK / 2,
-              }]} pointerEvents="none" />
-              {/* Left */}
-              {!skipLeft && (
-                <View style={[st.handleBar, st.handleV, {
-                  left: hp.left.x - HANDLE_THICK / 2,
-                  top: hp.left.y - HEADER_H - HANDLE_LEN / 2,
-                }]} pointerEvents="none" />
-              )}
-              {/* Right */}
-              <View style={[st.handleBar, isSharedRight ? st.handleVShared : st.handleV, {
-                left: hp.right.x - HANDLE_THICK / 2,
-                top: hp.right.y - HEADER_H - (isSharedRight ? HANDLE_LEN * 0.75 : HANDLE_LEN / 2),
-              }]} pointerEvents="none" />
-            </React.Fragment>
-          );
-        })}
+        {handleEntries.map((h, i) => (
+          <View
+            key={`h-${i}`}
+            style={[
+              st.handleBar,
+              h.horiz ? st.handleH : st.handleV,
+              {
+                left: h.x - (h.horiz ? HANDLE_LEN / 2 : HANDLE_THICK / 2),
+                top: h.y - HEADER_H - (h.horiz ? HANDLE_THICK / 2 : HANDLE_LEN / 2),
+              },
+              h.type === 'overlap' && st.handleOverlap,
+            ]}
+            pointerEvents="none"
+          />
+        ))}
       </View>
 
-      {/* Control panel */}
       <View style={st.controlPanel}>
         <View style={st.controlRow}>
           <Pressable onPress={disabled ? undefined : toggleDirection} style={st.ctrlBtn}>
-            <Text style={st.ctrlBtnText}>
-              {isVert ? '↕ Vertical' : '↔ Horizontal'}
-            </Text>
+            <Text style={st.ctrlBtnText}>{isVert ? '↕ Vertical' : '↔ Horizontal'}</Text>
           </Pressable>
           <Pressable onPress={disabled ? undefined : swapOrder} style={st.ctrlBtn}>
             <Text style={st.ctrlBtnText}>⇅ Swap</Text>
           </Pressable>
           <Pressable onPress={disabled ? undefined : toggleTopLayer} style={st.ctrlBtn}>
-            <Text style={st.ctrlBtnText}>
-              ☰ Top: {params.topLayerIndex + 1}
-            </Text>
+            <Text style={st.ctrlBtnText}>☰ Top: {params.topLayerIndex + 1}</Text>
           </Pressable>
         </View>
 
@@ -596,13 +531,8 @@ export const StitchEditor: React.FC<StitchEditorProps> = ({
             </Pressable>
           </View>
         </View>
-
-        <Text style={st.hintText}>
-          Outer edges trim near the seam. Shared boundary adjusts overlap.
-        </Text>
       </View>
 
-      {/* Compositing loading overlay */}
       {disabled && (
         <View style={st.loadingOverlay}>
           <View style={st.loadingBox}>
@@ -614,15 +544,8 @@ export const StitchEditor: React.FC<StitchEditorProps> = ({
   );
 };
 
-// ---------------------------------------------------------------------------
-// Styles
-// ---------------------------------------------------------------------------
-
 const st = StyleSheet.create({
-  root: {
-    flex: 1,
-    backgroundColor: '#e8e8e8',
-  },
+  root: { flex: 1, backgroundColor: '#e8e8e8' },
   header: {
     height: HEADER_H,
     flexDirection: 'row',
@@ -631,45 +554,14 @@ const st = StyleSheet.create({
     paddingHorizontal: 16,
     backgroundColor: '#000',
   },
-  headerBtn: {
-    paddingVertical: 10,
-    paddingHorizontal: 16,
-    minWidth: 80,
-  },
-  headerBtnText: {
-    fontSize: 19,
-    fontWeight: '600',
-    color: '#fff',
-  },
-  headerTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#fff',
-  },
-  previewContainer: {
-    position: 'relative',
-  },
-  compositeBorder: {
-    position: 'absolute',
-    borderWidth: 1,
-    borderColor: '#999',
-  },
-  imgBorder: {
-    position: 'absolute',
-    borderWidth: 1,
-    borderStyle: 'dashed',
-  },
-  imgLabel: {
-    position: 'absolute',
-    backgroundColor: '#000',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-  },
-  imgLabelText: {
-    color: '#fff',
-    fontSize: 13,
-    fontWeight: '700',
-  },
+  headerBtn: { paddingVertical: 10, paddingHorizontal: 16, minWidth: 80 },
+  headerBtnText: { fontSize: 19, fontWeight: '600', color: '#fff' },
+  headerTitle: { fontSize: 18, fontWeight: '600', color: '#fff' },
+  previewContainer: { position: 'relative' },
+  compositeBorder: { position: 'absolute', borderWidth: 1, borderColor: '#999' },
+  imgBorder: { position: 'absolute', borderWidth: 1, borderStyle: 'dashed' },
+  imgLabel: { position: 'absolute', backgroundColor: '#000', paddingHorizontal: 6, paddingVertical: 2 },
+  imgLabelText: { color: '#fff', fontSize: 13, fontWeight: '700' },
   overlapZone: {
     position: 'absolute',
     backgroundColor: 'rgba(0, 0, 0, 0.12)',
@@ -677,37 +569,10 @@ const st = StyleSheet.create({
     borderColor: 'rgba(0, 0, 0, 0.25)',
     borderStyle: 'dotted',
   },
-
-  // Handle visual indicators
-  handleBar: {
-    position: 'absolute',
-    backgroundColor: '#000',
-    borderRadius: 3,
-  },
-  handleH: {
-    width: HANDLE_LEN,
-    height: HANDLE_THICK,
-  },
-  handleV: {
-    width: HANDLE_THICK,
-    height: HANDLE_LEN,
-  },
-  handleHShared: {
-    width: HANDLE_LEN * 1.5,
-    height: HANDLE_THICK,
-    borderWidth: 1,
-    borderColor: '#666',
-    backgroundColor: '#fff',
-  },
-  handleVShared: {
-    width: HANDLE_THICK,
-    height: HANDLE_LEN * 1.5,
-    borderWidth: 1,
-    borderColor: '#666',
-    backgroundColor: '#fff',
-  },
-
-  // Control panel
+  handleBar: { position: 'absolute', backgroundColor: '#000', borderRadius: 3 },
+  handleH: { width: HANDLE_LEN, height: HANDLE_THICK },
+  handleV: { width: HANDLE_THICK, height: HANDLE_LEN },
+  handleOverlap: { backgroundColor: '#666' },
   controlPanel: {
     height: CTRL_H,
     backgroundColor: '#fff',
@@ -715,6 +580,7 @@ const st = StyleSheet.create({
     borderTopColor: '#ccc',
     paddingHorizontal: 12,
     paddingVertical: 8,
+    justifyContent: 'center',
   },
   controlRow: {
     flexDirection: 'row',
@@ -730,20 +596,9 @@ const st = StyleSheet.create({
     borderColor: '#000',
     backgroundColor: '#fff',
   },
-  ctrlBtnText: {
-    fontSize: 15,
-    color: '#000',
-  },
-  overlapLabel: {
-    fontSize: 15,
-    color: '#000',
-    marginRight: 8,
-    minWidth: 120,
-  },
-  overlapBtns: {
-    flexDirection: 'row',
-    gap: 6,
-  },
+  ctrlBtnText: { fontSize: 15, color: '#000' },
+  overlapLabel: { fontSize: 15, color: '#000', marginRight: 8, minWidth: 120 },
+  overlapBtns: { flexDirection: 'row', gap: 6 },
   smallBtn: {
     paddingVertical: 4,
     paddingHorizontal: 10,
@@ -751,36 +606,10 @@ const st = StyleSheet.create({
     borderColor: '#666',
     backgroundColor: '#fff',
   },
-  smallBtnText: {
-    fontSize: 14,
-    color: '#000',
-  },
-  hintText: {
-    fontSize: 12,
-    color: '#888',
-    textAlign: 'center',
-    marginTop: 2,
-  },
-
-  // Empty state
-  emptyContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 40,
-  },
-  emptyText: {
-    fontSize: 20,
-    color: '#000',
-    marginBottom: 12,
-  },
-  emptySubText: {
-    fontSize: 16,
-    color: '#666',
-    textAlign: 'center',
-  },
-
-  // Loading overlay (shown during compositing)
+  smallBtnText: { fontSize: 14, color: '#000' },
+  emptyContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 40 },
+  emptyText: { fontSize: 20, color: '#000', marginBottom: 12 },
+  emptySubText: { fontSize: 16, color: '#666', textAlign: 'center' },
   loadingOverlay: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(0, 0, 0, 0.15)',
@@ -795,8 +624,6 @@ const st = StyleSheet.create({
     paddingHorizontal: 40,
     paddingVertical: 16,
   },
-  loadingText: {
-    fontSize: 18,
-    color: '#000',
-  },
+  loadingText: { fontSize: 18, color: '#000' },
 });
+
