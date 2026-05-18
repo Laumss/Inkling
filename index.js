@@ -3,12 +3,13 @@ import App from './App';
 import { name as appName } from './app.json';
 import { PluginManager } from 'sn-plugin-lib';
 import { ensureInit } from './components/BackgroundService';
-import { setPendingButton } from './pendingButton';
+import { setPendingButton, isAppMounted } from './pendingButton';
 import { warmupCache, getCachedConfig, getCachedClips, injectClipStatus, loadClips } from './components/ToolPresets';
 import FloatingToolbarBridge from './components/FloatingToolbarBridge';
 import { executeAction } from './components/ToolActions';
 import { setLocale } from './components/i18n';
-import * as PenLasso from './components/PenLasso';
+import { PenLasso } from './components/PenTools';
+import * as StrokeEraser from './components/StrokeEraser';
 
 AppRegistry.registerComponent(appName, () => App);
 
@@ -27,6 +28,23 @@ PluginManager.registerLangListener({
 FloatingToolbarBridge.onTitlePenLassoAction(() => {
   console.log('[index]: onTitlePenLassoAction → arm pen lasso');
   PenLasso.arm().catch(e => console.error('[index]: PenLasso.arm error:', e));
+});
+
+FloatingToolbarBridge.onPenLockRequest(() => {
+  console.log('[index]: onPenLockRequest → arm stroke eraser after pen lock');
+  if (!isAppMounted()) {
+    FloatingToolbarBridge.setPendingScreen('penLock');
+    FloatingToolbarBridge.openPenLockView();
+  }
+
+  setTimeout(() => {
+    StrokeEraser.arm().catch(e => console.error('[index]: StrokeEraser.arm error:', e));
+  }, 300);
+});
+
+FloatingToolbarBridge.onPenLockRelease(() => {
+  StrokeEraser.disarm();
+  FloatingToolbarBridge.dismissStrokeEraserOverlay();
 });
 
 FloatingToolbarBridge.onToolTap(async ({ toolAction }) => {
@@ -84,6 +102,7 @@ PluginManager.registerButtonListener({
     }
 
     if (event.id === 100) {
+
       if (FloatingToolbarBridge.isShowingSync()) {
         console.log('[index]: toolbar visible → destroyAll');
         FloatingToolbarBridge.destroyAll();
@@ -93,11 +112,13 @@ PluginManager.registerButtonListener({
       setPendingButton(event.id);
       const config = getCachedConfig();
       const clips = getCachedClips();
+      console.log('[index]: id=100 show path, config=', !!config, 'clips=', !!clips, 'FloatingToolbar=', !!require('react-native').NativeModules.FloatingToolbar);
       if (config && clips) {
         FloatingToolbarBridge.show(injectClipStatus(config.tools, clips, null));
       } else {
         const { getAvailableTools } = require('./components/ToolPresets');
         const defaultClips = { '1': null, '2': null, '3': null, '4': null, '5': null, '6': null };
+        console.log('[index]: using default tools, count=', getAvailableTools().slice(0, 8).length);
         FloatingToolbarBridge.show(injectClipStatus(getAvailableTools().slice(0, 8), defaultClips, null));
         warmupCache().then(() => {
           const c = getCachedConfig();

@@ -7,7 +7,7 @@ import com.facebook.react.uimanager.ViewManager
 
 class FloatingToolbarPackage : ReactPackage {
     override fun createNativeModules(reactContext: ReactApplicationContext): List<NativeModule> {
-        return listOf(FloatingToolbarModule(reactContext))
+        return InklingPackages().createNativeModules(reactContext)
     }
 
     override fun createViewManagers(reactContext: ReactApplicationContext): List<ViewManager<*, *>> {

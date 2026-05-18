@@ -4,8 +4,7 @@ import { TextInserter, InsertMode, TextSource } from './TextInserter';
 import { FileLogger } from './FileLogger';
 import LocalSendBridge, { TextReceivedInfo } from './LocalSendBridge';
 import { LassoExtractor } from './LassoExtractor';
-import FloatingBubbleBridge from './FloatingBubbleBridge';
-import AiBubbleBridge from './AiBubbleBridge';
+import FloatingBubbleBridge, { AiBubbleBridge } from './BubbleBridges';
 
 import { loadBubbleActions, resolveBubbleActions, loadAiBubbleActions, resolveAiBubbleActions } from './ToolPresets';
 import { t } from './i18n';
@@ -254,7 +253,7 @@ export function ensureInit(): void {
         console.log('[BackgroundService]: text bubble action:', actionId);
         if (actionId === 'lasso_send') {
           FloatingBubbleBridge.hide();
-          FloatingToolbarBridge.showNativeSendPanelFromBubble();
+          FloatingToolbarBridge.showSendPanelFromBubble();
         } else if (actionId === 'screenshot_send') {
           handleScreenshotSend().catch(e => console.error('[BackgroundService]: bubble screenshot_send error:', e));
         } else if (actionId === 'toggle_spacing') {
@@ -672,13 +671,13 @@ export async function reviveIfNeeded(): Promise<void> {
 export async function handleScreenshotAi(): Promise<void> {
   console.log('[BackgroundService] handleScreenshotAi START (native path)');
 
-  FloatingToolbarBridge.showNativeLassoScreenshotPanelFromBubble();
+  FloatingToolbarBridge.showLassoScreenshotPanelFromBubble();
   FileLogger.logEvent('ScreenshotAi', 'native panel invoked');
 }
 
 export async function handleScreenshotSend(): Promise<void> {
   console.log('[BackgroundService] handleScreenshotSend START (native path)');
-  FloatingToolbarBridge.showNativeLassoScreenshotPanelForSendFromBubble();
+  FloatingToolbarBridge.showLassoScreenshotPanelForSendFromBubble();
   FileLogger.logEvent('ScreenshotSend', 'native panel invoked');
 }
 

@@ -252,13 +252,9 @@ function Update-PluginConfigPackages {
         $configHash = @{}
         $config.PSObject.Properties | ForEach-Object { $configHash[$_.Name] = $_.Value }
         
-        # Add or update reactPackages field - ensure always in array format
-        if ($FoundPackages.Count -eq 1) {
-            # Force convert to array when only one element to avoid PowerShell converting to string
-            $configHash.reactPackages = @($FoundPackages)
-        } else {
-            $configHash.reactPackages = $FoundPackages
-        }
+        # Always include our own InklingPackages
+        $allPackages = @('com.supernote_quicktoolbar.InklingPackages') + $FoundPackages
+        $configHash.reactPackages = $allPackages
         
         # Convert back to JSON and save
         $configHash | ConvertTo-Json -Depth 10 | Set-Content $configFile -Encoding UTF8
@@ -1309,4 +1305,4 @@ function Resolve-ClassesDir {
 
 # Execute main function
 Main
-adb push "Y:\Inkling\build\outputs\Inkling.snplg" "/storage/emulated/0/MyStyle/plugin_inkling.snplg" 2>&1 
+adb -s  192.168.78.62:43625 push "Y:\A5 X2\docs\supernote-quicktoolbar\build\outputs\Inkling.snplg" "/storage/emulated/0/MyStyle/plugin_inkling.snplg" 2>&1 

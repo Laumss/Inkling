@@ -4,12 +4,15 @@ import RNFS from 'react-native-fs';
 import { loadClips, saveClips } from './ToolPresets';
 import { toggleMode, handleAiSend, getLastMode, stopAiMode, ensureLocalSendReady } from './BackgroundService';
 import FloatingToolbarBridge from './FloatingToolbarBridge';
-import FloatingBubbleBridge from './FloatingBubbleBridge';
+import FloatingBubbleBridge from './BubbleBridges';
 
 const { FloatingToolbar } = NativeModules;
 
 let _filePath: string | null = null;
 let _pageNum: number | null = null;
+
+let _imageQueue: string[] = [];
+let _docLinkQueue: string[] = [];
 
 const STICKER_DIR = '/sdcard/MyStyle/Sticker';
 
@@ -42,6 +45,48 @@ async function ctx(): Promise<boolean> {
 
 function isRecognitionNote(): boolean {
   return _noteType === 1;
+}
+
+async function _insertDocLinkDirect(docPath: string): Promise<void> {
+  const rawName = docPath.split('/').pop() ?? 'link';
+  const dotIdx = rawName.lastIndexOf('.');
+  const linkName = dotIdx > 0 ? rawName.substring(0, dotIdx) : rawName;
+
+  let pageW = 1404, pageH = 1872;
+  try {
+    const fpRes: any = await PluginCommAPI.getCurrentFilePath();
+    const pgRes: any = await PluginCommAPI.getCurrentPageNum();
+    if (fpRes?.success && fpRes.result && pgRes?.success && pgRes.result !== undefined) {
+      const psRes: any = await PluginFileAPI.getPageSize(fpRes.result, pgRes.result);
+      if (psRes?.success && psRes.result) {
+        pageW = psRes.result.width;
+        pageH = psRes.result.height;
+      }
+    }
+  } catch (_) {}
+
+  const linkW = Math.min(linkName.length * 30 + 40, pageW * 0.6);
+  const left = Math.round((pageW - linkW) / 2);
+  const top = Math.round(pageH * 0.15);
+  const fontSize = 49;
+  const lineH = fontSize + 10;
+
+  const ext = docPath.split('.').pop()?.toLowerCase() || '';
+  const isDocFile = ['epub', 'pdf', 'cbz', 'doc', 'docx', 'djvu', 'mobi', 'fb2'].includes(ext);
+  const destPath = docPath.replace('/sdcard/', '/storage/emulated/0/');
+
+  const textLink = {
+    destPath,
+    destPage: -1,
+    style: 0,
+    linkType: isDocFile ? 2 : 0,
+    rect: { left, top, right: left + Math.round(linkW), bottom: top + lineH },
+    fontSize,
+    fullText: linkName,
+    showText: linkName,
+    isItalic: 0,
+  };
+  await (PluginNoteAPI as any).insertTextLink(textLink);
 }
 
 export async function executeAction(action: string): Promise<string> {
@@ -96,8 +141,17 @@ export async function executeAction(action: string): Promise<string> {
   }
 
   if (action === 'insert_link') {
+    if (_docLinkQueue.length === 0) {
+      _docLinkQueue = FloatingToolbarBridge.drainDocLinkQueue();
+    }
+    if (_docLinkQueue.length > 0) {
+      const docPath = _docLinkQueue.shift()!;
+      console.log('[QUEUE-DBG/TS] docLink queue pop:', docPath, 'remaining:', _docLinkQueue.length);
+      try { await _insertDocLinkDirect(docPath); } catch (_) {}
+      return 'Doc link inserted from queue';
+    }
     ensureLocalSendReady().catch(() => {});
-    FloatingToolbarBridge.showNativeDocPanel();
+    FloatingToolbarBridge.showDocLinkPanel();
     return 'Doc link panel opened';
   }
 
@@ -110,8 +164,17 @@ export async function executeAction(action: string): Promise<string> {
   }
 
   if (action === 'insert_image') {
+    if (_imageQueue.length === 0) {
+      _imageQueue = FloatingToolbarBridge.drainImageQueue();
+    }
+    if (_imageQueue.length > 0) {
+      const imgPath = _imageQueue.shift()!;
+      console.log('[QUEUE-DBG/TS] image queue pop:', imgPath, 'remaining:', _imageQueue.length);
+      try { await (PluginNoteAPI as any).insertImage(imgPath); } catch (_) {}
+      return 'Image inserted from queue';
+    }
     ensureLocalSendReady().catch(() => {});
-    FloatingToolbarBridge.showNativeImagePanel();
+    FloatingToolbarBridge.showImagePanel();
     return 'Image panel opened';
   }
 

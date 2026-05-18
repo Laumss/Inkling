@@ -253,6 +253,11 @@ When modifying Kotlin/Java files (e.g. `FloatingToolbarModule.kt`, `LocalSendMod
 | `"unknown pageSize"` from PointUtils | Passing incorrect Size to coordinate conversion | Use `PluginFileAPI.getPageSize()` result directly |
 | `"insert failed"` for title/link in DOC | DOC doesn't support titles/links | Use these APIs only in NOTE context |
 | `"layer not supported"` | Inserting title/link/five-star on non-main layer | Use `layerNum: 0` for these element types |
+| `NativeModules.X` is `null` at runtime but code compiles | Your ReactPackage is not listed in `PluginConfig.json` `reactPackages` | See gotcha #5 below |
+
+5. **PluginHost does NOT use `MainApplication.getPackages()`** — Unlike standard React Native apps, the Supernote PluginHost discovers NativeModules exclusively through the `"reactPackages"` array in `PluginConfig.json`. The build script (`buildPlugin.ps1`) auto-detects third-party packages from `node_modules/`, but your **own** ReactPackage class (the one that registers your custom NativeModules like FloatingToolbar, LocalSend, etc.) must be explicitly added. If it's missing, all your NativeModules will be `null` at runtime — JS code runs but every `NativeModules.YourModule` call silently returns `undefined`. **Fix**: ensure `buildPlugin.ps1` includes your package class (e.g. `com.supernote_quicktoolbar.InklingPackages`) in the `reactPackages` array. The build script should prepend it automatically; if you rename or consolidate Package classes, verify the fully-qualified class name still appears in the generated `build/generated/PluginConfig.json`.
+
+6. **`logcat` chatty filter hides plugin init logs** — The Android `chatty` mechanism silently drops repeated log lines from the same UID/tag. PluginHost startup often triggers this, hiding your `Log.i()` diagnostic output. **Fix**: run `adb logcat -P ""` to disable chatty before capturing, or filter by PID: `adb logcat -d --pid=$(adb shell pidof com.ratta.supernote.pluginhost)`.
 
 ---
 

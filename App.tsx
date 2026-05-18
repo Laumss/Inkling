@@ -22,15 +22,13 @@ import { executeAction, attachModeListeners, detachModeListeners } from './compo
 import { InsertMode } from './components/TextInserter';
 import { FileLogger } from './components/FileLogger';
 import { LassoExtractor } from './components/LassoExtractor';
-import { checkPendingButton, peekPendingButton } from './pendingButton';
+import { checkPendingButton, peekPendingButton, setAppMounted } from './pendingButton';
 import { t } from './components/i18n';
 
 import { CropOverlay, CropResult } from './components/CropOverlay';
 import { StitchEditor } from './components/StitchEditor';
-import { StitchSession, StitchSessionData } from './components/StitchSession';
-import { StagingService } from './components/StagingService';
-import { ScreenshotService } from './components/ScreenshotService';
-import * as PenGuard from './components/PenGuard';
+import { StitchSession, StitchSessionData, StagingService, ScreenshotService } from './components/ScreenshotPipeline';
+import { PenGuard } from './components/PenTools';
 const { ScreenshotModule } = NativeModules;
 
 const screenWidth  = Dimensions.get('window').width;
@@ -92,7 +90,9 @@ function App(): React.JSX.Element {
   const hasScreenshotPending = ScreenshotModule?.hasPendingPath?.() === true;
   console.log('[LASSO-DBG/App] App component init: pendingBtn=', initialPending, 'pendingScreen=', JSON.stringify(initialPendingScreen), 'hasScreenshotPending=', hasScreenshotPending);
   const [screen, setScreen]               = useState<AppScreen>(
-    (initialPending === 300 || hasScreenshotPending) ? 'nativeHelper' : 'main'
+    (initialPending === 300 || hasScreenshotPending) ? 'nativeHelper' :
+    (initialPendingScreen === 'penLock') ? 'penLock' :
+    'main'
   );
   const [tools, setTools]                 = useState<ToolItem[]>(AVAILABLE_TOOLS.slice(0, 7));
   const [clips, setClips]                 = useState<ClipData>({ '1': null, '2': null, '3': null, '4': null });
@@ -121,6 +121,7 @@ function App(): React.JSX.Element {
   const clipsRef      = useRef(clips);       clipsRef.current      = clips;
   const insertModeRef = useRef(insertMode);  insertModeRef.current = insertMode;
   const hasPermissionRef = useRef(hasPermission); hasPermissionRef.current = hasPermission;
+  const screenRef     = useRef(screen);      screenRef.current     = screen;
 
   const showStatus = (msg: string) => {
     setStatusMsg(msg);
@@ -141,9 +142,6 @@ function App(): React.JSX.Element {
   }, []);
 
   const openMainPanel = useCallback(() => {
-    FloatingToolbarBridge.closeAllForSettings();
-    if (getActiveMode()) stopMode();
-    stopAiMode();
     flushPendingTexts();
     reviveIfNeeded();
     resetTransientScreens();
@@ -296,7 +294,7 @@ function App(): React.JSX.Element {
 
   useEffect(() => {
     console.log('[App]: ── mount ──');
-
+    setAppMounted(true);
     attachModeListeners();
     ensureInit();
 
@@ -338,7 +336,6 @@ function App(): React.JSX.Element {
     console.log('[LASSO-DBG/App] mount: fromToolbar=', fromToolbar, 'toolbarShowing=', toolbarShowing, 'pendingScreen=', JSON.stringify(pendingScreen), 'initialScreen=', screen);
 
     if (fromToolbar) {
-
       if (getActiveMode()) stopMode();
       flushPendingTexts();
       resetTransientScreens();
@@ -347,7 +344,7 @@ function App(): React.JSX.Element {
       setResumeTick(n => n + 1);
       setTimeout(() => FloatingToolbarBridge.ackOpenMain(), 200);
     } else if (pendingScreen) {
-      FloatingToolbarBridge.hide();
+      if (pendingScreen !== 'penLock') FloatingToolbarBridge.hide();
       flushPendingTexts();
       reviveIfNeeded();
       if (pendingScreen === 'nativeSendHelper') {
@@ -356,42 +353,37 @@ function App(): React.JSX.Element {
         setTimeout(() => FloatingToolbarBridge.ackPendingScreen(), 200);
         runLassoExtraction();
       } else if (pendingScreen === 'nativeInsertHelper') {
-
         resetTransientScreens();
         setScreen('nativeHelper');
         setTimeout(() => FloatingToolbarBridge.ackPendingScreen(), 200);
       } else if (pendingScreen.startsWith('action:')) {
-
         const action = pendingScreen.slice(7);
         FloatingToolbarBridge.ackPendingScreen();
         setScreen('nativeHelper');
         runActionFlow(action);
+      } else if (pendingScreen === 'penLock') {
+        FloatingToolbarBridge.ackPendingScreen();
+        FloatingToolbarBridge.engagePenLock();
+        setScreen('penLock');
       } else {
         setScreen(pendingScreen as AppScreen);
         setResumeTick(n => n + 1);
         setTimeout(() => FloatingToolbarBridge.ackPendingScreen(), 200);
       }
     } else if (toolbarShowing) {
-
       const earlyPending = checkPendingButton();
       if (earlyPending === 999) {
-
         openMainPanel();
       } else if (earlyPending === 300) {
-
         FloatingToolbarBridge.hide();
         FloatingBubbleBridge.hide();
-
         setTimeout(() => loadScreenshot(), 100);
       } else if (earlyPending === 100) {
-
         setTimeout(() => { try { PluginManager.closePluginView(); } catch (_) {} }, 0);
       } else {
-
         setTimeout(() => { try { PluginManager.closePluginView(); } catch (_) {} }, 0);
       }
     } else if (hasScreenshotPending) {
-
       loadScreenshot();
     } else {
       openMainPanel();
@@ -481,6 +473,11 @@ function App(): React.JSX.Element {
           FloatingToolbarBridge.hide();
           setScreen('nativeHelper');
           runActionFlow(action);
+        } else if (pendingScr === 'penLock') {
+
+          FloatingToolbarBridge.ackPendingScreen();
+          FloatingToolbarBridge.engagePenLock();
+          setScreen('penLock');
         } else {
           FloatingToolbarBridge.hide();
           setScreen(pendingScr as AppScreen);
@@ -499,7 +496,7 @@ function App(): React.JSX.Element {
     });
 
     const tapSub = FloatingToolbarBridge.onTap(() => {
-      openMainPanel();
+
     });
 
     const permDeniedSub = FloatingToolbarBridge.onPermissionDenied(() => {
@@ -542,7 +539,7 @@ function App(): React.JSX.Element {
       if (state === 'active') {
         reviveIfNeeded();
         const pending = FloatingToolbarBridge.checkPendingOpenMainSync();
-        if (pending) {
+        if (pending && screenRef.current !== 'penLock') {
           FloatingToolbarBridge.hide();
           setScreen('main');
           FloatingToolbarBridge.ackOpenMain();
@@ -575,7 +572,7 @@ function App(): React.JSX.Element {
           return;
         }
         if (pendingScr) {
-          FloatingToolbarBridge.hide();
+          if (pendingScr !== 'penLock') FloatingToolbarBridge.hide();
           if (pendingScr === 'nativeSendHelper') {
             nativeSendActiveRef.current = true;
             setScreen('nativeHelper');
@@ -592,6 +589,7 @@ function App(): React.JSX.Element {
             runActionFlow(action);
           } else if (pendingScr === 'penLock') {
             FloatingToolbarBridge.ackPendingScreen();
+            FloatingToolbarBridge.engagePenLock();
             setScreen('penLock');
           } else {
             setScreen(pendingScr as AppScreen);
@@ -621,16 +619,17 @@ function App(): React.JSX.Element {
     const INSERT_DEDUP_MS = 1000;
     const nativeInsertSub = DeviceEventEmitter.addListener('nativeInsertImage', async (evt: {
       path: string;
+      fromQueue?: boolean;
       cacheBaseName?: string;
       replaceNotePath?: string;
       replacePageNum?: number;
       replaceNumInPage?: number;
     }) => {
-      const { path, cacheBaseName, replaceNotePath, replacePageNum, replaceNumInPage } = evt;
+      const { path, fromQueue, cacheBaseName, replaceNotePath, replacePageNum, replaceNumInPage } = evt;
       const now = Date.now();
       const elapsed = now - lastInsertTime;
-      console.log('[INSERT-DBG/App] nativeInsertImage event, path=', path, 'elapsed=', elapsed);
-      if (elapsed < INSERT_DEDUP_MS) {
+      console.log('[INSERT-DBG/App] nativeInsertImage event, path=', path, 'elapsed=', elapsed, 'fromQueue=', fromQueue);
+      if (!fromQueue && elapsed < INSERT_DEDUP_MS) {
         console.log('[INSERT-DBG/App] skipped (dedup, elapsed=' + elapsed + 'ms)');
         return;
       }
@@ -759,8 +758,8 @@ function App(): React.JSX.Element {
     });
 
     const penLockRequestSub = FloatingToolbarBridge.onPenLockRequest(() => {
-      FloatingToolbarBridge.setPendingScreen('penLock');
-      FloatingToolbarBridge.openPenLockView();
+      FloatingToolbarBridge.engagePenLock();
+      setScreen('penLock');
     });
 
     const penLockReleaseSub = FloatingToolbarBridge.onPenLockRelease(() => {
@@ -774,6 +773,7 @@ function App(): React.JSX.Element {
     });
 
     return () => {
+      setAppMounted(false);
       toolTapSub.remove();
       toolModeExitSub.remove();
       longPressSub.remove();

@@ -57,10 +57,24 @@ object NativeLocale {
         "confirm"                to ("确认" to "Confirm"),
         "lasso_clear"            to ("清除" to "Clear"),
         "lasso_hint"             to ("在要发送的内容外画一个闭合圈" to "Draw a closed shape around the content"),
+
+        "multi_select"           to ("选择多项" to "Select Multiple"),
+
+        "page_indicator"         to ("%d / %d" to "%d / %d"),
     )
 
     fun t(key: String): String {
         val pair = STRINGS[key] ?: return key
         return if (isZh) pair.first else pair.second
+    }
+
+    fun t(key: String, vararg args: Any): String {
+        val pair = STRINGS[key] ?: return key
+        val template = if (isZh) pair.first else pair.second
+        return String.format(template, *args)
+    }
+
+    fun itemCount(count: Int): String {
+        return if (isZh) "共${count}项" else "$count items"
     }
 }

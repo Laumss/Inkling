@@ -18,7 +18,8 @@ import { PluginManager } from 'sn-plugin-lib';
 | `getPluginDirPath()` | `Promise<string>` | Plugin's runtime directory path |
 | `getPluginName()` | `Promise<string>` | Plugin name from PluginConfig.json |
 | `getDeviceType()` | `Promise<number>` | Device type: 0=A5, 1=A6, 2=A6X, 3=A5X, 4=Nomad, 5=Manta |
-| `closePluginView()` | `void` | Close the plugin UI container |
+| `closePluginView()` | `Promise<boolean>` | Close the plugin UI container |
+| `showPluginView()` | `Promise<boolean>` | Show the plugin view while running in background. Added in 0.1.43. |
 
 ### Button Registration
 
@@ -69,6 +70,17 @@ registerEventListener(
   registerType: number, // 0=first, 1=normal, 2=last
   listener: { onMsg(msg: Element[]): void }
 ): { remove(): void };
+```
+
+```ts
+registerMotionListener(
+  registerType: number, // 0=first, 1=normal, 2=last
+  listener: { onMsg(msg: MotionEvent): void }
+): { remove(): void };
+// Added in 0.1.43. Listens for pen and finger touch events.
+// MotionEvent.toolType: 0=unknown, 1=finger, 2=EMR pen
+// MotionEvent.action: 0=ACTION_DOWN, 1=ACTION_UP, 2=ACTION_MOVE, 3=ACTION_CANCEL
+// msg.pointers is a Pointer[] with per-pointer x, y, pressure, toolType, pointerId
 ```
 
 ```ts
@@ -149,6 +161,7 @@ import { PluginCommAPI } from 'sn-plugin-lib';
 | `createElement` | `(type: number) → APIResponse<Element>` | Create native-side element with accessors. Always call before inserting. |
 | `recycleElement` | `(uuid: string) → void` | Free native-side cache for an element. |
 | `clearElementCache` | `() → void` | Free all cached element data. |
+| `getCacheElement` | `(uuid: string) → APIResponse<Element>` | Retrieve cached element data by UUID. Added in 0.1.43. |
 
 ### Sticker Operations
 
@@ -170,7 +183,7 @@ import { PluginCommAPI } from 'sn-plugin-lib';
 | `getLassoElements` | `() → APIResponse<Element[]>` | All elements in lasso selection. |
 | `getLassoElementTypeCounts` | `() → APIResponse<object>` | Detailed count object: `{trailNum, trailLinkNum, textLinkNum, todoLinkNum, titleNum, normalTextBoxNum, digestTextBoxNum, digestTextBoxEditableNum, geometryNum, straightLineNum, circleNum, ellipseNum, polygonNum}`. |
 | `deleteLassoElements` | `() → APIResponse<boolean>` | Delete all lasso-selected elements. |
-| `setLassoBoxState` | `(state: number) → APIResponse<boolean>` | `0`=show, `1`=hide, `2`=remove (permanent). |
+| `setLassoBoxState` | `(state: number) → APIResponse<boolean>` | `0`=show, `1`=hide, `2`=remove (permanent), `3`=hide all lasso UI but preserve lasso state (added in 0.1.43). |
 | `getLassoGeometries` | `() → APIResponse<Geometry[]>` | Geometries in lasso. |
 | `modifyLassoGeometry` | `(geometry: Geometry) → APIResponse<boolean>` | Modify a single lasso geometry. |
 
@@ -189,6 +202,12 @@ import { PluginCommAPI } from 'sn-plugin-lib';
 |--------|-----------|-------|
 | `recognizeElements` | `(elements: Object[], size: {width, height}) → APIResponse<string>` | Recognize stroke/text box elements as text. `size` is the note page size in pixels. |
 | `cancelRecognize` | `() → APIResponse<boolean>` | Cancel the current recognition task. |
+
+### Lasso Preview
+
+| Method | Signature | Notes |
+|--------|-----------|-------|
+| `generateLassoPreview` | `(imagePath: string) → APIResponse<LassoPreview>` | Generate preview image for lasso elements. `LassoPreview` = `{imagePath: string, rect: Rect, rotateDegree: number}`. Added in 0.1.43. |
 
 ### Geometry & Misc
 
@@ -305,6 +324,12 @@ import { PluginNoteAPI } from 'sn-plugin-lib';
 | `setLassoStrokeLink` | `({destPath, destPage, style, linkType}) → APIResponse<boolean>` | Convert lasso strokes to link. |
 | `modifyLassoLink` | `(lassoLink) → APIResponse<boolean>` | Modify single lasso link. |
 
+### Layer Preview
+
+| Method | Signature | Notes |
+|--------|-----------|-------|
+| `generateLayerPreviewImage` | `(notePath: string, page: number, layer: number, imagePath: string) → APIResponse<boolean>` | Generate a preview image for a specific layer on a specific page. NOTE files only. Added in 0.1.43. |
+
 ### Save
 
 | Method | Signature | Notes |
@@ -345,3 +370,62 @@ import { PointUtils } from 'sn-plugin-lib';
 - `2560×1920` (Manta landscape) → EMR max `16224×21632`
 
 **Constants**: `PointUtils.NORMAL_PAGE_SIZE`, `PointUtils.A5X2_PAGE_SIZE`, `PointUtils.MACHINE_TYPE_*` (A5=0..Manta=5), `PointUtils.ROTATION_*` (orientation constants). See `references/types.md §PointUtils Constants` for full list.
+
+---
+
+## §7 EventType & Touch Types (added in 0.1.43)
+
+```ts
+import { EventType, type MotionEvent, type Pointer } from 'sn-plugin-lib';
+```
+
+### EventType enum
+
+| Value | String | Used with |
+|-------|--------|-----------|
+| `PEN_UP` | `"event_pen_up"` | `registerEventListener` |
+| `IMPORT_STICKER` | `"event_import_sticker"` | `registerEventListener` |
+| `MOTION_EVENT` | `"motion_event"` | `registerMotionListener` (0.1.43+) |
+
+### MotionEvent
+
+Delivered to `registerMotionListener` callback via `listener.onMsg(msg)`.
+
+```ts
+interface MotionEvent {
+  pointers: Pointer[];   // all active pointers
+  x: number;             // primary pointer X
+  y: number;             // primary pointer Y
+  pressure: number;      // primary pointer pressure
+  toolType: number;      // 0=unknown, 1=finger, 2=EMR pen
+  action: number;        // 0=DOWN, 1=UP, 2=MOVE, 3=CANCEL
+  actionIndex: number;   // pointer index for this action
+  pointerCount: number;  // current active pointer count
+  downTime: number;      // timestamp of initial DOWN
+  eventTime: number;     // timestamp of this event
+}
+```
+
+### Pointer
+
+```ts
+interface Pointer {
+  x: number;
+  y: number;
+  pressure: number;
+  toolType: number;      // 0=unknown, 1=finger, 2=EMR pen
+  pointerId: number;     // unique pointer identifier
+}
+```
+
+### LassoPreview
+
+Returned by `PluginCommAPI.generateLassoPreview`.
+
+```ts
+class LassoPreview {
+  imagePath: string;
+  rect: { left: number; top: number; right: number; bottom: number };
+  rotateDegree: number;
+}
+```

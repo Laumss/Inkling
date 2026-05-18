@@ -116,10 +116,14 @@ The **only viable mechanism** on A5X2 (firmware 2025) is the PluginApp state pai
 
 #### Mechanism — `PluginApp.showPluginView(1)` ↔ `PluginApp.showPluginView(0)` (the state pair)
 
+> **⚠️ SDK 0.1.43 change**: The `PluginAppAPI` abstract class removed the `showPluginView(int)` overload — only `showPluginView()` (no-arg) remains in the SDK. However, the **device-side PluginHost firmware (A5X2 2026-05) still exposes the 1-arg method** on the concrete `PluginApp` class, so the reflection trick below still works at runtime. Code it defensively — a future firmware update may remove it. If the 1-arg method is not found, fall back to `closePluginView()` (which may not fire state:0, but the `disableAreaChanged` path from UI layout changes also releases the disable rects).
+>
+> **Logcat observation (0.1.43)**: `PluginStateTaskQueue` may DISCARD state:0 tasks. The actual pen disable release comes from `disableAreaChanged` triggered by the `AreaSelectionView` closing and `onGlobalLayout`, not solely from `notifyPluginState(0)`. The reflection call's primary value is triggering the broader state transition that leads to the UI layout change, not the state:0 notification itself.
+
 How it works: triggering `state:1` makes the note app run `sendFullScreenDisableArea(0,0,W,H)` (full-screen pen disable). Triggering `state:0` makes it run `disableAreaChanged → sendDisableAreaInfo(...)` which recomputes from layout — shrinking back to just the toolbar rect. The trick is releasing it:
 
-- **Disable**: call `NativePluginManager.showPluginView()` (no-arg). PluginApp internally defaults to `showType=1`, fires `notifyPluginState(1)`, note runs `sendFullScreenDisableArea`.
-- **Release**: NativePluginManager exposes only the no-arg variant — it cannot pass `showType=0`. **Reach into the `pluginApp` field by reflection** and call the int-arg overload directly:
+- **Disable**: call `NativePluginManager.showPluginView()` (no-arg) or `PluginManager.showPluginView()` (0.1.43+). PluginApp internally defaults to `showType=1`, fires `notifyPluginState(1)`, note runs `sendFullScreenDisableArea`.
+- **Release**: Neither `PluginManager` nor `NativePluginManager` can pass `showType=0`. **Reach into the `pluginApp` field by reflection** and call the int-arg overload directly:
 
 ```kotlin
 @ReactMethod
@@ -136,8 +140,12 @@ fun releasePenLock() {
                 it.name == "showPluginView" && it.parameterCount == 1 &&
                 (it.parameterTypes[0] == Int::class.javaPrimitiveType ||
                  it.parameterTypes[0] == java.lang.Integer::class.java)
-            } ?: return@post
-            showM.invoke(pa, 0)   // fires notifyPluginState(0) → note recomputes rects
+            }
+            if (showM != null) {
+                showM.invoke(pa, 0)   // fires notifyPluginState(0) → note recomputes rects
+            } else {
+                Log.w(TAG, "releasePenLock: 1-arg showPluginView not found, falling back to closePluginView")
+            }
         } catch (e: Exception) { Log.e(TAG, "releasePenLock: ${e.message}", e) }
     }
 }
@@ -258,7 +266,7 @@ restoreToolbar();
 | Step | Why |
 |------|-----|
 | `setPendingScreen('penLock')` | If plugin view is currently closed, `openPenLockView` will boot it and React will mount. Without this hint, React renders the default `'main'` screen and flashes the main panel briefly. |
-| `openPenLockView()` (no-arg) | `NativePluginManager.showPluginView` is no-arg; `PluginApp` defaults to `showType=1`, fires `notifyPluginState(1)`, note runs `sendFullScreenDisableArea`. |
+| `openPenLockView()` (no-arg) | `NativePluginManager.showPluginView` (or `PluginManager.showPluginView()` in 0.1.43+) is no-arg; `PluginApp` defaults to `showType=1`, fires `notifyPluginState(1)`, note runs `sendFullScreenDisableArea`. |
 | `await 150ms` | Cross-process state:1 chain (`PluginApp → PluginContainerService → PluginClientService → NoteInsidePagesActivity → HandWriteClient → drawAPP`) takes ~100ms. If the user's first stroke lands before drawAPP has the disable rect, that stroke leaks. |
 | `PenGuard.begin()` | EMR disable is fired-and-forget — there's no ack. Snapshot fallback covers any leaked stroke from the race window or unknown firmware behavior. |
 | `releasePenLock()` | The reflection-only path that fires `notifyPluginState(0)`. SDK `closePluginView` skips this notification. |
