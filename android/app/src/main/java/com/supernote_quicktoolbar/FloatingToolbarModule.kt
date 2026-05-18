@@ -1,4 +1,7 @@
 package com.supernote_quicktoolbar
+import com.supernote_quicktoolbar.panels.*
+import com.supernote_quicktoolbar.overlays.*
+import com.supernote_quicktoolbar.bubbles.*
 
 import android.graphics.Color
 import android.graphics.PixelFormat
@@ -65,6 +68,9 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         private var pendingScreen: String = ""
 
         @Volatile @JvmStatic
+        private var pendingShow: Boolean = false
+
+        @Volatile @JvmStatic
         private var insertPluginViewClosed: Boolean = false
 
         @Volatile @JvmStatic
@@ -89,13 +95,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         var lastNotePath: String = ""
         @Volatile @JvmStatic
         var lastPageNum: Int = 0
-        @Volatile @JvmStatic
-        private var cropReplaceActive: Boolean = false
-
-        @JvmStatic
-        fun clearCropReplaceContext() {
-            cropReplaceActive = false
-        }
 
         @Volatile @JvmStatic
         private var foregroundMonitorRunning = false
@@ -133,6 +132,9 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         private var penLassoOverlay: PenLassoOverlay? = null
 
         @Volatile @JvmStatic
+        private var strokeEraserOverlay: StrokeEraserOverlay? = null
+
+        @Volatile @JvmStatic
         private var isPenLocked: Boolean = false
 
         @JvmStatic
@@ -154,6 +156,15 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
     init {
         currentInstance = this
+    }
+
+    override fun initialize() {
+        super.initialize()
+        try {
+            ToolRegistry.init(this, reactApplicationContext)
+        } catch (e: Exception) {
+            android.util.Log.e(TAG, "ToolRegistry.init failed: ${e.message}", e)
+        }
     }
 
     override fun invalidate() {
@@ -185,6 +196,12 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     private val BTN_TEXT_SIZE_SP = 22f
     private val TITLE_TEXT_SIZE_SP = 13f
 
+    private val CLR_BTN_FG   = Color.parseColor("#1A1A1A")
+    private val CLR_BTN_ACT  = Color.parseColor("#111111")
+    private val CLR_SIDEBAR_BG = Color.WHITE
+    private val CLR_SEP      = Color.parseColor("#E8E8E5")
+    private val CLR_BORDER   = Color.parseColor("#111111")
+
     private val SIDE_INDICATOR_DP = 4
     private val HANDLE_WIDTH_DP = 4
     private val COLLAPSED_WIDTH_DP = 6
@@ -208,6 +225,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun show(toolsJson: String) {
+        pendingShow = true
         handler.post {
             try {
                 loadOrientationFromPrefs()
@@ -219,6 +237,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 stopForegroundMonitor()
                 startForegroundMonitor()
             } catch (e: Exception) { Log.e(TAG, "show: ${e.message}", e) }
+            pendingShow = false
         }
     }
 
@@ -322,7 +341,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     @ReactMethod fun isShowing(promise: Promise) { promise.resolve(rootView != null) }
 
     @ReactMethod(isBlockingSynchronousMethod = true)
-    fun isShowingSync(): Boolean = rootView != null
+    fun isShowingSync(): Boolean = rootView != null || pendingShow
 
     @ReactMethod
     fun checkPendingOpenMain(promise: Promise) {
@@ -672,10 +691,10 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     }
 
     private fun isAnyNativePanelOpen(): Boolean =
-        NativeImagePanel.currentInstance != null ||
-        NativeDocPanel.currentInstance != null ||
-        NativeScreenshotPanel.currentInstance != null ||
-        NativeSendPanel.currentInstance != null
+        ImagePanel.currentInstance != null ||
+        DocLinkPanel.currentInstance != null ||
+        DocScreenshotPanel.currentInstance != null ||
+        SendPanel.currentInstance != null
 
     private fun callSetFullAuto(enable: Boolean) = withNativePluginManager("callSetFullAuto") { pm ->
         val m = pm::class.java.methods.firstOrNull {
@@ -757,9 +776,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         val noArg = allMethods.firstOrNull { it.parameterCount == 0 }
         if (noArg != null) { noArg.invoke(pm); return@withNativePluginManager }
         val singleArg = allMethods.firstOrNull { it.parameterCount == 1 }
-        if (singleArg != null) { singleArg.invoke(pm, null as Any?); return@withNativePluginManager }
-        val fallback = allMethods.first()
-        fallback.invoke(pm, *arrayOfNulls<Any>(fallback.parameterCount))
+        if (singleArg != null) { singleArg.invoke(pm, PromiseImpl(null, null)); return@withNativePluginManager }
     }
 
     private fun callShowPluginViewWithType(showType: Int) = withNativePluginManager("callShowPluginViewWithType") { pm ->
@@ -783,7 +800,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             val noArg = methods.firstOrNull { it.parameterCount == 0 }
             if (noArg != null) { noArg.invoke(pm); Log.i(TAG, "$name() called"); return@withNativePluginManager }
             val singleArg = methods.firstOrNull { it.parameterCount == 1 }
-            if (singleArg != null) { singleArg.invoke(pm, null as Any?); Log.i(TAG, "$name(null) called"); return@withNativePluginManager }
+            if (singleArg != null) { singleArg.invoke(pm, PromiseImpl(null, null)); Log.i(TAG, "$name(promise) called"); return@withNativePluginManager }
         }
         Log.w(TAG, "callClosePluginView: no suitable method found")
     }
@@ -924,7 +941,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             orientation = LinearLayout.VERTICAL
             background = GradientDrawable().apply {
                 setColor(Color.WHITE)
-                setStroke(borderPx, Color.parseColor("#111111"))
+                setStroke(borderPx, CLR_BORDER)
                 cornerRadius = cornerR
             }
 
@@ -967,7 +984,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             TextView(ctx).apply {
                 text = label
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-                setTextColor(Color.parseColor("#111111"))
+                setTextColor(CLR_BTN_FG)
                 gravity = Gravity.CENTER
                 typeface = Typeface.DEFAULT_BOLD
                 background = null
@@ -1003,14 +1020,14 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             bodyRow.addView(toolContainer)
 
             bodyRow.addView(View(ctx).apply {
-                setBackgroundColor(Color.parseColor("#E8E8E5"))
+                setBackgroundColor(CLR_SEP)
                 layoutParams = LinearLayout.LayoutParams(titleSep, LinearLayout.LayoutParams.MATCH_PARENT)
             })
 
             val titleCol = LinearLayout(ctx).apply {
                 this.orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER_HORIZONTAL
-                setBackgroundColor(Color.parseColor("#FAFAF8"))
+                setBackgroundColor(CLR_SIDEBAR_BG)
                 layoutParams = LinearLayout.LayoutParams(titleColW, LinearLayout.LayoutParams.MATCH_PARENT)
                 setPadding(dpToPx(3), dpToPx(4), dpToPx(3), dpToPx(4))
             }
@@ -1030,7 +1047,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             val penLassoBtnV = TextView(ctx).apply {
                 text = "⊞"
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
-                setTextColor(Color.BLACK)
+                setTextColor(CLR_BTN_FG)
                 gravity = Gravity.CENTER
                 typeface = Typeface.DEFAULT_BOLD
                 background = null
@@ -1060,7 +1077,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 layoutParams = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT, titleH
                 )
-                setBackgroundColor(Color.parseColor("#FAFAF8"))
+                setBackgroundColor(CLR_SIDEBAR_BG)
             }
             val clipRow = LinearLayout(ctx).apply {
                 this.orientation = LinearLayout.HORIZONTAL
@@ -1082,7 +1099,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             titleRow.addView(clipRow)
 
             titleRow.addView(View(ctx).apply {
-                setBackgroundColor(Color.parseColor("#BBBBBB"))
+                setBackgroundColor(CLR_SEP)
                 layoutParams = LinearLayout.LayoutParams(dpToPx(1), (titleH * 0.6f).toInt()).apply {
                     marginStart = dpToPx(3)
                     marginEnd = dpToPx(3)
@@ -1092,7 +1109,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             titleRow.addView(TextView(ctx).apply {
                 text = "⇩"
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-                setTextColor(Color.parseColor("#555555"))
+                setTextColor(CLR_BTN_FG)
                 gravity = Gravity.CENTER
                 typeface = Typeface.DEFAULT_BOLD
                 background = null
@@ -1119,7 +1136,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             val penLassoBtnH = TextView(ctx).apply {
                 text = "⊞"
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
-                setTextColor(Color.BLACK)
+                setTextColor(CLR_BTN_FG)
                 gravity = Gravity.CENTER
                 typeface = Typeface.DEFAULT_BOLD
                 background = null
@@ -1130,7 +1147,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             expandedRoot!!.addView(titleRow)
 
             expandedRoot!!.addView(View(ctx).apply {
-                setBackgroundColor(Color.parseColor("#E8E8E5"))
+                setBackgroundColor(CLR_SEP)
                 layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, titleSep)
             })
 
@@ -1168,8 +1185,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     val lp = layoutParams ?: return@OnTouchListener false
                     startX = lp.x; startY = lp.y
                     startRawX = event.rawX; startRawY = event.rawY
-                    isDragging = false; longPressTriggered = false
-                    handler.postDelayed(longPressRunnable, LONG_PRESS_MS)
+                    isDragging = false
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
@@ -1177,7 +1193,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     val dx = event.rawX - startRawX; val dy = event.rawY - startRawY
                     if (!isDragging && (abs(dx) > 10 || abs(dy) > 10)) {
                         isDragging = true
-                        handler.removeCallbacks(longPressRunnable)
                     }
                     if (isDragging) {
                         lp.x = startX + dx.toInt()
@@ -1186,11 +1201,9 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     }; true
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    handler.removeCallbacks(longPressRunnable)
                     if (isDragging) {
                         val lp = layoutParams ?: return@OnTouchListener true
                         val vw = expandedRoot?.measuredWidth ?: 0
-
                         if (lp.x <= EDGE_COLLAPSE_THRESHOLD) {
                             dockSide = "left"
                             savePositionToPrefs(lp.x, lp.y)
@@ -1206,8 +1219,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                                 putInt("x", layoutParams!!.x); putInt("y", layoutParams!!.y)
                             })
                         }
-                    } else if (!longPressTriggered) {
-                        emitEvent("onToolbarTap", Arguments.createMap())
                     }; true
                 }
                 else -> false
@@ -1303,8 +1314,8 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
         fun makeToolButton(idx: Int, tool: ToolItem): View {
             val isActive = tool.latches && activeModeIds.contains(tool.id)
-            val activeBg = Color.parseColor("#111111")
-            val inactiveFg = Color.parseColor("#1A1A1A")
+            val activeBg = CLR_BTN_ACT
+            val inactiveFg = CLR_BTN_FG
 
             val iconDrawable = loadIconFromAssets(tool.id, btnSz, if (isActive) android.graphics.Color.WHITE else inactiveFg)
             if (idx == 0) {
@@ -1349,27 +1360,10 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             return view
         }
 
-        fun makeSpecialButton(glyph: String, onTap: () -> Unit): TextView {
-            return TextView(ctx).apply {
-                text = glyph
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, if (orientation == "vertical") 18f else BTN_TEXT_SIZE_SP)
-                setTextColor(Color.BLACK)
-                typeface = Typeface.DEFAULT_BOLD
-                gravity = Gravity.CENTER
-                background = GradientDrawable().apply {
-                    setColor(Color.TRANSPARENT); cornerRadius = 0f
-                }
-                layoutParams = LinearLayout.LayoutParams(btnSz, btnSz).apply {
-                    marginStart = gap / 2; marginEnd = gap / 2
-                }
-                setOnClickListener { onTap() }
-            }
-        }
-
         fun makePenLockButton(sz: Int, gapPx: Int): View {
             val locked = isPenLocked
-            val activeBg = Color.parseColor("#111111")
-            val fgColor = if (locked) Color.WHITE else Color.parseColor("#1A1A1A")
+            val activeBg = CLR_BTN_ACT
+            val fgColor = if (locked) Color.WHITE else CLR_BTN_FG
             val iconId = if (locked) "pen_lock_off" else "pen_lock"
             val iconDrawable = loadIconFromAssets(iconId, sz, fgColor)
 
@@ -1414,7 +1408,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             return view
         }
 
-        val showSwapBtn = (n >= 6 && n % 2 == 0)
         val showPenLock = (n != 5)
 
         if (orientation == "vertical") {
@@ -1435,10 +1428,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 c.addView(col)
             } else {
 
-                val extras = mutableListOf<Any>()
-                if (showPenLock) extras.add("pen_lock")
-                if (showSwapBtn) extras.add("swap")
-                val totalSlots = n + extras.size
+                val totalSlots = n + (if (showPenLock) 1 else 0)
                 val perCol = (totalSlots + 1) / 2
                 val colsContainer = LinearLayout(ctx).apply {
                     this.orientation = LinearLayout.HORIZONTAL
@@ -1458,9 +1448,8 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 for (slot in 0 until totalSlots) {
                     val col = if (slot < perCol) col1 else col2
                     val isCol1 = slot < perCol
-                    val toolIdx = slot
-                    val view: View = if (toolIdx < n) {
-                        makeToolButton(toolIdx, tools[toolIdx]).apply {
+                    val view: View = if (slot < n) {
+                        makeToolButton(slot, tools[slot]).apply {
                             (layoutParams as LinearLayout.LayoutParams).apply {
                                 marginStart = if (isCol1) 0 else gap / 2
                                 marginEnd = if (isCol1) gap / 2 else 0
@@ -1468,24 +1457,11 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                             }
                         }
                     } else {
-                        val extraIdx = toolIdx - n
-                        if (extras[extraIdx] == "pen_lock") {
-                            makePenLockButton(btnSz, gap).apply {
-                                (layoutParams as LinearLayout.LayoutParams).apply {
-                                    marginStart = if (isCol1) 0 else gap / 2
-                                    marginEnd = if (isCol1) gap / 2 else 0
-                                    bottomMargin = gap
-                                }
-                            }
-                        } else {
-                            makeSpecialButton("⇄") {
-                                val next = if (orientation == "vertical") "horizontal" else "vertical"
-                                setOrientation(next)
-                            }.apply {
-                                (layoutParams as LinearLayout.LayoutParams).apply {
-                                    marginStart = if (isCol1) 0 else gap / 2
-                                    marginEnd = if (isCol1) gap / 2 else 0
-                                }
+                        makePenLockButton(btnSz, gap).apply {
+                            (layoutParams as LinearLayout.LayoutParams).apply {
+                                marginStart = if (isCol1) 0 else gap / 2
+                                marginEnd = if (isCol1) gap / 2 else 0
+                                bottomMargin = gap
                             }
                         }
                     }
@@ -1513,10 +1489,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 c.addView(row)
             } else {
 
-                val extras = mutableListOf<Any>()
-                if (showPenLock) extras.add("pen_lock")
-                if (showSwapBtn) extras.add("swap")
-                val totalSlots = n + extras.size
+                val totalSlots = n + (if (showPenLock) 1 else 0)
                 val perRow = (totalSlots + 1) / 2
                 val row1 = LinearLayout(ctx).apply {
                     this.orientation = LinearLayout.HORIZONTAL
@@ -1534,19 +1507,10 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 }
                 for (slot in 0 until totalSlots) {
                     val row = if (slot < perRow) row1 else row2
-                    val toolIdx = slot
-                    val view: View = if (toolIdx < n) {
-                        makeToolButton(toolIdx, tools[toolIdx])
+                    val view: View = if (slot < n) {
+                        makeToolButton(slot, tools[slot])
                     } else {
-                        val extraIdx = toolIdx - n
-                        if (extras[extraIdx] == "pen_lock") {
-                            makePenLockButton(btnSz, gap)
-                        } else {
-                            makeSpecialButton("⇄") {
-                                val next = if (orientation == "vertical") "horizontal" else "vertical"
-                                setOrientation(next)
-                            }
-                        }
+                        makePenLockButton(btnSz, gap)
                     }
                     row.addView(view)
                 }
@@ -1563,8 +1527,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     private fun calcLayout(): Pair<Int, Int> {
         val n = tools.size
         val hasPenLock = n != 5
-        val hasSwap = n >= 6 && n % 2 == 0
-        val total = n + (if (hasPenLock) 1 else 0) + (if (hasSwap) 1 else 0)
+        val total = n + (if (hasPenLock) 1 else 0)
         if (total <= 5) return if (orientation == "vertical") Pair(1, total) else Pair(total, 1)
         val perMajor = (total + 1) / 2
         return if (orientation == "vertical") Pair(2, perMajor) else Pair(perMajor, 2)
@@ -1615,7 +1578,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 tool.action == "lasso_send" -> {
                     pendingScreen = "nativeSendHelper"
                     emitEvent("onNativePanelOpen", Arguments.createMap().apply { putString("panel", "send") })
-                    NativeSendPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show()
+                    SendPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show()
                     handler.postDelayed({
                         callShowPluginView()
                         emitOpenMainWithRetries("nativeSendHelper")
@@ -1637,8 +1600,8 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         if (v is ImageView) v.setColorFilter(Color.WHITE)
         handler.postDelayed({
             bg.setColor(Color.TRANSPARENT)
-            if (v is TextView) v.setTextColor(Color.parseColor("#1A1A1A"))
-            if (v is ImageView) v.setColorFilter(Color.parseColor("#1A1A1A"))
+            if (v is TextView) v.setTextColor(CLR_BTN_FG)
+            if (v is ImageView) v.setColorFilter(CLR_BTN_FG)
         }, 120L)
     }
 
@@ -1690,13 +1653,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     fun closeAllForSettings() {
         handler.post {
 
-            NativeImagePanel.currentInstance?.hide()
-            NativeDocPanel.currentInstance?.hide()
-            NativeSendPanel.currentInstance?.hide()
-            NativeLassoScreenshotPanel.currentInstance?.hide()
-
-            FloatingBubbleModule.hideStatic()
-            AiBubbleModule.hideStatic()
+            ToolRegistry.hideAll()
 
             removeAll()
 
@@ -1735,6 +1692,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     }
 
     private fun removeAll() {
+        pendingShow = false
         if (rootView != null) {
             try { windowManager?.removeView(rootView) } catch (_: Exception) {}
             rootView = null
@@ -1764,32 +1722,9 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         } catch (_: Exception) {}
     }
 
-    private fun hideAllNativePanels() {
-        NativeImagePanel.currentInstance?.hide()
-        NativeDocPanel.currentInstance?.hide()
-        NativeSendPanel.currentInstance?.hide()
-        NativeLassoScreenshotPanel.currentInstance?.hide()
-        NativeScreenshotPanel.currentInstance?.hide()
-
-        FloatingBubbleModule.hideStatic()
-        AiBubbleModule.hideStatic()
-    }
-
-    private fun suspendAllNativePanels() {
-        NativeImagePanel.currentInstance?.suspendVisibility()
-        NativeDocPanel.currentInstance?.suspendVisibility()
-        NativeSendPanel.currentInstance?.suspendVisibility()
-        NativeLassoScreenshotPanel.currentInstance?.suspendVisibility()
-        NativeScreenshotPanel.currentInstance?.suspendVisibility()
-    }
-
-    private fun resumeAllNativePanels() {
-        NativeImagePanel.currentInstance?.resumeVisibility()
-        NativeDocPanel.currentInstance?.resumeVisibility()
-        NativeSendPanel.currentInstance?.resumeVisibility()
-        NativeLassoScreenshotPanel.currentInstance?.resumeVisibility()
-        NativeScreenshotPanel.currentInstance?.resumeVisibility()
-    }
+    private fun hideAllNativePanels() = ToolRegistry.hideAll()
+    private fun suspendAllNativePanels() = ToolRegistry.suspendAll()
+    private fun resumeAllNativePanels() = ToolRegistry.resumeAll()
 
     private val density: Float get() = reactApplicationContext.resources.displayMetrics.density
     private fun dpToPx(dp: Int): Int = (dp * density).roundToInt()
@@ -1877,7 +1812,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun setLassoData(text: String, imagePathsJson: String, linkedFilesJson: String?) {
         handler.post {
-            val panel = NativeSendPanel.currentInstance
+            val panel = SendPanel.currentInstance
             if (panel != null) {
                 val paths = mutableListOf<String>()
                 try {
@@ -1904,21 +1839,45 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    @ReactMethod
-    fun showNativeImagePanel() {
-        handler.post {
-            removeAll()
-            emitEvent("onNativePanelOpen", Arguments.createMap().apply { putString("panel", "image") })
-            NativeImagePanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show()
+    @ReactMethod(isBlockingSynchronousMethod = true)
+    fun drainImageQueue(): String? {
+        synchronized(ImagePanel::class.java) {
+            val queue = ImagePanel.imageQueue
+            if (queue.isEmpty()) return null
+            val json = org.json.JSONArray(queue).toString()
+            queue.clear()
+            Log.i(TAG, "[QUEUE-DBG] drainImageQueue: drained $json")
+            return json
+        }
+    }
+
+    @ReactMethod(isBlockingSynchronousMethod = true)
+    fun drainDocLinkQueue(): String? {
+        synchronized(DocLinkPanel::class.java) {
+            val queue = DocLinkPanel.docLinkQueue
+            if (queue.isEmpty()) return null
+            val json = org.json.JSONArray(queue).toString()
+            queue.clear()
+            Log.i(TAG, "[QUEUE-DBG] drainDocLinkQueue: drained $json")
+            return json
         }
     }
 
     @ReactMethod
-    fun showNativeDocPanel() {
+    fun showImagePanel() {
+        handler.post {
+            removeAll()
+            emitEvent("onNativePanelOpen", Arguments.createMap().apply { putString("panel", "image") })
+            ImagePanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show()
+        }
+    }
+
+    @ReactMethod
+    fun showDocLinkPanel() {
         handler.post {
             removeAll()
             emitEvent("onNativePanelOpen", Arguments.createMap().apply { putString("panel", "doc") })
-            NativeDocPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show()
+            DocLinkPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show()
         }
     }
 
@@ -1937,7 +1896,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 Log.i(TAG, "[INSERT-DBG/Kt] direct insert from queue: $nextPath (queue has ${queueFiles.size} files)")
 
                 kotlin.concurrent.thread(isDaemon = true) {
-                    NativeImagePanel.saveToInsertCacheStatic(nextPath, lastNotePath, lastPageNum)
+                    ImagePanel.saveToInsertCacheStatic(nextPath, lastNotePath, lastPageNum)
                 }
                 handler.postDelayed({
                     try { requestInsertImage(nextPath) }
@@ -1946,18 +1905,18 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             } else {
                 callClosePluginView()
                 emitEvent("onNativePanelOpen", Arguments.createMap().apply { putString("panel", "screenshot") })
-                NativeScreenshotPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show()
+                DocScreenshotPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show()
             }
         }
     }
 
     @ReactMethod
-    fun showNativeSendPanelFromBubble() {
+    fun showSendPanelFromBubble() {
         handler.post {
-            Log.i(TAG, "showNativeSendPanelFromBubble")
+            Log.i(TAG, "showSendPanelFromBubble")
             pendingScreen = "nativeSendHelper"
             emitEvent("onNativePanelOpen", Arguments.createMap().apply { putString("panel", "send") })
-            NativeSendPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show(fromBubble = true)
+            SendPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show(fromBubble = true)
             handler.postDelayed({
                 callShowPluginView()
                 emitOpenMainWithRetries("nativeSendHelper")
@@ -1966,27 +1925,27 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun showNativeLassoScreenshotPanelFromBubble() {
+    fun showLassoScreenshotPanelFromBubble() {
         handler.post {
-            Log.i(TAG, "showNativeLassoScreenshotPanelFromBubble")
+            Log.i(TAG, "showLassoScreenshotPanelFromBubble")
             removeAll()
             FloatingBubbleModule.hideStatic()
             AiBubbleModule.hideStatic()
             emitEvent("onNativePanelOpen", Arguments.createMap().apply { putString("panel", "lassoScreenshot") })
-            NativeLassoScreenshotPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule)
+            LassoScreenshotPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule)
                 .captureAndShow(fromBubble = true, mode = "ai")
         }
     }
 
     @ReactMethod
-    fun showNativeLassoScreenshotPanelForSendFromBubble() {
+    fun showLassoScreenshotPanelForSendFromBubble() {
         handler.post {
-            Log.i(TAG, "showNativeLassoScreenshotPanelForSendFromBubble")
+            Log.i(TAG, "showLassoScreenshotPanelForSendFromBubble")
             removeAll()
             FloatingBubbleModule.hideStatic()
             AiBubbleModule.hideStatic()
             emitEvent("onNativePanelOpen", Arguments.createMap().apply { putString("panel", "lassoScreenshot") })
-            NativeLassoScreenshotPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule)
+            LassoScreenshotPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule)
                 .captureAndShow(fromBubble = true, mode = "send")
         }
     }
@@ -2024,13 +1983,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 captureToastView = null
             }
 
-            NativeImagePanel.currentInstance?.hide()
-            NativeDocPanel.currentInstance?.hide()
-            NativeSendPanel.currentInstance?.hide()
-            NativeLassoScreenshotPanel.currentInstance?.hide()
-
-            FloatingBubbleModule.hideStatic()
-            AiBubbleModule.hideStatic()
+            ToolRegistry.hideAll()
 
             callClosePluginView()
             Log.i(TAG, "destroyAll: done")
@@ -2090,11 +2043,11 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 Log.i(TAG, "foreground monitor: returned to note app")
                 monitorHandler.post {
                     resumeAllNativePanels()
-                    val anyPanelOpen = NativeImagePanel.currentInstance != null
-                        || NativeDocPanel.currentInstance != null
-                        || NativeSendPanel.currentInstance != null
-                        || NativeLassoScreenshotPanel.currentInstance != null
-                        || NativeScreenshotPanel.currentInstance != null
+                    val anyPanelOpen = ImagePanel.currentInstance != null
+                        || DocLinkPanel.currentInstance != null
+                        || SendPanel.currentInstance != null
+                        || LassoScreenshotPanel.currentInstance != null
+                        || DocScreenshotPanel.currentInstance != null
                     if (!anyPanelOpen) {
                         if (wasVisibleBeforeBackground && tools.isNotEmpty() && rootView == null) {
                             collapsed = false
@@ -2192,6 +2145,51 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         handler.post {
             penLassoOverlay?.dismiss()
             penLassoOverlay = null
+        }
+    }
+
+    @ReactMethod
+    fun showStrokeEraserOverlay() {
+        handler.post {
+            try {
+                strokeEraserOverlay?.dismiss()
+                strokeEraserOverlay = StrokeEraserOverlay(reactApplicationContext).apply {
+                    show(
+                        onPath = { pts ->
+                            handler.post {
+                                strokeEraserOverlay = null
+                                val arr = Arguments.createArray()
+                                for (p in pts) {
+                                    arr.pushMap(Arguments.createMap().apply {
+                                        putDouble("x", p.x.toDouble())
+                                        putDouble("y", p.y.toDouble())
+                                    })
+                                }
+                                emitEvent("onStrokeEraserPath", Arguments.createMap().apply {
+                                    putArray("points", arr)
+                                })
+                            }
+                        },
+                        onCancel = {
+                            handler.post {
+                                strokeEraserOverlay = null
+                                emitEvent("onStrokeEraserCancel", Arguments.createMap())
+                            }
+                        }
+                    )
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "showStrokeEraserOverlay failed: ${e.message}", e)
+                emitEvent("onStrokeEraserCancel", Arguments.createMap())
+            }
+        }
+    }
+
+    @ReactMethod
+    fun dismissStrokeEraserOverlay() {
+        handler.post {
+            strokeEraserOverlay?.dismiss()
+            strokeEraserOverlay = null
         }
     }
 

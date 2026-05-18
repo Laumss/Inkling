@@ -15,7 +15,7 @@ import {
   StitchImage,
   StitchParams,
   ImageCrop,
-} from './StitchSession';
+} from './ScreenshotPipeline';
 
 const HEADER_H = 56;
 const CTRL_H = 120;
@@ -626,4 +626,3 @@ const st = StyleSheet.create({
   },
   loadingText: { fontSize: 18, color: '#000' },
 });
-

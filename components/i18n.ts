@@ -113,6 +113,7 @@ const STRINGS = {
   collapse:               { zh: '收起',          en: 'Collapse' },
   orient_h:               { zh: '横向',          en: 'H' },
   orient_v:               { zh: '纵向',          en: 'V' },
+
 };
 
 type StringKey = keyof typeof STRINGS;

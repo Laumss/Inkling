@@ -486,4 +486,3 @@ const st = StyleSheet.create({
     fontSize: 16,
   },
 });
-

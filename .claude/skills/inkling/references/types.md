@@ -434,3 +434,52 @@ output). It appears in `Stroke.recognPoints: ElementDataAccessor<RecognData>`.
 |----------|-------|
 | `PointUtils.NORMAL_PAGE_SIZE` | `{ width: 1404, height: 1872 }` |
 | `PointUtils.A5X2_PAGE_SIZE` | `{ width: 1920, height: 2560 }` |
+
+---
+
+## MotionEvent & Pointer (0.1.43+)
+
+Used with `PluginManager.registerMotionListener`. Imported from `sn-plugin-lib`.
+
+### MotionEvent
+
+```ts
+interface MotionEvent {
+  pointers: Pointer[];
+  x: number;              // primary pointer X
+  y: number;              // primary pointer Y
+  pressure: number;       // primary pointer pressure
+  toolType: number;       // 0=unknown, 1=finger, 2=EMR pen
+  action: number;         // 0=ACTION_DOWN, 1=ACTION_UP, 2=ACTION_MOVE, 3=ACTION_CANCEL
+  actionIndex: number;
+  pointerCount: number;
+  downTime: number;
+  eventTime: number;
+}
+```
+
+### Pointer
+
+```ts
+interface Pointer {
+  x: number;
+  y: number;
+  pressure: number;
+  toolType: number;       // 0=unknown, 1=finger, 2=EMR pen
+  pointerId: number;
+}
+```
+
+---
+
+## LassoPreview (0.1.43+)
+
+Returned by `PluginCommAPI.generateLassoPreview`.
+
+```ts
+class LassoPreview {
+  imagePath: string;
+  rect: { left: number; top: number; right: number; bottom: number };
+  rotateDegree: number;
+}
+```

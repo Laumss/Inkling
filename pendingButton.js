@@ -10,7 +10,10 @@ export const checkPendingButton = () => {
   return val;
 };
 
-/** Read pending button ID without clearing it */
 export const peekPendingButton = () => {
   return pendingButtonId;
 };
+
+let _appMounted = false;
+export const setAppMounted = (v) => { _appMounted = v; };
+export const isAppMounted = () => _appMounted;

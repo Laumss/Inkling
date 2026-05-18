@@ -1,5 +1,8 @@
 import { PluginFileAPI, PluginCommAPI, PluginNoteAPI, PluginManager } from 'sn-plugin-lib';
+import { NativeModules } from 'react-native';
 import { FileLogger } from './FileLogger';
+
+const { TextLayoutEngine } = NativeModules;
 
 export type InsertMode = 'nospacing' | 'paragraph';
 
@@ -494,8 +497,7 @@ export class TextInserter {
   }
 
   private async _insertParagraph(mode: InsertMode): Promise<'continue' | 'pause' | 'done'> {
-    const cfg = MODE_CONFIG[mode];
-    if (!cfg || !this.pageSize) return 'done';
+    if (!MODE_CONFIG[mode] || !this.pageSize) return 'done';
 
     if (this._paused) {
       return 'continue';
@@ -543,41 +545,31 @@ export class TextInserter {
 
     const ps = this.pageSize;
     const tm = this._topMargin();
-    const left     = Math.floor(ps.width * PAGE_MARGIN_LEFT);
-    const right    = ps.width - Math.floor(ps.width * PAGE_MARGIN_RIGHT);
-    const maxH     = Math.floor(ps.height * cfg.threshold);
-    const boxWidth = right - left;
-
-    const cjkCount = (text.match(/[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/g) || []).length;
-    const cjkRatio = text.length > 0 ? cjkCount / text.length : 0;
-    const charWidthFactor = CHAR_WIDTH_FACTOR_CJK * cjkRatio + CHAR_WIDTH_FACTOR_LATIN * (1 - cjkRatio);
-    const charsPerLine = Math.max(1, Math.floor(boxWidth / (FONT_SIZE * charWidthFactor)));
-
-    const segments = text.split('\n');
-    const lines = segments.reduce((acc, seg, idx) => {
-      if (seg.trim().length === 0) return acc;
-      const segLines = Math.max(1, Math.ceil(seg.length / charsPerLine));
-      const newlineGap = cfg.newlineGapLines > 0 &&
-        (idx < segments.length - 1 && segments[idx + 1].trim().length > 0)
-        ? cfg.newlineGapLines : 0;
-      return acc + segLines + newlineGap;
-    }, 0);
-    const boxH = Math.ceil(lines * FONT_SIZE * cfg.lineHeightRatio);
 
     if (this._occupiedPage !== this.targetPage) {
       await this._refreshOccupiedRanges();
     }
 
-    let top = this.pageNextTop.get(this.targetPage) ?? tm;
+    const nextTopVal = this.pageNextTop.get(this.targetPage) ?? tm;
 
-    top = this._skipOccupiedArea(top, boxH, Math.max(cfg.boxGap, 10));
+    const layout = await sdkCall(TextLayoutEngine.calculateLayout({
+      text,
+      mode,
+      pageWidth: ps.width,
+      pageHeight: ps.height,
+      nextTop: nextTopVal,
+      occupiedRanges: this._occupiedRanges,
+    }), 'TextLayoutEngine.calculateLayout');
 
-    const bottom = Math.min(top + boxH, ps.height - tm);
+    const { left, right, boxHeight: boxH, lines } = layout;
+    let top: number = layout.top;
+    const bottom = layout.bottom;
+    const maxH: number = layout.maxH;
     const remainH = maxH - top;
     FileLogger.logEvent('BoxCalc',
-      `mode=${mode} segments=${segments.length} lines=${lines} boxH=${boxH} top=${top} maxH=${maxH} remainH=${remainH} gap=${cfg.boxGap} fits=${boxH <= remainH} topMargin=${tm}`);
+      `mode=${mode} lines=${lines} boxH=${boxH} top=${top} maxH=${maxH} remainH=${remainH} gap=${layout.boxGap} fits=${boxH <= remainH} topMargin=${tm}`);
 
-    if (top >= maxH || (top > tm + 80 && top + boxH > ps.height - tm)) {
+    if (layout.newPage) {
       if (isFromQueue) {
         this.textQueue.unshift({ text, source: itemSource });
       }
@@ -705,15 +697,15 @@ export class TextInserter {
           && actualBottom <= maxReasonableBottom)
           ? actualBottom
           : bottom;
-        this.pageNextTop.set(this.targetPage, effectiveBottom + cfg.boxGap);
+        this.pageNextTop.set(this.targetPage, effectiveBottom + layout.boxGap);
 
         this._addToOccupied(top, effectiveBottom);
 
         FileLogger.logEvent('InsertPos',
-          `top=${top} estimatedBottom=${bottom} actualBottom=${actualBottom} effectiveBottom=${effectiveBottom} nextTop=${effectiveBottom + cfg.boxGap} source=${itemSource} preview=${text.slice(0, 40).replace(/\n/g, '↵')}`);
+          `top=${top} estimatedBottom=${bottom} actualBottom=${actualBottom} effectiveBottom=${effectiveBottom} nextTop=${effectiveBottom + layout.boxGap} source=${itemSource} preview=${text.slice(0, 40).replace(/\n/g, '↵')}`);
 
         this.onAck?.(text, true, null);
-        this.onPositionChanged?.(this.targetPage, effectiveBottom + cfg.boxGap, itemSource, false);
+        this.onPositionChanged?.(this.targetPage, effectiveBottom + layout.boxGap, itemSource, false);
         return 'continue';
       } else {
         const errMsg = res?.error?.message || 'insertText failed';

@@ -1,6 +1,6 @@
 {
   "name": "Inkling",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Floating quick toolbar plugin for Supernote NOTE app",
   "scripts": {
@@ -14,7 +14,7 @@
     "react": "19.0.0",
     "react-native": "0.79.2",
     "react-native-fs": "^2.20.0",
-    "sn-plugin-lib": "^0.1.34"
+    "sn-plugin-lib": "^0.1.43"
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",

@@ -204,19 +204,37 @@ const FloatingToolbarBridge = {
     }
   },
 
-  showNativeImagePanel(): void {
+  drainImageQueue(): string[] {
     try {
-      FloatingToolbar?.showNativeImagePanel();
+      const json = FloatingToolbar?.drainImageQueue();
+      return json ? JSON.parse(json) : [];
     } catch (e) {
-      console.warn('[FloatingToolbarBridge]: showNativeImagePanel failed:', e);
+      return [];
     }
   },
 
-  showNativeDocPanel(): void {
+  drainDocLinkQueue(): string[] {
     try {
-      FloatingToolbar?.showNativeDocPanel();
+      const json = FloatingToolbar?.drainDocLinkQueue();
+      return json ? JSON.parse(json) : [];
     } catch (e) {
-      console.warn('[FloatingToolbarBridge]: showNativeDocPanel failed:', e);
+      return [];
+    }
+  },
+
+  showImagePanel(): void {
+    try {
+      FloatingToolbar?.showImagePanel();
+    } catch (e) {
+      console.warn('[FloatingToolbarBridge]: showImagePanel failed:', e);
+    }
+  },
+
+  showDocLinkPanel(): void {
+    try {
+      FloatingToolbar?.showDocLinkPanel();
+    } catch (e) {
+      console.warn('[FloatingToolbarBridge]: showDocLinkPanel failed:', e);
     }
   },
 
@@ -228,27 +246,27 @@ const FloatingToolbarBridge = {
     }
   },
 
-  showNativeSendPanelFromBubble(): void {
+  showSendPanelFromBubble(): void {
     try {
-      FloatingToolbar?.showNativeSendPanelFromBubble();
+      FloatingToolbar?.showSendPanelFromBubble();
     } catch (e) {
-      console.warn('[FloatingToolbarBridge]: showNativeSendPanelFromBubble failed:', e);
+      console.warn('[FloatingToolbarBridge]: showSendPanelFromBubble failed:', e);
     }
   },
 
-  showNativeLassoScreenshotPanelFromBubble(): void {
+  showLassoScreenshotPanelFromBubble(): void {
     try {
-      FloatingToolbar?.showNativeLassoScreenshotPanelFromBubble();
+      FloatingToolbar?.showLassoScreenshotPanelFromBubble();
     } catch (e) {
-      console.warn('[FloatingToolbarBridge]: showNativeLassoScreenshotPanelFromBubble failed:', e);
+      console.warn('[FloatingToolbarBridge]: showLassoScreenshotPanelFromBubble failed:', e);
     }
   },
 
-  showNativeLassoScreenshotPanelForSendFromBubble(): void {
+  showLassoScreenshotPanelForSendFromBubble(): void {
     try {
-      FloatingToolbar?.showNativeLassoScreenshotPanelForSendFromBubble();
+      FloatingToolbar?.showLassoScreenshotPanelForSendFromBubble();
     } catch (e) {
-      console.warn('[FloatingToolbarBridge]: showNativeLassoScreenshotPanelForSendFromBubble failed:', e);
+      console.warn('[FloatingToolbarBridge]: showLassoScreenshotPanelForSendFromBubble failed:', e);
     }
   },
 
@@ -443,6 +461,30 @@ const FloatingToolbarBridge = {
     const emitter = getEmitter();
     if (!emitter) return { remove() {} };
     return emitter.addListener('onPenLassoCancel', callback);
+  },
+
+  showStrokeEraserOverlay(): void {
+    try { FloatingToolbar?.showStrokeEraserOverlay(); } catch (e) {
+      console.warn('[FloatingToolbarBridge]: showStrokeEraserOverlay failed:', e);
+    }
+  },
+
+  dismissStrokeEraserOverlay(): void {
+    try { FloatingToolbar?.dismissStrokeEraserOverlay(); } catch (e) {
+      console.warn('[FloatingToolbarBridge]: dismissStrokeEraserOverlay failed:', e);
+    }
+  },
+
+  onStrokeEraserPath(callback: (event: { points: Array<{ x: number; y: number }> }) => void): { remove(): void } {
+    const emitter = getEmitter();
+    if (!emitter) return { remove() {} };
+    return emitter.addListener('onStrokeEraserPath', callback);
+  },
+
+  onStrokeEraserCancel(callback: () => void): { remove(): void } {
+    const emitter = getEmitter();
+    if (!emitter) return { remove() {} };
+    return emitter.addListener('onStrokeEraserCancel', callback);
   },
 };
 
