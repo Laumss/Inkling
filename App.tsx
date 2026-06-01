@@ -1,18 +1,20 @@
+
+
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
-  View, StyleSheet, Pressable, Text, StatusBar, Dimensions,
-  ScrollView, DeviceEventEmitter, AppState, AppStateStatus, NativeModules,
+  View, StyleSheet, Pressable, Text, StatusBar, Dimensions, Image,
+  ScrollView, DeviceEventEmitter, AppState, AppStateStatus,
 } from 'react-native';
 import { PluginManager, PluginNoteAPI, PluginFileAPI, PluginCommAPI } from 'sn-plugin-lib';
 
 import FloatingToolbarBridge, { ToolItem } from './components/FloatingToolbarBridge';
-import FloatingBubbleBridge from './components/FloatingBubbleBridge';
+import FloatingBubbleBridge from './components/BubbleBridges';
 import {
   AVAILABLE_TOOLS, getAvailableTools,
   loadConfig, saveConfig, isValidToolCount,
   loadClips, injectClipStatus, ClipData,
   getLayoutForCount, getToolCategory, ToolCategory,
-  getAvailableBubbleActions, loadBubbleActions, saveBubbleActions, BubbleAction,
+  loadBubbleActions, saveBubbleActions, BubbleAction,
 } from './components/ToolPresets';
 import {
   ensureInit, getActiveMode, flushPendingTexts, reviveIfNeeded,
@@ -24,19 +26,17 @@ import { FileLogger } from './components/FileLogger';
 import { LassoExtractor } from './components/LassoExtractor';
 import { checkPendingButton, peekPendingButton, setAppMounted } from './pendingButton';
 import { t } from './components/i18n';
+import WeChatTransferBridge from './components/WeChatTransferBridge';
+import { appendPageWithLink } from './components/AppendPageService';
 
-import { CropOverlay, CropResult } from './components/CropOverlay';
-import { StitchEditor } from './components/StitchEditor';
-import { StitchSession, StitchSessionData, StagingService, ScreenshotService } from './components/ScreenshotPipeline';
-import { PenGuard } from './components/PenTools';
-const { ScreenshotModule } = NativeModules;
+function getScreenDims() {
+  const d = Dimensions.get('window');
+  return { width: d.width, height: d.height };
+}
+function getWindowWidth()  { return getScreenDims().width  * 0.72; }
+function getWindowHeight() { return getScreenDims().height * 0.78; }
 
-const screenWidth  = Dimensions.get('window').width;
-const screenHeight = Dimensions.get('window').height;
-const WINDOW_WIDTH  = screenWidth  * 0.65;
-const WINDOW_HEIGHT = screenHeight * 0.72;
-
-type AppScreen = 'main' | 'add_tool' | 'permission' | 'nativeHelper' | 'cropping' | 'stitching' | 'penLock';
+type AppScreen = 'main' | 'add_tool' | 'permission' | 'nativeHelper' | 'penLock' | 'wechat_qr';
 type CatFilter = 'all' | 'layer' | 'insert' | 'text' | 'lasso';
 
 const CAT_FILTERS: { key: CatFilter; labelKey: string }[] = [
@@ -45,13 +45,6 @@ const CAT_FILTERS: { key: CatFilter; labelKey: string }[] = [
   { key: 'insert', labelKey: 'cat_insert' },
   { key: 'text',   labelKey: 'cat_text' },
   { key: 'lasso',  labelKey: 'cat_lasso' },
-];
-
-const LAYOUT_OPTIONS = [
-  { key: '3x2', cols: 3, rows: 2, count: 4,  label: '3×2' },
-  { key: '4x2', cols: 4, rows: 2, count: 6,  label: '4×2' },
-  { key: '3x3', cols: 3, rows: 3, count: 7,  label: '3×3' },
-  { key: '4x3', cols: 4, rows: 3, count: 10, label: '4×3' },
 ];
 
 function MiniToolbarPreview({ tools, side }: { tools: ToolItem[]; side: 'left' | 'right' }) {
@@ -87,10 +80,8 @@ function App(): React.JSX.Element {
 
   const initialPending = peekPendingButton();
   const initialPendingScreen = FloatingToolbarBridge.getPendingScreenSync();
-  const hasScreenshotPending = ScreenshotModule?.hasPendingPath?.() === true;
-  console.log('[LASSO-DBG/App] App component init: pendingBtn=', initialPending, 'pendingScreen=', JSON.stringify(initialPendingScreen), 'hasScreenshotPending=', hasScreenshotPending);
+  console.log('[App] init: pendingBtn=', initialPending, 'pendingScreen=', JSON.stringify(initialPendingScreen));
   const [screen, setScreen]               = useState<AppScreen>(
-    (initialPending === 300 || hasScreenshotPending) ? 'nativeHelper' :
     (initialPendingScreen === 'penLock') ? 'penLock' :
     'main'
   );
@@ -103,17 +94,12 @@ function App(): React.JSX.Element {
   const dockSide                          = 'left' as const;
   const [catFilter, setCatFilter]         = useState<CatFilter>('all');
   const [bubbleActionIds, setBubbleActionIds] = useState<string[]>([]);
-  const allBubbleActions                      = getAvailableBubbleActions();
   const [toolbarOrientation, setToolbarOrientation] = useState<'horizontal' | 'vertical'>(
     () => (FloatingToolbarBridge as any).getOrientationSync?.() || 'horizontal'
   );
+  const [wechatStatus, setWechatStatus] = useState<'idle'|'registering'|'scanning'|'bound'|'error'>('idle');
+  const [wechatMsg, setWechatMsg] = useState('');
 
-  const [screenshotUri, setScreenshotUri]       = useState<string | null>(null);
-  const [originalSize, setOriginalSize]         = useState({ width: 0, height: 0 });
-  const [hasStitchSession, setHasStitchSession] = useState(false);
-  const [stitchSession, setStitchSession]       = useState<StitchSessionData | null>(null);
-  const [isCompositing, setIsCompositing]       = useState(false);
-  const screenshotBusyRef = useRef(false);
   const actionInProgressRef = useRef(false);
   const nativeSendActiveRef = useRef(false);
 
@@ -135,166 +121,24 @@ function App(): React.JSX.Element {
     FloatingToolbarBridge.updateTools(injectClipStatus(tl, data, m));
   }, []);
 
-  const resetTransientScreens = useCallback(() => {
-    setScreenshotUri(null);
-    setOriginalSize({ width: 0, height: 0 });
-    setStitchSession(null);
-  }, []);
-
   const openMainPanel = useCallback(() => {
+    FloatingToolbarBridge.closeAllForSettings();
+    if (getActiveMode()) stopMode();
+    stopAiMode();
     flushPendingTexts();
     reviveIfNeeded();
-    resetTransientScreens();
     FloatingToolbarBridge.ackPendingScreen();
     setScreen('main');
     setResumeTick(n => n + 1);
-  }, [resetTransientScreens]);
+  }, []);
 
   const layout      = getLayoutForCount(tools.length);
   const layoutLabel = `${layout.cols}×${layout.rows}`;
 
-  const loadScreenshot = useCallback(async () => {
-    console.log('[CROP-DBG/App] loadScreenshot START, busy=', screenshotBusyRef.current);
-    if (screenshotBusyRef.current) return;
-    screenshotBusyRef.current = true;
-    setScreen('cropping');
-    setScreenshotUri(null);
-    setOriginalSize({ width: 0, height: 0 });
-    try {
-      const nativePath: string | null = await ScreenshotModule.getPendingPath();
-      console.log('[CROP-DBG/App] getPendingPath =', nativePath);
-      const dims = await ScreenshotService.getDeviceDimensions();
-      console.log('[CROP-DBG/App] device dims =', dims);
-
-      let uri: string;
-      if (nativePath) {
-        uri = `file://${nativePath}`;
-      } else {
-        console.log('[CROP-DBG/App] no native path, calling ScreenshotService.capture()');
-        uri = await ScreenshotService.capture();
-        console.log('[CROP-DBG/App] capture result =', uri);
-      }
-
-      const activeSession = await StitchSession.load();
-      if (activeSession && activeSession.images.length >= 1) {
-        const rawPath = nativePath || uri.replace('file://', '');
-        const updatedSession = await StitchSession.addImage(rawPath, dims.width, dims.height);
-        if (updatedSession && updatedSession.images.length >= 2) {
-          console.log('[CROP-DBG/App] entering stitch mode');
-          setStitchSession(updatedSession);
-          setScreen('stitching');
-          screenshotBusyRef.current = false;
-          return;
-        }
-      }
-
-      console.log('[CROP-DBG/App] setting screenshotUri =', uri, 'dims =', dims);
-      setScreenshotUri(uri);
-      setOriginalSize(dims);
-      const active = await StitchSession.hasActiveSession();
-      setHasStitchSession(active);
-    } catch (e) {
-      console.error('[CROP-DBG/App] loadScreenshot error:', e);
-    } finally {
-      screenshotBusyRef.current = false;
-      console.log('[CROP-DBG/App] loadScreenshot END');
-    }
-  }, []);
-
-  const handleCropConfirm = useCallback(async (crop: CropResult, stayOpen: boolean) => {
-    if (!screenshotUri || screenshotBusyRef.current) return;
-    screenshotBusyRef.current = true;
-    try {
-      const croppedUri = await ScreenshotService.crop(screenshotUri, crop);
-      await StagingService.stageToQueueOnly(croppedUri, { deleteSrcAfter: true });
-      if (!stayOpen) PluginManager.closePluginView();
-    } catch {} finally {
-      screenshotBusyRef.current = false;
-    }
-  }, [screenshotUri]);
-
-  const handleLongScreenshot = useCallback(async () => {
-    if (!screenshotUri || screenshotBusyRef.current) return;
-    screenshotBusyRef.current = true;
-    try {
-      const rawPath = screenshotUri.replace('file://', '');
-      const existingSession = await StitchSession.load();
-      if (existingSession) {
-        await StitchSession.addImage(rawPath, originalSize.width, originalSize.height);
-      } else {
-        await StitchSession.startSession(rawPath, originalSize.width, originalSize.height);
-      }
-      PluginManager.closePluginView();
-    } catch {} finally {
-      screenshotBusyRef.current = false;
-    }
-  }, [screenshotUri, originalSize]);
-
-  const handleCropAddToHistory = useCallback(async (crop: CropResult, stayOpen: boolean) => {
-    if (!screenshotUri || screenshotBusyRef.current) return;
-    screenshotBusyRef.current = true;
-    try {
-      const croppedUri = await ScreenshotService.crop(screenshotUri, crop);
-      await StagingService.saveToHistoryOnly(croppedUri);
-      if (!stayOpen) PluginManager.closePluginView();
-    } catch {} finally {
-      screenshotBusyRef.current = false;
-    }
-  }, [screenshotUri]);
-
-  const handleStitchConfirm = useCallback(async (session: StitchSessionData) => {
-    if (screenshotBusyRef.current) return;
-    screenshotBusyRef.current = true;
-    setIsCompositing(true);
-    try {
-      const nativeParams = JSON.stringify({
-        direction: session.params.direction,
-        overlap: session.params.overlap,
-        topLayerIndex: session.params.topLayerIndex,
-        images: session.images.map(img => ({
-          path: img.path, width: img.width, height: img.height, crop: img.crop,
-        })),
-      });
-
-      const compositePath: string = await ScreenshotModule.compositeImages(nativeParams);
-
-      const imgs = session.images;
-      const effW = imgs.map(img => Math.round(img.width * (1 - img.crop.cropLeft - img.crop.cropRight)));
-      const effH = imgs.map(img => Math.round(img.height * (1 - img.crop.cropTop - img.crop.cropBottom)));
-      let compW: number, compH: number;
-      if (session.params.direction === 'vertical') {
-        compW = Math.max(effW[0], effW[1]);
-        compH = effH[0] + effH[1] - session.params.overlap;
-      } else {
-        compW = effW[0] + effW[1] - session.params.overlap;
-        compH = Math.max(effH[0], effH[1]);
-      }
-
-      await StitchSession.clearSession();
-      setHasStitchSession(false);
-      setStitchSession(null);
-      setScreenshotUri(`file://${compositePath}`);
-      setOriginalSize({ width: compW, height: compH });
-      setIsCompositing(false);
-      setScreen('cropping');
-    } catch (e) {
-      console.log('Stitch composite error:', e);
-      setIsCompositing(false);
-      PluginManager.closePluginView();
-    } finally {
-      screenshotBusyRef.current = false;
-    }
-  }, []);
-
-  const handleStitchCancel = useCallback(async () => {
-    await StitchSession.keepFirstOnly();
-    setStitchSession(null);
-    PluginManager.closePluginView();
-  }, []);
-
   useEffect(() => {
     console.log('[App]: ── mount ──');
     setAppMounted(true);
+
     attachModeListeners();
     ensureInit();
 
@@ -336,14 +180,15 @@ function App(): React.JSX.Element {
     console.log('[LASSO-DBG/App] mount: fromToolbar=', fromToolbar, 'toolbarShowing=', toolbarShowing, 'pendingScreen=', JSON.stringify(pendingScreen), 'initialScreen=', screen);
 
     if (fromToolbar) {
+
       if (getActiveMode()) stopMode();
       flushPendingTexts();
-      resetTransientScreens();
-      FloatingToolbarBridge.ackPendingScreen();
+        FloatingToolbarBridge.ackPendingScreen();
       setScreen('main');
       setResumeTick(n => n + 1);
       setTimeout(() => FloatingToolbarBridge.ackOpenMain(), 200);
     } else if (pendingScreen) {
+
       if (pendingScreen !== 'penLock') FloatingToolbarBridge.hide();
       flushPendingTexts();
       reviveIfNeeded();
@@ -353,10 +198,11 @@ function App(): React.JSX.Element {
         setTimeout(() => FloatingToolbarBridge.ackPendingScreen(), 200);
         runLassoExtraction();
       } else if (pendingScreen === 'nativeInsertHelper') {
-        resetTransientScreens();
-        setScreen('nativeHelper');
+
+            setScreen('nativeHelper');
         setTimeout(() => FloatingToolbarBridge.ackPendingScreen(), 200);
       } else if (pendingScreen.startsWith('action:')) {
+
         const action = pendingScreen.slice(7);
         FloatingToolbarBridge.ackPendingScreen();
         setScreen('nativeHelper');
@@ -371,20 +217,21 @@ function App(): React.JSX.Element {
         setTimeout(() => FloatingToolbarBridge.ackPendingScreen(), 200);
       }
     } else if (toolbarShowing) {
+
       const earlyPending = checkPendingButton();
       if (earlyPending === 999) {
+
         openMainPanel();
       } else if (earlyPending === 300) {
-        FloatingToolbarBridge.hide();
-        FloatingBubbleBridge.hide();
-        setTimeout(() => loadScreenshot(), 100);
+
+        setTimeout(() => { try { PluginManager.closePluginView(); } catch (_) {} }, 0);
       } else if (earlyPending === 100) {
+
         setTimeout(() => { try { PluginManager.closePluginView(); } catch (_) {} }, 0);
       } else {
+
         setTimeout(() => { try { PluginManager.closePluginView(); } catch (_) {} }, 0);
       }
-    } else if (hasScreenshotPending) {
-      loadScreenshot();
     } else {
       openMainPanel();
     }
@@ -397,11 +244,15 @@ function App(): React.JSX.Element {
       setClips(clipData);
       setBubbleActionIds(bubbleIds);
       refreshToolbar(clipData, configData.tools);
-      const filled = ([1,2,3,4] as const).map(n => !!clipData[String(n) as keyof typeof clipData]);
+      const filled = ([1,2,3,4,5,6] as const).map(n => !!clipData[String(n) as keyof typeof clipData]);
       FloatingToolbarBridge.updateTitleClips(filled);
     });
 
     FloatingToolbarBridge.checkPermission().then(ok => setHasPermission(ok));
+
+    WeChatTransferBridge.getStatus().then(s => {
+      if (s.bound) setWechatStatus('bound');
+    }).catch(() => {});
 
     const toolTapSub = FloatingToolbarBridge.onToolTap(async ({ toolAction }) => {
       const result = await executeAction(toolAction);
@@ -464,8 +315,7 @@ function App(): React.JSX.Element {
           runLassoExtraction();
         } else if (pendingScr === 'nativeInsertHelper') {
           FloatingToolbarBridge.hide();
-          resetTransientScreens();
-          setScreen('nativeHelper');
+                setScreen('nativeHelper');
           FloatingToolbarBridge.ackPendingScreen();
         } else if (pendingScr.startsWith('action:')) {
           const action = pendingScr.slice(7);
@@ -531,10 +381,6 @@ function App(): React.JSX.Element {
       loadConfig().then(d => setTools(d.tools));
     });
 
-    const nativeBubbleDragSub = FloatingBubbleBridge.onDragEnd(({ pageY }) => {
-      setInsertTop(pageY);
-    });
-
     const appStateSub = AppState.addEventListener('change', (state: AppStateStatus) => {
       if (state === 'active') {
         reviveIfNeeded();
@@ -554,11 +400,37 @@ function App(): React.JSX.Element {
         openMainPanel();
         return;
       }
+      if (buttonId === 888) {
+
+        setScreen('wechat_qr');
+        WeChatTransferBridge.getStatus().then(s => {
+          if (s.bound) {
+            setWechatStatus('bound');
+            WeChatTransferBridge.startPolling().catch(() => {});
+          } else {
+            setWechatStatus('registering');
+            setWechatMsg('正在注册设备…');
+            WeChatTransferBridge.register().then(() => {
+              setWechatMsg('获取二维码…');
+              return WeChatTransferBridge.getQrCodeUrl();
+            }).then(qr => {
+              if (qr.qrCodeUrl) {
+                setWechatStatus('scanning');
+                setWechatMsg('');
+              } else {
+                setWechatStatus('error');
+                setWechatMsg('获取二维码失败');
+              }
+            }).catch((e: any) => {
+              setWechatStatus('error');
+              setWechatMsg('错误: ' + e.message);
+            });
+          }
+        }).catch(() => {});
+        return;
+      }
       if (buttonId === 300) {
 
-        FloatingToolbarBridge.hide();
-        FloatingBubbleBridge.hide();
-        loadScreenshot();
         return;
       }
       if (buttonId === 100) {
@@ -579,8 +451,7 @@ function App(): React.JSX.Element {
             setTimeout(() => FloatingToolbarBridge.ackPendingScreen(), 200);
             runLassoExtraction();
           } else if (pendingScr === 'nativeInsertHelper') {
-            resetTransientScreens();
-            setScreen('nativeHelper');
+                    setScreen('nativeHelper');
             setTimeout(() => FloatingToolbarBridge.ackPendingScreen(), 200);
           } else if (pendingScr.startsWith('action:')) {
             const action = pendingScr.slice(7);
@@ -711,6 +582,26 @@ function App(): React.JSX.Element {
           };
           const r: any = await (PluginNoteAPI as any).insertTextLink(textLink);
           console.log('[App] insertTextLink result:', r);
+
+          try {
+            await PluginCommAPI.reloadFile();
+            await new Promise(resolve => setTimeout(resolve, 300));
+
+            const pad = 5;
+            const lassoRect = {
+              left: textLink.rect.left - pad,
+              top: textLink.rect.top - pad,
+              right: textLink.rect.right + pad,
+              bottom: textLink.rect.bottom + pad,
+            };
+            const lr: any = await PluginCommAPI.lassoElements(lassoRect);
+            console.log('[App] lassoElements after insertTextLink:', lr);
+            if (lr?.success && lr.result !== false) {
+              await (PluginCommAPI as any).setLassoBoxState?.(0);
+            }
+          } catch (le) {
+            console.warn('[App] lassoElements after insertTextLink failed:', le);
+          }
         } catch (e) {
           console.error('[App] insertTextLink error:', e);
         }
@@ -721,6 +612,18 @@ function App(): React.JSX.Element {
       PluginManager.closePluginView();
     });
 
+    const appendPageSub = DeviceEventEmitter.addListener('onAppendPageAction', (evt: any) => {
+      if (!evt?.imagePath) return;
+      const crop = evt.cropX >= 0 ? {
+        offsetX: evt.cropX, offsetY: evt.cropY,
+        width: evt.cropW, height: evt.cropH,
+        imageWidth: evt.imgW, imageHeight: evt.imgH,
+      } : undefined;
+      (async () => {
+        try { await appendPageWithLink(evt.imagePath, crop); } catch (e) { console.warn('[App]: appendPage error:', e); }
+      })();
+    });
+
     const titleClipSub = FloatingToolbarBridge.onTitleClipTap(async ({ slot }) => {
       const result = await executeAction(`clip_paste_${slot}`);
       if (typeof result === 'string' &&
@@ -728,7 +631,7 @@ function App(): React.JSX.Element {
         const newClips = await loadClips();
         setClips(newClips);
         refreshToolbar(newClips);
-        const filled = ([1,2,3,4] as const).map(n => !!newClips[String(n) as keyof typeof newClips]);
+        const filled = ([1,2,3,4,5,6] as const).map(n => !!newClips[String(n) as keyof typeof newClips]);
         FloatingToolbarBridge.updateTitleClips(filled);
       }
     });
@@ -739,7 +642,7 @@ function App(): React.JSX.Element {
           const newClips = await loadClips();
           setClips(newClips);
           refreshToolbar(newClips);
-          const filled = ([1,2,3,4] as const).map(n => !!newClips[String(n) as keyof typeof newClips]);
+          const filled = ([1,2,3,4,5,6] as const).map(n => !!newClips[String(n) as keyof typeof newClips]);
           FloatingToolbarBridge.updateTitleClips(filled);
         })
       : { remove() {} };
@@ -749,12 +652,10 @@ function App(): React.JSX.Element {
     });
 
     const nativePanelOpenSub = FloatingToolbarBridge.onNativePanelOpen(async () => {
-      try { await PenGuard.begin(); } catch (e) { console.warn('[App] PenGuard.begin failed:', e); }
     });
 
     const nativePanelCloseSub = FloatingToolbarBridge.onNativePanelClose(async ({ panel }) => {
       if (panel === 'send') nativeSendActiveRef.current = false;
-      try { await PenGuard.end(); } catch (e) { console.warn('[App] PenGuard.end failed:', e); }
     });
 
     const penLockRequestSub = FloatingToolbarBridge.onPenLockRequest(() => {
@@ -785,11 +686,11 @@ function App(): React.JSX.Element {
       modeSub.remove();
       localeSub.remove();
       btnSub.remove();
-      nativeBubbleDragSub.remove();
       appStateSub.remove();
       nativeInsertSub.remove();
       nativeDocLinkSub.remove();
       nativeCloseSub.remove();
+      appendPageSub.remove();
       nativePanelOpenSub.remove();
       nativePanelCloseSub.remove();
       penLockRequestSub.remove();
@@ -812,7 +713,7 @@ function App(): React.JSX.Element {
     FloatingToolbarBridge.show(injectClipStatus(toolsRef.current, clipsRef.current, insertModeRef.current));
 
     const clips = clipsRef.current;
-    const filled = ([1,2,3,4] as const).map(n => !!clips[String(n) as keyof typeof clips]);
+    const filled = ([1,2,3,4,5,6] as const).map(n => !!clips[String(n) as keyof typeof clips]);
     FloatingToolbarBridge.updateTitleClips(filled);
     setTimeout(() => PluginManager.closePluginView(), 150);
   }, [hasPermission]);
@@ -839,17 +740,14 @@ function App(): React.JSX.Element {
     PluginManager.closePluginView();
   }, []);
 
-  const maxVisible    = layout.cols * layout.rows - 1;
-  const overflowCount = Math.max(0, tools.length - maxVisible);
-
-  console.log('[LASSO-DBG/App] render: screen=', screen, 'cropUri=', screenshotUri, 'cropDims=', originalSize.width + 'x' + originalSize.height);
+  console.log('[App] render: screen=', screen);
   return (
     <View style={st.container}>
       <StatusBar barStyle="dark-content" />
       <View key={`ct-${_resumeTick}`} style={st.centerWrapper}>
 
         {screen === 'permission' && (
-          <View style={[st.window, { width: WINDOW_WIDTH, height: WINDOW_HEIGHT * 0.55 }]}>
+          <View style={[st.window, { width: getWindowWidth(), height: getWindowHeight() * 0.55 }]}>
             <View style={st.sectionHeader}>
               <View style={st.headerRow}>
                 <View style={st.permIcon}><Text style={st.permIconText}>!</Text></View>
@@ -884,7 +782,7 @@ function App(): React.JSX.Element {
         )}
 
         {screen === 'main' && (
-          <View style={[st.window, { width: WINDOW_WIDTH, height: WINDOW_HEIGHT }]}>
+          <View style={[st.window, { width: getWindowWidth(), height: getWindowHeight() }]}>
             <View style={st.titleBar}>
               <Text style={st.titleTextCenter}>{t('app_title')}</Text>
             </View>
@@ -908,27 +806,8 @@ function App(): React.JSX.Element {
                 </View>
                 <View style={st.layoutCol}>
                   <View style={st.layoutBadge}>
-                    <Text style={st.layoutBadgeT}>{layoutLabel}</Text>
-                    <Text style={st.layoutBadgeS}>{t('buttons_count', { n: tools.length })}</Text>
+                    <Text style={st.layoutBadgeT}>{tools.length} tools</Text>
                   </View>
-                  <View style={st.layoutMiniRow}>
-                    {LAYOUT_OPTIONS.map(lo => {
-                      const cur = lo.count === maxVisible;
-                      return (
-                        <View key={lo.key} style={[st.layoutMini, cur && st.layoutMiniA]}>
-                          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 1, width: lo.cols * 7 + (lo.cols - 1) }}>
-                            {[...Array(lo.count)].map((_, j) => (
-                              <View key={j} style={{ width: 6, height: 6, borderRadius: 1, backgroundColor: cur ? (j === 0 ? '#333' : '#AAA') : '#CCC' }} />
-                            ))}
-                          </View>
-                          <Text style={[st.layoutMiniT, cur && st.layoutMiniTA]}>{lo.label}</Text>
-                        </View>
-                      );
-                    })}
-                  </View>
-                  {!isValidToolCount(tools.length) && (
-                    <View style={st.warnBadge}><Text style={st.warnBadgeT}>{t('tools_count_hint', { n: tools.length })}</Text></View>
-                  )}
                 </View>
               </View>
             </View>
@@ -950,18 +829,16 @@ function App(): React.JSX.Element {
                     <Text style={st.emptyH}>{t('empty_tools_hint')}</Text>
                   </View>
                 )}
-                {injectClipStatus(tools, clips, insertMode).map((tool, idx) => {
-                  const muted = idx >= maxVisible;
-                  return (
+                {injectClipStatus(tools, clips, insertMode).map((tool, idx) => (
                     <View key={tool.id + idx} style={st.toolRow}>
-                      <View style={[st.idxBadge, muted && st.idxBadgeM]}>
-                        <Text style={[st.idxBadgeT, muted && st.idxBadgeTM]}>{idx + 1}</Text>
+                      <View style={st.idxBadge}>
+                        <Text style={st.idxBadgeT}>{idx + 1}</Text>
                       </View>
-                      <View style={[st.toolIcon, muted && st.toolIconM]}>
-                        <Text style={[st.toolIconT, muted && st.toolIconTM]}>{tool.icon}</Text>
+                      <View style={st.toolIcon}>
+                        <Text style={st.toolIconT}>{tool.icon}</Text>
                       </View>
                       <View style={st.toolInfo}>
-                        <Text style={[st.toolName, muted && st.toolNameM]}>{tool.name}</Text>
+                        <Text style={st.toolName}>{tool.name}</Text>
                         <Text style={st.toolAct}>{tool.action}</Text>
                       </View>
                       <View style={st.moveBtns}>
@@ -969,42 +846,64 @@ function App(): React.JSX.Element {
                         <Pressable onPress={() => moveToolDown(idx)} style={st.moveBtn} hitSlop={8}><Text style={st.moveBtnT}>▼</Text></Pressable>
                       </View>
                     </View>
-                  );
-                })}
+                ))}
               </ScrollView>
-              {overflowCount > 0 && (
-                <View style={st.overflowBar}>
-                  <Text style={st.overflowT}>{t('overflow_warn', { max: maxVisible, layout: layoutLabel, extra: overflowCount })}</Text>
-                </View>
-              )}
             </View>
 
             <View style={st.bubbleSection}>
               <View style={st.bubbleHeader}>
-                <Text style={st.headerLabel}>{t('bubble_actions_title')}</Text>
-                <Text style={st.headerSub}>{t('bubble_actions_hint')}</Text>
+                <Text style={st.headerLabel}>微信传输</Text>
+                <Text style={st.headerSub}>WECHAT TRANSFER</Text>
               </View>
-              <View style={st.bubbleRow}>
-                {allBubbleActions.map(ba => {
-                  const enabled = bubbleActionIds.includes(ba.id);
-                  return (
-                    <Pressable
-                      key={ba.id}
-                      onPress={async () => {
-                        const next = enabled
-                          ? bubbleActionIds.filter(x => x !== ba.id)
-                          : [...bubbleActionIds, ba.id];
-                        setBubbleActionIds(next);
-                        await saveBubbleActions(next);
-                        refreshBubbleActions();
-                      }}
-                      style={[st.bubbleChip, enabled && st.bubbleChipActive]}
-                    >
-                      <Text style={[st.bubbleChipIcon, enabled && st.bubbleChipIconActive]}>{ba.icon}</Text>
-                      <Text style={[st.bubbleChipLabel, enabled && st.bubbleChipLabelActive]}>{ba.label}</Text>
+              <View style={{ paddingHorizontal: 14, paddingVertical: 8 }}>
+                {wechatStatus === 'bound' ? (
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                    <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#2E7D32' }} />
+                    <Text style={{ fontSize: 12, color: '#333' }}>已绑定微信 · 接收文件到 /INBOX</Text>
+                    <Pressable onPress={async () => {
+                      try {
+                        await WeChatTransferBridge.stopPolling();
+                        await WeChatTransferBridge.unbind();
+                        setWechatStatus('idle');
+                        setWechatMsg('已解绑');
+                      } catch (e: any) { setWechatMsg('解绑失败: ' + e.message); }
+                    }} style={[st.btnGhost, { paddingHorizontal: 8, paddingVertical: 4 }]}>
+                      <Text style={[st.btnGhostT, { fontSize: 11 }]}>解绑</Text>
                     </Pressable>
-                  );
-                })}
+                  </View>
+                ) : wechatStatus === 'scanning' ? (
+                  <View>
+                    <Text style={{ fontSize: 12, color: '#333', marginBottom: 6 }}>请用微信扫描二维码绑定设备</Text>
+                    <Text style={{ fontSize: 11, color: '#999' }}>扫码后自动检测绑定状态…</Text>
+                    {wechatMsg ? <Text style={{ fontSize: 11, color: '#666', marginTop: 4 }}>{wechatMsg}</Text> : null}
+                  </View>
+                ) : (
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                    <Pressable onPress={async () => {
+                      try {
+                        setWechatStatus('registering');
+                        setWechatMsg('正在注册设备…');
+                        await WeChatTransferBridge.register();
+                        setWechatMsg('获取二维码…');
+                        const qr = await WeChatTransferBridge.getQrCodeUrl();
+                        if (qr.qrCodeUrl) {
+                          setWechatMsg('二维码已获取，正在打开扫码界面…');
+                          setWechatStatus('scanning');
+                          setScreen('wechat_qr');
+                        } else {
+                          setWechatStatus('error');
+                          setWechatMsg('获取二维码失败');
+                        }
+                      } catch (e: any) {
+                        setWechatStatus('error');
+                        setWechatMsg('错误: ' + e.message);
+                      }
+                    }} style={st.btnLine}>
+                      <Text style={st.btnLineT}>绑定微信</Text>
+                    </Pressable>
+                    {wechatMsg ? <Text style={{ fontSize: 11, color: wechatStatus === 'error' ? '#C62828' : '#666' }}>{wechatMsg}</Text> : null}
+                  </View>
+                )}
               </View>
             </View>
 
@@ -1023,7 +922,7 @@ function App(): React.JSX.Element {
         )}
 
         {screen === 'add_tool' && (
-          <View style={[st.window, { width: WINDOW_WIDTH, height: WINDOW_HEIGHT }]}>
+          <View style={[st.window, { width: getWindowWidth(), height: getWindowHeight() }]}>
             <View style={st.titleBar}>
               <Text style={st.titleTextCenter}>{t('add_tool_title')}</Text>
             </View>
@@ -1058,11 +957,41 @@ function App(): React.JSX.Element {
             <View style={st.bottomBar}>
               <Text style={st.footerCount}>{t('selected_count', { n: tools.length })} · {layoutLabel}</Text>
               <Pressable
-                onPress={() => { if (tools.length >= 4) setScreen('main'); }}
-                style={[st.btnFill, tools.length < 4 && st.btnDis]}
-                disabled={tools.length < 4}
+                onPress={() => { if (tools.length >= 5) setScreen('main'); }}
+                style={[st.btnFill, tools.length < 5 && st.btnDis]}
+                disabled={tools.length < 5}
               >
                 <Text style={st.btnFillT}>{t('done')}</Text>
+              </Pressable>
+            </View>
+          </View>
+        )}
+
+        {screen === 'wechat_qr' && (
+          <View style={[st.window, { width: getWindowWidth(), height: getWindowHeight() * 0.7 }]}>
+            <View style={st.titleBar}>
+              <Text style={st.titleTextCenter}>微信传输 · 扫码绑定</Text>
+            </View>
+            <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20 }}>
+              <Text style={{ fontSize: 14, color: '#333', marginBottom: 16, textAlign: 'center' }}>
+                打开微信扫一扫{'\n'}扫描下方二维码绑定设备
+              </Text>
+              <View style={{ width: 200, height: 200, borderWidth: 1, borderColor: '#DDD', justifyContent: 'center', alignItems: 'center', marginBottom: 16 }}>
+                <WeChatQrView onBound={() => {
+                  setWechatStatus('bound');
+                  setWechatMsg('绑定成功！');
+                  setScreen('main');
+                  WeChatTransferBridge.startPolling().catch(() => {});
+                }} />
+              </View>
+              <Text style={{ fontSize: 11, color: '#999', textAlign: 'center' }}>
+                设备名称: Supernote{'\n'}
+                绑定后可从微信直接发送文件到本设备
+              </Text>
+            </View>
+            <View style={st.bottomBar}>
+              <Pressable onPress={() => { setScreen('main'); setWechatStatus('idle'); setWechatMsg(''); }} style={st.btnLine}>
+                <Text style={st.btnLineT}>取消</Text>
               </Pressable>
             </View>
           </View>
@@ -1078,34 +1007,51 @@ function App(): React.JSX.Element {
 
       </View>
 
-      {screen === 'cropping' && screenshotUri && originalSize.width > 0 && (
-        <View style={StyleSheet.absoluteFill}>
-          <CropOverlay
-            key={screenshotUri}
-            imageUri={screenshotUri}
-            originalWidth={originalSize.width}
-            originalHeight={originalSize.height}
-            onConfirm={handleCropConfirm}
-            onLongScreenshot={handleLongScreenshot}
-            onAddToHistory={handleCropAddToHistory}
-            onClose={() => PluginManager.closePluginView()}
-            hasStitchSession={hasStitchSession}
-          />
-        </View>
-      )}
-
-      {screen === 'stitching' && stitchSession && (
-        <View style={StyleSheet.absoluteFill}>
-          <StitchEditor
-            session={stitchSession}
-            onConfirm={handleStitchConfirm}
-            onCancel={handleStitchCancel}
-            disabled={isCompositing}
-          />
-        </View>
-      )}
     </View>
   );
+}
+
+function WeChatQrView({ onBound }: { onBound: () => void }) {
+  const [qrPath, setQrPath] = React.useState<string | null>(null);
+  const [error, setError] = React.useState('');
+  const pollRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const qr = await WeChatTransferBridge.getQrCodeUrl();
+        if (cancelled) return;
+        if (qr.qrCodeUrl) {
+          const path = await WeChatTransferBridge.downloadQrImage(qr.qrCodeUrl);
+          if (!cancelled) setQrPath(path);
+        } else {
+          setError('无法获取二维码');
+        }
+      } catch (e: any) {
+        if (!cancelled) setError(e.message || '获取二维码失败');
+      }
+    })();
+
+    pollRef.current = setInterval(async () => {
+      try {
+        const bound = await WeChatTransferBridge.checkBind();
+        if (bound && !cancelled) {
+          if (pollRef.current) clearInterval(pollRef.current);
+          onBound();
+        }
+      } catch (_) {}
+    }, 2500);
+
+    return () => {
+      cancelled = true;
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, []);
+
+  if (error) return <ScrollView style={{ maxHeight: 160, padding: 8, borderWidth: 1, borderColor: '#DDD' }}><Text style={{ color: '#C62828', fontSize: 11 }} selectable>{error}</Text></ScrollView>;
+  if (!qrPath) return <Text style={{ color: '#999', fontSize: 12 }}>加载中…</Text>;
+  return <Image source={{ uri: 'file://' + qrPath }} style={{ width: 180, height: 180 }} resizeMode="contain" />;
 }
 
 const st = StyleSheet.create({
@@ -1188,13 +1134,6 @@ const st = StyleSheet.create({
 
   bubbleSection:        { borderTopWidth: 1, borderTopColor: '#E8E8E8', paddingHorizontal: 14, paddingVertical: 8, backgroundColor: '#FAFAF8' },
   bubbleHeader:         { marginBottom: 6 },
-  bubbleRow:            { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
-  bubbleChip:           { flexDirection: 'row', alignItems: 'center', gap: 4, paddingVertical: 5, paddingHorizontal: 10, borderWidth: 1.5, borderColor: '#DDDDDD', borderRadius: 4, backgroundColor: '#FFFFFF' },
-  bubbleChipActive:     { borderColor: '#000000', backgroundColor: '#F5F3ED' },
-  bubbleChipIcon:       { fontSize: 11, fontWeight: '700' as const, color: '#BBBBBB' },
-  bubbleChipIconActive: { color: '#000000' },
-  bubbleChipLabel:      { fontSize: 10, color: '#AAAAAA' },
-  bubbleChipLabelActive:{ color: '#000000', fontWeight: '600' as const },
 
   catRow:    { flexDirection: 'row', flexWrap: 'wrap', gap: 4, paddingHorizontal: 14, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: '#F0F0F0' },
   catPill:   { paddingVertical: 3, paddingHorizontal: 10, borderWidth: 1, borderColor: '#DDDDDD', borderRadius: 12, backgroundColor: '#FFFFFF' },

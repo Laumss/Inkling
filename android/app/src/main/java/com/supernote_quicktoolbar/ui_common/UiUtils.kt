@@ -8,7 +8,8 @@ object UiUtils {
         ctx: ReactApplicationContext,
         assetName: String,
         sizePx: Int,
-        tintColor: Int
+        tintColor: Int,
+        strokeWidth: Float = 1.5f
     ): android.graphics.drawable.Drawable? {
         return try {
             val paths = mutableListOf<Pair<String, Boolean>>()
@@ -45,7 +46,7 @@ object UiUtils {
                     paint.style = android.graphics.Paint.Style.FILL
                 } else {
                     paint.style = android.graphics.Paint.Style.STROKE
-                    paint.strokeWidth = 1.5f
+                    paint.strokeWidth = strokeWidth
                     paint.strokeCap = android.graphics.Paint.Cap.ROUND
                     paint.strokeJoin = android.graphics.Paint.Join.ROUND
                 }

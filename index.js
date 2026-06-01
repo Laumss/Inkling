@@ -1,15 +1,16 @@
+
+
 import { AppRegistry, Image, DeviceEventEmitter } from 'react-native';
 import App from './App';
 import { name as appName } from './app.json';
 import { PluginManager } from 'sn-plugin-lib';
-import { ensureInit } from './components/BackgroundService';
+import { ensureInit, stopAllModes } from './components/BackgroundService';
 import { setPendingButton, isAppMounted } from './pendingButton';
 import { warmupCache, getCachedConfig, getCachedClips, injectClipStatus, loadClips } from './components/ToolPresets';
 import FloatingToolbarBridge from './components/FloatingToolbarBridge';
 import { executeAction } from './components/ToolActions';
 import { setLocale } from './components/i18n';
 import { PenLasso } from './components/PenTools';
-import * as StrokeEraser from './components/StrokeEraser';
 
 AppRegistry.registerComponent(appName, () => App);
 
@@ -30,21 +31,21 @@ FloatingToolbarBridge.onTitlePenLassoAction(() => {
   PenLasso.arm().catch(e => console.error('[index]: PenLasso.arm error:', e));
 });
 
+FloatingToolbarBridge.onDestroyAll(() => {
+  console.log('[index]: onDestroyAll → stopAllModes');
+  stopAllModes();
+});
+
 FloatingToolbarBridge.onPenLockRequest(() => {
-  console.log('[index]: onPenLockRequest → arm stroke eraser after pen lock');
+  console.log('[index]: onPenLockRequest');
   if (!isAppMounted()) {
     FloatingToolbarBridge.setPendingScreen('penLock');
     FloatingToolbarBridge.openPenLockView();
   }
-
-  setTimeout(() => {
-    StrokeEraser.arm().catch(e => console.error('[index]: StrokeEraser.arm error:', e));
-  }, 300);
 });
 
 FloatingToolbarBridge.onPenLockRelease(() => {
-  StrokeEraser.disarm();
-  FloatingToolbarBridge.dismissStrokeEraserOverlay();
+  console.log('[index]: onPenLockRelease');
 });
 
 FloatingToolbarBridge.onToolTap(async ({ toolAction }) => {
@@ -54,6 +55,8 @@ FloatingToolbarBridge.onToolTap(async ({ toolAction }) => {
     FloatingToolbarBridge.openPanel('nativeSendHelper');
     return;
   }
+
+  if (isAppMounted()) return;
 
   const result = await executeAction(toolAction);
   console.log('[index]: executeAction result=', result);
@@ -91,13 +94,7 @@ PluginManager.registerButtonListener({
       const now = Date.now();
       if (now - lastCaptureTime < CAPTURE_DEBOUNCE) return;
       lastCaptureTime = now;
-      const { NativeModules } = require('react-native');
-      const { ScreenshotModule } = NativeModules;
-      if (ScreenshotModule) {
-        ScreenshotModule.captureAndReopen(3000).catch(() => {});
-      }
-      setPendingButton(event.id);
-      DeviceEventEmitter.emit('quickToolbarButton', { id: event.id });
+      FloatingToolbarBridge.handleDocScreenshotCrop();
       return;
     }
 
@@ -105,6 +102,8 @@ PluginManager.registerButtonListener({
 
       if (FloatingToolbarBridge.isShowingSync()) {
         console.log('[index]: toolbar visible → destroyAll');
+
+        stopAllModes();
         FloatingToolbarBridge.destroyAll();
         return;
       }
@@ -145,5 +144,6 @@ PluginManager.registerButton(1, ['DOC'], {
   id: 300,
   name: JSON.stringify({ en: 'Screenshot Crop', zh_CN: '截图裁切' }),
   icon: Image.resolveAssetSource(require('./assets/toolbar_icon.png')).uri,
-  showType: 1,
+  showType: 0,
 });
+

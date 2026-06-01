@@ -16,7 +16,8 @@ class PanelChips(
     private val onSelect: (selected: String?) -> Unit
 ) {
     private val density = ctx.resources.displayMetrics.density
-    private fun dp(v: Int) = (v * density).roundToInt()
+    private val scale = ScreenScale.factor(ctx)
+    private fun dp(v: Int) = (v * density * scale).roundToInt()
 
     private var container: LinearLayout? = null
     private var selected: String? = null
@@ -49,7 +50,7 @@ class PanelChips(
             val isActive = selected == key
             val chip = TextView(ctx).apply {
                 text = key
-                textSize = 14f
+                textSize = 14f * scale
                 typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
                 setTextColor(if (isActive) Color.WHITE else Color.BLACK)
                 gravity = Gravity.CENTER

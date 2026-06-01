@@ -22,6 +22,7 @@ import com.facebook.react.bridge.*
 import com.facebook.react.modules.core.DeviceEventManagerModule
 import org.json.JSONArray
 import org.json.JSONObject
+import android.content.res.Configuration
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -86,10 +87,16 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         @Volatile @JvmStatic
         private var longPressTriggered = false
 
+        private const val AUTO_COLLAPSE_MS = 9000L
+        private const val NEAR_EDGE_THRESHOLD = 50
+
         @JvmStatic
-        private var screenWidth = 1404
+        internal var screenWidth = 1404
         @JvmStatic
-        private var screenHeight = 1872
+        internal var screenHeight = 1872
+
+        @Volatile @JvmStatic
+        private var configCallbackRegistered = false
 
         @Volatile @JvmStatic
         var lastNotePath: String = ""
@@ -103,17 +110,22 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         @Volatile @JvmStatic
         private var isInNoteApp = true
 
-        @Volatile @JvmStatic
-        private var captureToastView: View? = null
+        @JvmStatic
+        fun isInNoteApp(): Boolean = isInNoteApp
 
         private const val NOTE_PACKAGE = "com.ratta.supernote.note"
         private const val NOTE_INSIDE_PAGES_ACTIVITY = "com.ratta.supernote.note.view.NoteInsidePagesActivity"
         private const val PLUGIN_PACKAGE = "com.ratta.supernote.pluginhost"
         private const val DOC_PACKAGE = "com.supernote.document"
+
+        private const val SETTINGS_PACKAGE = "com.ratta.settings"
         private const val MONITOR_INTERVAL_MS = 800L
 
         @Volatile @JvmStatic
-        private var titleClipFilled: BooleanArray = BooleanArray(4) { false }
+        private var titleClipFilled: BooleanArray = BooleanArray(6) { false }
+
+        @Volatile @JvmStatic
+        private var clipPage: Int = 0
 
         @Volatile @JvmStatic
         private var orientation: String = "vertical"
@@ -156,6 +168,18 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
     init {
         currentInstance = this
+        if (!configCallbackRegistered) {
+            configCallbackRegistered = true
+            reactApplicationContext.applicationContext.registerComponentCallbacks(
+                object : android.content.ComponentCallbacks2 {
+                    override fun onConfigurationChanged(newConfig: Configuration) {
+                        Handler(Looper.getMainLooper()).post { handleOrientationChange() }
+                    }
+                    override fun onLowMemory() {}
+                    override fun onTrimMemory(level: Int) {}
+                }
+            )
+        }
     }
 
     override fun initialize() {
@@ -190,7 +214,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     private val BTN_GAP_DP = 4
     private val PANEL_PAD_DP = 8
     private val BORDER_WIDTH = 2
-    private val TITLE_ROW_H_DP = 36
+    private val TITLE_ROW_H_DP = 38
     private val TITLE_SEP_DP = 1
     private val CORNER_RADIUS_DP = 0f
     private val BTN_TEXT_SIZE_SP = 22f
@@ -204,8 +228,8 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
     private val SIDE_INDICATOR_DP = 4
     private val HANDLE_WIDTH_DP = 4
-    private val COLLAPSED_WIDTH_DP = 6
-    private val COLLAPSED_HEIGHT_DP = 50
+    private val COLLAPSED_WIDTH_DP = 7
+    private val COLLAPSED_HEIGHT_DP = 80
 
     private val SNAP_THRESHOLD = 40
     private val EDGE_COLLAPSE_THRESHOLD = 60
@@ -221,7 +245,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
     private val CLIP_ICON_DP = 32
     private val LAYER_BTN_DP = 20
-    private var clipIconViews: Array<TextView?> = arrayOfNulls(4)
+    private var clipIconViews: Array<TextView?> = arrayOfNulls(6)
 
     @ReactMethod
     fun show(toolsJson: String) {
@@ -415,82 +439,11 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         handler.post {
             try {
                 val arr = JSONArray(json)
-                for (i in 0 until minOf(arr.length(), 4)) {
+                for (i in 0 until minOf(arr.length(), 6)) {
                     titleClipFilled[i] = arr.getBoolean(i)
                 }
                 rebuildClipIcons()
             } catch (e: Exception) { Log.w(TAG, "updateTitleClips: ${e.message}") }
-        }
-    }
-
-    @ReactMethod
-    fun showCaptureToast(message: String?) {
-        handler.post {
-            try {
-                val ctx = reactApplicationContext
-                val text = if (message.isNullOrBlank()) "截图中…" else message
-
-                captureToastView?.let { existing ->
-                    (existing as? TextView)?.text = text
-                    Log.i(TAG, "[LASSO-DBG/Kt] showCaptureToast already showing, text updated")
-                    return@post
-                }
-
-                val wm = ctx.getSystemService(android.content.Context.WINDOW_SERVICE) as WindowManager
-
-                val toast = TextView(ctx).apply {
-                    this.text = text
-                    setTextColor(Color.WHITE)
-                    setTypeface(Typeface.DEFAULT_BOLD)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
-                    val padH = dpToPx(28); val padV = dpToPx(16)
-                    setPadding(padH, padV, padH, padV)
-                    background = GradientDrawable().apply {
-                        cornerRadius = dpToPx(12).toFloat()
-                        setColor(0xE6000000.toInt())
-                        setStroke(dpToPx(1), 0xFFFFFFFF.toInt())
-                    }
-                }
-
-                val wmType = if (Build.VERSION.SDK_INT >= 26)
-                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-                else @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
-
-                val lp = WindowManager.LayoutParams(
-                    WindowManager.LayoutParams.WRAP_CONTENT,
-                    WindowManager.LayoutParams.WRAP_CONTENT,
-                    wmType,
-                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                        WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                        WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
-                    PixelFormat.TRANSLUCENT
-                ).apply {
-                    gravity = Gravity.CENTER
-                    x = 0; y = 0
-                }
-
-                wm.addView(toast, lp)
-                captureToastView = toast
-                Log.i(TAG, "[LASSO-DBG/Kt] showCaptureToast shown: '$text'")
-            } catch (e: Exception) {
-                Log.e(TAG, "[LASSO-DBG/Kt] showCaptureToast FAIL: ${e.message}", e)
-            }
-        }
-    }
-
-    @ReactMethod
-    fun hideCaptureToast() {
-        handler.post {
-            val v = captureToastView ?: return@post
-            try {
-                val wm = reactApplicationContext.getSystemService(android.content.Context.WINDOW_SERVICE) as WindowManager
-                wm.removeView(v)
-                Log.i(TAG, "[LASSO-DBG/Kt] hideCaptureToast removed")
-            } catch (e: Exception) {
-                Log.w(TAG, "[LASSO-DBG/Kt] hideCaptureToast: ${e.message}")
-            } finally {
-                captureToastView = null
-            }
         }
     }
 
@@ -805,8 +758,44 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         Log.w(TAG, "callClosePluginView: no suitable method found")
     }
 
+    private val autoCollapseRunnable = Runnable { switchToCollapsed() }
+
+    private fun cancelAutoCollapse() {
+        handler.removeCallbacks(autoCollapseRunnable)
+    }
+
+    private fun isNearEdge(): Boolean {
+        val lp = layoutParams ?: return false
+        val vw = expandedRoot?.measuredWidth?.takeIf { it > 0 }
+            ?: expandedRoot?.width?.takeIf { it > 0 }
+            ?: return false
+        refreshScreenDimensions()
+        val nearLeft = lp.x <= NEAR_EDGE_THRESHOLD
+        val nearRight = (screenWidth - (lp.x + vw)) <= NEAR_EDGE_THRESHOLD
+        return nearLeft || nearRight
+    }
+
+    private fun inferDockSideFromPosition() {
+        val lp = layoutParams ?: return
+        val vw = expandedRoot?.measuredWidth?.takeIf { it > 0 }
+            ?: expandedRoot?.width?.takeIf { it > 0 } ?: return
+        refreshScreenDimensions()
+        val distLeft = lp.x
+        val distRight = screenWidth - (lp.x + vw)
+        dockSide = if (distLeft <= distRight) "left" else "right"
+    }
+
+    private fun resetAutoCollapse() {
+        handler.removeCallbacks(autoCollapseRunnable)
+        if (isNearEdge()) {
+            handler.postDelayed(autoCollapseRunnable, AUTO_COLLAPSE_MS)
+        }
+    }
+
     private fun switchToCollapsed() {
         if (collapsed && collapsedRoot != null) return
+        cancelAutoCollapse()
+        inferDockSideFromPosition()
         collapsed = true
         removeAll()
         createCollapsedHandle()
@@ -819,6 +808,8 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         removeAll()
         createExpandedToolbar()
         emitCollapseChange()
+
+        expandedRoot?.post { resetAutoCollapse() }
     }
 
     private fun emitCollapseChange() {
@@ -828,6 +819,53 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         })
     }
 
+    internal fun refreshScreenDimensions() {
+        try {
+            val wm = reactApplicationContext.getSystemService(android.content.Context.WINDOW_SERVICE) as WindowManager
+            if (Build.VERSION.SDK_INT >= 30) {
+                val bounds = wm.currentWindowMetrics.bounds
+                screenWidth = bounds.width(); screenHeight = bounds.height()
+            } else {
+                @Suppress("DEPRECATION")
+                val size = android.graphics.Point().also { wm.defaultDisplay.getRealSize(it) }
+                screenWidth = size.x; screenHeight = size.y
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun handleOrientationChange() {
+        val oldW = screenWidth; val oldH = screenHeight
+        refreshScreenDimensions()
+        if (oldW == screenWidth && oldH == screenHeight) return
+        Log.i(TAG, "orientation changed: ${oldW}x${oldH} → ${screenWidth}x${screenHeight}")
+
+        val hadPanelOpen = ToolRegistry.handleRotation()
+
+        if (hadPanelOpen && rootView == null && tools.isNotEmpty()) {
+            restoreToolbar()
+        }
+
+        val lp = layoutParams ?: return
+        if (collapsed && collapsedRoot != null) {
+            val w = collapsedRoot!!.width.takeIf { it > 0 } ?: dpToPx(COLLAPSED_WIDTH_DP)
+            val h = collapsedRoot!!.height.takeIf { it > 0 } ?: dpToPx(COLLAPSED_HEIGHT_DP)
+            lp.x = if (dockSide == "left") 0 else screenWidth - w
+            lp.y = lp.y.coerceIn(0, (screenHeight - h).coerceAtLeast(0))
+            try { windowManager?.updateViewLayout(rootView, lp) } catch (_: Exception) {}
+        } else if (!collapsed && expandedRoot != null) {
+            val vw = expandedRoot!!.measuredWidth.takeIf { it > 0 } ?: expandedRoot!!.width
+            val vh = expandedRoot!!.measuredHeight.takeIf { it > 0 } ?: expandedRoot!!.height
+            if (vw > 0 && vh > 0) {
+                lp.x = lp.x.coerceIn(0, (screenWidth - vw).coerceAtLeast(0))
+                lp.y = lp.y.coerceIn(0, (screenHeight - vh).coerceAtLeast(0))
+            }
+            try { windowManager?.updateViewLayout(rootView, lp) } catch (_: Exception) {}
+        }
+
+        FloatingBubbleModule.handleOrientationChange()
+        AiBubbleModule.handleOrientationChange()
+    }
+
     private fun createCollapsedHandle() {
         val ctx = reactApplicationContext
         if (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(ctx)) {
@@ -835,8 +873,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
 
         windowManager = ctx.getSystemService(android.content.Context.WINDOW_SERVICE) as WindowManager
-        val dm = ctx.resources.displayMetrics
-        screenWidth = dm.widthPixels; screenHeight = dm.heightPixels
+        refreshScreenDimensions()
 
         val w = dpToPx(COLLAPSED_WIDTH_DP)
         val h = dpToPx(COLLAPSED_HEIGHT_DP)
@@ -866,9 +903,8 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             }
         }
 
-        val wmType = if (Build.VERSION.SDK_INT >= 26)
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-        else @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
+        @Suppress("DEPRECATION")
+        val wmType = WindowManager.LayoutParams.TYPE_PHONE
 
         layoutParams = WindowManager.LayoutParams(
             w, h, wmType,
@@ -881,9 +917,9 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             y = y.coerceIn(0, (screenHeight - h).coerceAtLeast(0))
         }
 
+        val SWIPE_THRESHOLD = 30
         val collapsedLongPressRunnable = Runnable {
             longPressTriggered = true
-
             destroyAll()
         }
         collapsedRoot!!.setOnTouchListener { _, event ->
@@ -904,8 +940,10 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 }
                 MotionEvent.ACTION_UP -> {
                     handler.removeCallbacks(collapsedLongPressRunnable)
-                    if (!isDragging && !longPressTriggered) {
-                        switchToExpanded()
+                    if (!longPressTriggered && isDragging) {
+                        val dx = event.rawX - startRawX
+                        val inward = if (dockSide == "left") dx > SWIPE_THRESHOLD else dx < -SWIPE_THRESHOLD
+                        if (inward) switchToExpanded()
                     }
                     true
                 }
@@ -929,8 +967,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
 
         windowManager = ctx.getSystemService(android.content.Context.WINDOW_SERVICE) as WindowManager
-        val dm = ctx.resources.displayMetrics
-        screenWidth = dm.widthPixels; screenHeight = dm.heightPixels
+        refreshScreenDimensions()
 
         val borderPx = dpToPx(BORDER_WIDTH)
         val cornerR  = dpToPx(CORNER_RADIUS_DP.toInt()).toFloat()
@@ -956,7 +993,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             val filled = titleClipFilled.getOrElse(i) { false }
             return TextView(ctx).apply {
                 text = slot.toString()
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(13f))
                 setTextColor(if (filled) Color.WHITE else Color.BLACK)
                 gravity = Gravity.CENTER
                 typeface = Typeface.DEFAULT_BOLD
@@ -971,28 +1008,142 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     }
                 }
                 setOnClickListener {
+                    resetAutoCollapse()
                     emitEvent("onTitleClipTap", Arguments.createMap().apply { putString("slot", slot.toString()) })
                 }
                 setOnLongClickListener {
+                    resetAutoCollapse()
                     emitEvent("onTitleClipLongPress", Arguments.createMap().apply { putString("slot", slot.toString()) })
                     true
                 }
             }
         }
 
-        fun makeLayerBtn(label: String, action: () -> Unit): TextView =
-            TextView(ctx).apply {
-                text = label
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-                setTextColor(CLR_BTN_FG)
-                gravity = Gravity.CENTER
-                typeface = Typeface.DEFAULT_BOLD
-                background = null
-                layoutParams = LinearLayout.LayoutParams(clipIconSz, clipIconSz).apply {
-                    marginEnd = dpToPx(1)
+        val layerBtnSz = dpToPx(28)
+        fun makeLayerBtn(iconId: String, fallbackText: String, action: () -> Unit): View {
+            val iconDrawable = loadIconFromAssets(iconId, layerBtnSz, CLR_BTN_FG)
+            val view: View = if (iconDrawable != null) {
+                ImageView(ctx).apply {
+                    setImageDrawable(iconDrawable)
+                    scaleType = ImageView.ScaleType.CENTER_INSIDE
+                    setPadding(dpToPx(3), dpToPx(3), dpToPx(3), dpToPx(3))
                 }
-                setOnClickListener { action() }
+            } else {
+                TextView(ctx).apply {
+                    text = fallbackText
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(12f))
+                    setTextColor(CLR_BTN_FG)
+                    gravity = Gravity.CENTER
+                    typeface = Typeface.DEFAULT_BOLD
+                }
             }
+            view.background = null
+            view.layoutParams = LinearLayout.LayoutParams(layerBtnSz, layerBtnSz).apply {
+                marginEnd = dpToPx(1)
+            }
+            view.setOnClickListener { resetAutoCollapse(); action() }
+            return view
+        }
+
+        fun makeSidebarPenLockBtn(sz: Int): View {
+            val locked = isPenLocked
+            val fgColor = if (locked) Color.WHITE else CLR_BTN_FG
+            val iconId = if (locked) "pen_lock_off" else "pen_lock"
+            val iconDrawable = loadIconFromAssets(iconId, sz, fgColor)
+
+            val view: View = if (iconDrawable != null) {
+                ImageView(ctx).apply {
+                    setImageDrawable(iconDrawable)
+                    scaleType = ImageView.ScaleType.CENTER_INSIDE
+                    setPadding(dpToPx(6), dpToPx(6), dpToPx(6), dpToPx(6))
+                    background = GradientDrawable().apply {
+                        setColor(if (locked) CLR_BTN_ACT else Color.TRANSPARENT)
+                        cornerRadius = dpToPx(3).toFloat()
+                    }
+                }
+            } else {
+                TextView(ctx).apply {
+                    text = if (locked) "⊘" else "✏"
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(14f))
+                    setTextColor(fgColor)
+                    gravity = Gravity.CENTER
+                    typeface = Typeface.DEFAULT_BOLD
+                    background = GradientDrawable().apply {
+                        setColor(if (locked) CLR_BTN_ACT else Color.TRANSPARENT)
+                        cornerRadius = dpToPx(3).toFloat()
+                    }
+                }
+            }
+            view.layoutParams = LinearLayout.LayoutParams(sz, sz)
+            view.setOnClickListener {
+                resetAutoCollapse()
+                isPenLocked = !isPenLocked
+                if (isPenLocked) {
+                    handler.post {
+                        callSetFullAuto(true)
+                        callPluginAppShowPluginView(1, "penLockBtn")
+                    }
+                } else {
+                    handler.post {
+                        callPluginAppShowPluginView(0, "penLockBtn")
+                        callSetFullAuto(false)
+                    }
+                }
+                emitEvent(if (isPenLocked) "onPenLockRequest" else "onPenLockRelease", Arguments.createMap())
+                if (rootView != null && !collapsed) { removeAll(); createExpandedToolbar() }
+            }
+            return view
+        }
+
+        fun makeSidebarAppendBtn(sz: Int): View {
+            val iconDrawable = loadIconFromAssets("sticky_note", sz, CLR_BTN_FG)
+            val view: View = if (iconDrawable != null) {
+                ImageView(ctx).apply {
+                    setImageDrawable(iconDrawable)
+                    scaleType = ImageView.ScaleType.CENTER_INSIDE
+                    setPadding(dpToPx(4), dpToPx(4), dpToPx(4), dpToPx(4))
+                }
+            } else {
+                TextView(ctx).apply {
+                    text = "P+"
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(13f))
+                    setTextColor(CLR_BTN_FG)
+                    gravity = Gravity.CENTER
+                    typeface = Typeface.DEFAULT_BOLD
+                }
+            }
+            view.background = null
+            view.layoutParams = LinearLayout.LayoutParams(sz, sz)
+            view.setOnClickListener { resetAutoCollapse(); startAppendPageCapture() }
+            return view
+        }
+
+        fun makeSidebarSwapBtn(sz: Int): View {
+            val iconDrawable = loadIconFromAssets("more_vert", sz, CLR_BTN_FG)
+            val view: View = if (iconDrawable != null) {
+                ImageView(ctx).apply {
+                    setImageDrawable(iconDrawable)
+                    scaleType = ImageView.ScaleType.CENTER_INSIDE
+                    setPadding(dpToPx(5), dpToPx(5), dpToPx(5), dpToPx(5))
+                }
+            } else {
+                TextView(ctx).apply {
+                    text = "⋮"
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(14f))
+                    setTextColor(CLR_BTN_FG)
+                    gravity = Gravity.CENTER
+                    typeface = Typeface.DEFAULT_BOLD
+                }
+            }
+            view.background = null
+            view.layoutParams = LinearLayout.LayoutParams(sz, sz)
+            view.setOnClickListener {
+                resetAutoCollapse()
+                val next = if (orientation == "vertical") "horizontal" else "vertical"
+                setOrientation(next)
+            }
+            return view
+        }
 
         var dragSpacer: View
 
@@ -1034,35 +1185,72 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
             dragSpacer = View(ctx)
 
-            for (i in 0 until 4) {
-                val tv = makeClipIcon(i).apply {
+            var clipSwipeStartY = 0f
+            var clipSwipeCaptured = false
+            val clipCol = object : LinearLayout(ctx) {
+                override fun onInterceptTouchEvent(ev: android.view.MotionEvent): Boolean {
+                    when (ev.action) {
+                        android.view.MotionEvent.ACTION_DOWN -> {
+                            clipSwipeStartY = ev.rawY; clipSwipeCaptured = false
+                        }
+                        android.view.MotionEvent.ACTION_MOVE -> {
+                            if (!clipSwipeCaptured && Math.abs(ev.rawY - clipSwipeStartY) > dpToPx(12)) {
+                                clipSwipeCaptured = true
+                                return true
+                            }
+                        }
+                    }
+                    return false
+                }
+                override fun onTouchEvent(ev: android.view.MotionEvent): Boolean {
+                    if (ev.action == android.view.MotionEvent.ACTION_UP && clipSwipeCaptured) {
+                        val dy = ev.rawY - clipSwipeStartY
+                        if (dy < -dpToPx(15) && clipPage == 0) {
+                            clipPage = 1; rebuildClipIcons()
+                        } else if (dy > dpToPx(15) && clipPage == 1) {
+                            clipPage = 0; rebuildClipIcons()
+                        }
+                    }
+                    return clipSwipeCaptured
+                }
+            }.apply {
+                this.orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_HORIZONTAL
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+            }
+            val clipOffset = clipPage * 2
+            for (vi in 0 until 4) {
+                val di = clipOffset + vi
+                val tv = makeClipIcon(di).apply {
                     layoutParams = LinearLayout.LayoutParams(dpToPx(CLIP_ICON_DP), dpToPx(CLIP_ICON_DP)).apply {
                         bottomMargin = dpToPx(2)
                     }
                 }
-                clipIconViews[i] = tv
-                titleCol.addView(tv)
+                clipIconViews[vi] = tv
+                clipCol.addView(tv)
             }
+            titleCol.addView(clipCol)
 
-            val penLassoBtnV = TextView(ctx).apply {
-                text = "⊞"
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
-                setTextColor(CLR_BTN_FG)
-                gravity = Gravity.CENTER
-                typeface = Typeface.DEFAULT_BOLD
-                background = null
-                layoutParams = LinearLayout.LayoutParams(clipIconSz, clipIconSz).apply {
-                    topMargin = dpToPx(2)
-                }
-                setOnClickListener { removeAll(); emitEvent("onTitlePenLassoAction", Arguments.createMap()) }
-            }
-            titleCol.addView(penLassoBtnV)
-
-            titleCol.addView(makeLayerBtn("↑") {
+            titleCol.addView(makeLayerBtn("layer_up", "L↑") {
                 emitEvent("onTitleLayerAction", Arguments.createMap().apply { putString("direction", "prev") })
-            }.apply { (layoutParams as LinearLayout.LayoutParams).topMargin = dpToPx(2) })
-            titleCol.addView(makeLayerBtn("↓") {
+            }.apply { (layoutParams as LinearLayout.LayoutParams).topMargin = dpToPx(12) })
+            titleCol.addView(makeLayerBtn("layer_down", "L↓") {
                 emitEvent("onTitleLayerAction", Arguments.createMap().apply { putString("direction", "next") })
+            })
+
+            titleCol.addView(makeSidebarAppendBtn(clipIconSz).apply {
+                (layoutParams as LinearLayout.LayoutParams).topMargin = dpToPx(12)
+            })
+
+            titleCol.addView(makeSidebarPenLockBtn(clipIconSz).apply {
+                (layoutParams as LinearLayout.LayoutParams).topMargin = dpToPx(2)
+            })
+
+            titleCol.addView(makeSidebarSwapBtn(clipIconSz).apply {
+                (layoutParams as LinearLayout.LayoutParams).topMargin = dpToPx(2)
             })
             bodyRow.addView(titleCol)
 
@@ -1085,12 +1273,12 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 layoutParams = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.WRAP_CONTENT, titleH
                 )
-                setPadding(dpToPx(4), 0, dpToPx(2), 0)
+                setPadding(dpToPx(2), 0, dpToPx(1), 0)
             }
-            for (i in 0 until 4) {
+            for (i in 0 until 6) {
                 val tv = makeClipIcon(i).apply {
                     layoutParams = LinearLayout.LayoutParams(clipIconSz, clipIconSz).apply {
-                        marginEnd = clipIconGap
+                        marginEnd = dpToPx(2)
                     }
                 }
                 clipIconViews[i] = tv
@@ -1101,49 +1289,27 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             titleRow.addView(View(ctx).apply {
                 setBackgroundColor(CLR_SEP)
                 layoutParams = LinearLayout.LayoutParams(dpToPx(1), (titleH * 0.6f).toInt()).apply {
-                    marginStart = dpToPx(3)
-                    marginEnd = dpToPx(3)
+                    marginStart = dpToPx(2)
+                    marginEnd = dpToPx(2)
                 }
             })
 
-            titleRow.addView(TextView(ctx).apply {
-                text = "⇩"
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-                setTextColor(CLR_BTN_FG)
-                gravity = Gravity.CENTER
-                typeface = Typeface.DEFAULT_BOLD
-                background = null
-                layoutParams = LinearLayout.LayoutParams(clipIconSz, clipIconSz)
-                setOnClickListener {
-                    val next = if (orientation == "vertical") "horizontal" else "vertical"
-                    setOrientation(next)
-                }
+            dragSpacer = View(ctx)
+
+            titleRow.addView(makeLayerBtn("layer_up", "L↑") {
+                emitEvent("onTitleLayerAction", Arguments.createMap().apply { putString("direction", "prev") })
+            })
+            titleRow.addView(makeLayerBtn("layer_down", "L↓") {
+                emitEvent("onTitleLayerAction", Arguments.createMap().apply { putString("direction", "next") })
             })
 
             titleRow.addView(View(ctx).apply {
                 layoutParams = LinearLayout.LayoutParams(0, titleH, 1f)
             })
 
-            dragSpacer = View(ctx)
-
-            titleRow.addView(makeLayerBtn("L↑") {
-                emitEvent("onTitleLayerAction", Arguments.createMap().apply { putString("direction", "prev") })
-            })
-            titleRow.addView(makeLayerBtn("L↓") {
-                emitEvent("onTitleLayerAction", Arguments.createMap().apply { putString("direction", "next") })
-            })
-
-            val penLassoBtnH = TextView(ctx).apply {
-                text = "⊞"
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
-                setTextColor(CLR_BTN_FG)
-                gravity = Gravity.CENTER
-                typeface = Typeface.DEFAULT_BOLD
-                background = null
-                layoutParams = LinearLayout.LayoutParams(dpToPx(LAYER_BTN_DP + 6), LinearLayout.LayoutParams.MATCH_PARENT)
-                setOnClickListener { removeAll(); emitEvent("onTitlePenLassoAction", Arguments.createMap()) }
-            }
-            titleRow.addView(penLassoBtnH)
+            titleRow.addView(makeSidebarAppendBtn(layerBtnSz))
+            titleRow.addView(makeSidebarPenLockBtn(layerBtnSz))
+            titleRow.addView(makeSidebarSwapBtn(layerBtnSz))
             expandedRoot!!.addView(titleRow)
 
             expandedRoot!!.addView(View(ctx).apply {
@@ -1162,9 +1328,8 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             rebuildButtons()
         }
 
-        val wmType = if (Build.VERSION.SDK_INT >= 26)
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-        else @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
+        @Suppress("DEPRECATION")
+        val wmType = WindowManager.LayoutParams.TYPE_PHONE
 
         loadPositionFromPrefs()
         layoutParams = WindowManager.LayoutParams(
@@ -1202,6 +1367,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     if (isDragging) {
+                        refreshScreenDimensions()
                         val lp = layoutParams ?: return@OnTouchListener true
                         val vw = expandedRoot?.measuredWidth ?: 0
                         if (lp.x <= EDGE_COLLAPSE_THRESHOLD) {
@@ -1215,6 +1381,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                         } else {
                             snapToEdge()
                             savePositionToPrefs(layoutParams!!.x, layoutParams!!.y)
+                            resetAutoCollapse()
                             emitEvent("onToolbarDragEnd", Arguments.createMap().apply {
                                 putInt("x", layoutParams!!.x); putInt("y", layoutParams!!.y)
                             })
@@ -1231,6 +1398,8 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         try {
             windowManager?.addView(rootView, layoutParams)
             Log.i(TAG, "expanded toolbar shown (2-row horizontal), ${tools.size} tools")
+
+            startForegroundMonitor()
         } catch (e: Exception) {
 
             Log.w(TAG, "addView failed (${e.message}), retrying in 500ms")
@@ -1251,6 +1420,10 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             "send_ai", "screenshot_ai" -> "icons/ic_tool_lasso_ai.xml"
             "pen_lock"              -> "icons/ic_tool_pen.xml"
             "pen_lock_off"          -> "icons/ic_tool_pen_off.xml"
+            "layer_up"              -> "icons/ic_tool_layer_up.xml"
+            "layer_down"            -> "icons/ic_tool_layer_down.xml"
+            "sticky_note"           -> "icons/ic_tool_sticky.xml"
+            "more_vert"             -> "icons/ic_tool_more.xml"
             else                    -> return null
         }
         return try {
@@ -1337,7 +1510,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 TextView(ctx).apply {
                     text = tool.icon
                     setTextSize(TypedValue.COMPLEX_UNIT_SP,
-                        if (orientation == "vertical") 18f else BTN_TEXT_SIZE_SP)
+                        sp(if (orientation == "vertical") 18f else BTN_TEXT_SIZE_SP))
                     setTextColor(if (isActive) Color.WHITE else inactiveFg)
                     typeface = Typeface.DEFAULT
                     gravity = Gravity.CENTER
@@ -1353,170 +1526,44 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             }
             view.setOnClickListener { handleToolTap(tool, view) }
             view.setOnLongClickListener {
-                emitEvent("onToolLongPress", Arguments.createMap().apply {
-                    putString("toolId", tool.id); putString("toolName", tool.name)
-                }); true
-            }
-            return view
-        }
+                if (tool.action == "insert_doc_screenshot") {
 
-        fun makePenLockButton(sz: Int, gapPx: Int): View {
-            val locked = isPenLocked
-            val activeBg = CLR_BTN_ACT
-            val fgColor = if (locked) Color.WHITE else CLR_BTN_FG
-            val iconId = if (locked) "pen_lock_off" else "pen_lock"
-            val iconDrawable = loadIconFromAssets(iconId, sz, fgColor)
-
-            val view: View = if (iconDrawable != null) {
-                ImageView(ctx).apply {
-                    setImageDrawable(iconDrawable)
-                    scaleType = ImageView.ScaleType.CENTER_INSIDE
-                    val padPx = dpToPx(if (orientation == "vertical") 10 else 12)
-                    setPadding(padPx, padPx, padPx, padPx)
-                    background = GradientDrawable().apply {
-                        setColor(if (locked) activeBg else Color.TRANSPARENT)
-                        cornerRadius = 0f
-                    }
-                }
-            } else {
-                TextView(ctx).apply {
-                    text = if (locked) "⊘" else "✏"
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, if (orientation == "vertical") 16f else BTN_TEXT_SIZE_SP - 2f)
-                    setTextColor(fgColor)
-                    typeface = Typeface.DEFAULT_BOLD
-                    gravity = Gravity.CENTER
-                    background = GradientDrawable().apply {
-                        setColor(if (locked) activeBg else Color.TRANSPARENT)
-                        cornerRadius = 0f
-                    }
-                }
-            }
-
-            view.layoutParams = LinearLayout.LayoutParams(sz, sz).apply {
-                marginStart = gapPx / 2; marginEnd = gapPx / 2
-            }
-            view.setOnClickListener {
-                if (isPenLocked) {
-                    isPenLocked = false
-                    emitEvent("onPenLockRelease", Arguments.createMap())
+                    openDocScreenshotPanel()
                 } else {
-                    isPenLocked = true
-                    emitEvent("onPenLockRequest", Arguments.createMap())
-                }
-                rebuildButtons()
-            }
-            return view
-        }
-
-        val showPenLock = (n != 5)
-
-        if (orientation == "vertical") {
-            if (n <= 5) {
-
-                val col = LinearLayout(ctx).apply {
-                    this.orientation = LinearLayout.VERTICAL
-                    layoutParams = LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
-                    )
-                }
-                for ((i, t) in tools.withIndex()) {
-                    col.addView(makeToolButton(i, t).apply {
-                        (layoutParams as LinearLayout.LayoutParams).apply { bottomMargin = gap }
+                    emitEvent("onToolLongPress", Arguments.createMap().apply {
+                        putString("toolId", tool.id); putString("toolName", tool.name)
                     })
                 }
-                if (showPenLock) col.addView(makePenLockButton(btnSz, gap))
-                c.addView(col)
-            } else {
-
-                val totalSlots = n + (if (showPenLock) 1 else 0)
-                val perCol = (totalSlots + 1) / 2
-                val colsContainer = LinearLayout(ctx).apply {
-                    this.orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.TOP
-                    layoutParams = LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
-                    )
-                }
-                val col1 = LinearLayout(ctx).apply {
-                    this.orientation = LinearLayout.VERTICAL
-                    layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-                }
-                val col2 = LinearLayout(ctx).apply {
-                    this.orientation = LinearLayout.VERTICAL
-                    layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-                }
-                for (slot in 0 until totalSlots) {
-                    val col = if (slot < perCol) col1 else col2
-                    val isCol1 = slot < perCol
-                    val view: View = if (slot < n) {
-                        makeToolButton(slot, tools[slot]).apply {
-                            (layoutParams as LinearLayout.LayoutParams).apply {
-                                marginStart = if (isCol1) 0 else gap / 2
-                                marginEnd = if (isCol1) gap / 2 else 0
-                                bottomMargin = gap
-                            }
-                        }
-                    } else {
-                        makePenLockButton(btnSz, gap).apply {
-                            (layoutParams as LinearLayout.LayoutParams).apply {
-                                marginStart = if (isCol1) 0 else gap / 2
-                                marginEnd = if (isCol1) gap / 2 else 0
-                                bottomMargin = gap
-                            }
-                        }
-                    }
-                    col.addView(view)
-                }
-                colsContainer.addView(col1)
-                colsContainer.addView(col2)
-                c.addView(colsContainer)
+                true
             }
+            return view
+        }
+
+        if (orientation == "vertical") {
+
+            val col = LinearLayout(ctx).apply {
+                this.orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+            }
+            for ((i, t) in tools.withIndex()) {
+                col.addView(makeToolButton(i, t).apply {
+                    (layoutParams as LinearLayout.LayoutParams).apply { bottomMargin = gap }
+                })
+            }
+            c.addView(col)
         } else {
-            if (n <= 5) {
 
-                val row = LinearLayout(ctx).apply {
-                    this.orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    layoutParams = LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
-                    )
-                }
-                for ((i, t) in tools.withIndex()) row.addView(makeToolButton(i, t))
-                if (showPenLock) {
-                    row.addView(View(ctx).apply { layoutParams = LinearLayout.LayoutParams(dpToPx(8), 1) })
-                    row.addView(makePenLockButton(btnSz, gap))
-                }
-                c.addView(row)
-            } else {
-
-                val totalSlots = n + (if (showPenLock) 1 else 0)
-                val perRow = (totalSlots + 1) / 2
-                val row1 = LinearLayout(ctx).apply {
-                    this.orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    layoutParams = LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
-                    )
-                }
-                val row2 = LinearLayout(ctx).apply {
-                    this.orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    layoutParams = LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
-                    ).apply { topMargin = gap }
-                }
-                for (slot in 0 until totalSlots) {
-                    val row = if (slot < perRow) row1 else row2
-                    val view: View = if (slot < n) {
-                        makeToolButton(slot, tools[slot])
-                    } else {
-                        makePenLockButton(btnSz, gap)
-                    }
-                    row.addView(view)
-                }
-                c.addView(row1)
-                c.addView(row2)
+            val row = LinearLayout(ctx).apply {
+                this.orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+                )
             }
+            for ((i, t) in tools.withIndex()) row.addView(makeToolButton(i, t))
+            c.addView(row)
         }
 
         try {
@@ -1534,6 +1581,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     }
 
     private fun snapToEdge() {
+        refreshScreenDimensions()
         val lp = layoutParams ?: return; val root = rootView ?: return
         val vw = root.measuredWidth.takeIf { it > 0 } ?: root.width
         val vh = root.measuredHeight.takeIf { it > 0 } ?: root.height
@@ -1553,6 +1601,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     }
 
     private fun handleToolTap(tool: ToolItem, view: View) {
+        resetAutoCollapse()
         if (tool.latches) {
             if (activeModeIds.contains(tool.id)) {
                 activeModeIds.remove(tool.id)
@@ -1657,16 +1706,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
             removeAll()
 
-            captureToastView?.let {
-                try {
-                    val wm = reactApplicationContext.getSystemService(
-                        android.content.Context.WINDOW_SERVICE
-                    ) as WindowManager
-                    wm.removeView(it)
-                } catch (_: Exception) {}
-                captureToastView = null
-            }
-
             activeModeIds.clear()
 
             pendingScreen = ""
@@ -1693,13 +1732,14 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
     private fun removeAll() {
         pendingShow = false
+        handler.removeCallbacks(autoCollapseRunnable)
         if (rootView != null) {
             try { windowManager?.removeView(rootView) } catch (_: Exception) {}
             rootView = null
         }
         expandedRoot = null; toolContainer = null; collapsedRoot = null; layoutParams = null
 
-        clipIconViews = arrayOfNulls(4)
+        clipIconViews = arrayOfNulls(6)
     }
 
     private fun hideFloatingBubble() {
@@ -1727,7 +1767,16 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     private fun resumeAllNativePanels() = ToolRegistry.resumeAll()
 
     private val density: Float get() = reactApplicationContext.resources.displayMetrics.density
-    private fun dpToPx(dp: Int): Int = (dp * density).roundToInt()
+
+    private val toolbarExtraScale: Float get() {
+        val dm = reactApplicationContext.resources.displayMetrics
+        val longSide = maxOf(dm.widthPixels, dm.heightPixels)
+        val shortSide = minOf(dm.widthPixels, dm.heightPixels)
+        return if (longSide == 2560 && shortSide == 1920) 1.1f else 1.0f
+    }
+    private val scaleFactor: Float get() = maxOf(0.86f, com.supernote_quicktoolbar.ui_common.ScreenScale.factor(reactApplicationContext)) * toolbarExtraScale
+    private fun dpToPx(dp: Int): Int = (dp * density * scaleFactor).roundToInt()
+    private fun sp(v: Float): Float = v * scaleFactor
 
     private fun emitOpenMainWithRetries(guardScreen: String) {
         for (delay in RETRY_DELAYS_MS) {
@@ -1882,6 +1931,346 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
+    fun handleDocScreenshotCrop() {
+        handler.post {
+            Log.i(TAG, "[CROP-DBG/Kt] handleDocScreenshotCrop: starting screencap")
+            removeAll()
+            val cacheDir = reactApplicationContext.cacheDir.absolutePath
+            kotlin.concurrent.thread(isDaemon = false) {
+                try {
+                    val ts = System.currentTimeMillis()
+                    val outPath = "$cacheDir/screenshot_crop_$ts.png"
+                    val process = Runtime.getRuntime().exec(arrayOf("screencap", "-p", outPath))
+                    val exitCode = process.waitFor()
+                    val file = java.io.File(outPath)
+                    Log.i(TAG, "[CROP-DBG/Kt] screencap exit=$exitCode size=${file.length()}")
+                    if (exitCode != 0 || !file.exists() || file.length() <= 500) {
+                        Log.e(TAG, "[CROP-DBG/Kt] screencap failed")
+                        return@thread
+                    }
+                    val dims = DocScreenshotService.getImageDimensions(outPath)
+                    val imgW = dims?.first ?: 1920
+                    val imgH = dims?.second ?: 2560
+
+                    val activeSession = DocScreenshotService.loadSession()
+                    if (activeSession != null && activeSession.images.isNotEmpty()) {
+                        val updated = DocScreenshotService.addImage(outPath, imgW, imgH)
+                        if (updated != null && updated.images.size >= 2) {
+                            handler.post {
+                                callClosePluginView()
+                                openStitchPanel(updated)
+                            }
+                            return@thread
+                        }
+                    }
+
+                    handler.post {
+                        callClosePluginView()
+                        openCropPanelForDoc(outPath, imgW, imgH)
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "[CROP-DBG/Kt] screencap error: ${e.message}", e)
+                }
+            }
+        }
+    }
+
+    private fun restoreAfterCropFlow() {
+        ScreenshotBubble.reshowIfPending()
+
+        isInNoteApp = checkIsNoteAppForeground()
+        if (isInNoteApp && tools.isNotEmpty() && rootView == null) restoreToolbar()
+    }
+
+    private fun openCropPanelForDoc(screenshotPath: String, imgW: Int, imgH: Int, fromStitch: Boolean = false) {
+        val hasStitch = DocScreenshotService.hasActiveSession()
+        CropPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule)
+            .showWithFooter(
+                path = screenshotPath,
+                hasStitchSession = hasStitch,
+                onConfirm = { crop, stayOpen ->
+                    Log.i(TAG, "[CROP-DBG/Kt] crop confirm: ${crop.width}x${crop.height} multi=$stayOpen")
+                    kotlin.concurrent.thread(isDaemon = true) {
+                        DocScreenshotService.stageToQueue(screenshotPath, crop)
+                        if (fromStitch) DocScreenshotService.clearSession()
+                    }
+                    if (!stayOpen) restoreAfterCropFlow()
+                },
+                onLongScreenshot = {
+                    if (fromStitch) {
+                        Log.i(TAG, "[CROP-DBG/Kt] long screenshot: session kept, returning to capture")
+                    } else {
+                        Log.i(TAG, "[CROP-DBG/Kt] long screenshot: saving to stitch session")
+                        kotlin.concurrent.thread(isDaemon = true) {
+                            val existing = DocScreenshotService.loadSession()
+                            if (existing != null) {
+                                DocScreenshotService.addImage(screenshotPath, imgW, imgH)
+                            } else {
+                                DocScreenshotService.startSession(screenshotPath, imgW, imgH)
+                            }
+                        }
+                    }
+                    CropPanel.currentInstance?.hide()
+                    restoreAfterCropFlow()
+                },
+                onAddToHistory = { crop, stayOpen ->
+                    Log.i(TAG, "[CROP-DBG/Kt] add to history: ${crop.width}x${crop.height} multi=$stayOpen")
+                    kotlin.concurrent.thread(isDaemon = true) {
+                        DocScreenshotService.saveToHistory(screenshotPath, crop)
+                        if (fromStitch) DocScreenshotService.clearSession()
+                    }
+                    if (!stayOpen) restoreAfterCropFlow()
+                },
+                onScreenshotToNote = { crop ->
+                    Log.i(TAG, "[CROP-DBG/Kt] screenshot→note: ${crop.width}x${crop.height}")
+
+                    kotlin.concurrent.thread(isDaemon = true) {
+                        DocScreenshotService.stageToQueue(screenshotPath, crop)
+                        if (fromStitch) DocScreenshotService.clearSession()
+                    }
+                    CropPanel.currentInstance?.hide()
+                    ScreenshotBubble.reshowIfPending()
+
+                    isInNoteApp = true
+                    if (tools.isNotEmpty() && rootView == null) restoreToolbar()
+                    returnToNoteApp()
+                },
+                onCancel = {
+                    Log.i(TAG, "[CROP-DBG/Kt] crop cancel")
+                    if (fromStitch) kotlin.concurrent.thread(isDaemon = true) { DocScreenshotService.clearSession() }
+                    restoreAfterCropFlow()
+                }
+            )
+    }
+
+    private fun returnToNoteApp() {
+        try {
+            val intent = android.content.Intent(android.content.Intent.ACTION_MAIN).apply {
+                component = android.content.ComponentName(NOTE_PACKAGE, NOTE_INSIDE_PAGES_ACTIVITY)
+                addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            reactApplicationContext.startActivity(intent)
+        } catch (e: Exception) {
+            Log.e(TAG, "returnToNoteApp failed: ${e.message}", e)
+        }
+    }
+
+    private fun openStitchPanel(session: DocScreenshotService.StitchSessionData) {
+        StitchPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule)
+            .show(
+                session = session,
+                onConfirm = { finalSession ->
+                    Log.i(TAG, "[CROP-DBG/Kt] stitch confirm: compositing ${finalSession.images.size} images...")
+                    kotlin.concurrent.thread(isDaemon = false) {
+                        try {
+                            val nativeParams = org.json.JSONObject().apply {
+                                put("direction", finalSession.params.direction)
+                                put("overlap", finalSession.params.overlap)
+                                put("topLayerIndex", finalSession.params.topLayerIndex)
+                                put("cols", finalSession.params.cols)
+                                put("images", org.json.JSONArray().apply {
+                                    for (img in finalSession.images) {
+                                        put(org.json.JSONObject().apply {
+                                            put("path", img.path)
+                                            put("width", img.width)
+                                            put("height", img.height)
+                                            put("crop", org.json.JSONObject().apply {
+                                                put("cropTop", img.cropTop.toDouble())
+                                                put("cropBottom", img.cropBottom.toDouble())
+                                                put("cropLeft", img.cropLeft.toDouble())
+                                                put("cropRight", img.cropRight.toDouble())
+                                            })
+                                        })
+                                    }
+                                })
+                            }
+                            DocScreenshotService.updateSession(finalSession)
+                            val compositePath = compositeImagesSync(nativeParams.toString())
+                            if (compositePath != null) {
+                                val compDims = DocScreenshotService.getImageDimensions(compositePath)
+                                val compW = compDims?.first ?: 1920
+                                val compH = compDims?.second ?: 2560
+                                handler.post {
+                                    StitchPanel.currentInstance?.hide()
+                                    openCropPanelForDoc(compositePath, compW, compH, fromStitch = true)
+                                }
+                            } else {
+                                Log.e(TAG, "[CROP-DBG/Kt] composite returned null")
+                                handler.post { StitchPanel.currentInstance?.hide(); restoreAfterCropFlow() }
+                            }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "[CROP-DBG/Kt] composite error: ${e.message}", e)
+                            handler.post { StitchPanel.currentInstance?.hide(); restoreAfterCropFlow() }
+                        }
+                    }
+                },
+                onCancel = {
+                    Log.i(TAG, "[CROP-DBG/Kt] stitch cancel: clearing session")
+                    kotlin.concurrent.thread(isDaemon = true) {
+                        DocScreenshotService.clearSession()
+                    }
+                    restoreAfterCropFlow()
+                }
+            )
+    }
+
+    private fun compositeImagesSync(paramsJson: String): String? {
+        val json = org.json.JSONObject(paramsJson)
+        val imagesArr = json.getJSONArray("images")
+        if (imagesArr.length() < 2) return null
+
+        data class ImgInfo(
+            val path: String, val width: Int, val height: Int,
+            val cropTop: Float, val cropBottom: Float,
+            val cropLeft: Float, val cropRight: Float
+        )
+        val imgs = (0 until imagesArr.length()).map { i ->
+            val obj = imagesArr.getJSONObject(i)
+            val crop = obj.optJSONObject("crop")
+            ImgInfo(
+                obj.getString("path"), obj.getInt("width"), obj.getInt("height"),
+                crop?.optDouble("cropTop", 0.0)?.toFloat() ?: 0f,
+                crop?.optDouble("cropBottom", 0.0)?.toFloat() ?: 0f,
+                crop?.optDouble("cropLeft", 0.0)?.toFloat() ?: 0f,
+                crop?.optDouble("cropRight", 0.0)?.toFloat() ?: 0f,
+            )
+        }
+
+        val cols = json.optInt("cols", 0)
+        if (cols > 0 && imgs.size > 2) {
+            val overlap = json.optInt("overlap", 0)
+            return compositeGrid(imagesArr, cols, overlap)
+        }
+
+        val direction = json.getString("direction")
+        val overlap = json.getInt("overlap")
+        val topLayerIndex = json.getInt("topLayerIndex")
+        val bitmaps = imgs.map { android.graphics.BitmapFactory.decodeFile(it.path) ?: throw Exception("decode failed: ${it.path}") }
+        val srcRects = imgs.map { img ->
+            android.graphics.Rect(
+                (img.width * img.cropLeft).toInt(),
+                (img.height * img.cropTop).toInt(),
+                (img.width * (1f - img.cropRight)).toInt(),
+                (img.height * (1f - img.cropBottom)).toInt()
+            )
+        }
+        val effW = srcRects.map { it.width() }
+        val effH = srcRects.map { it.height() }
+        val canvasW: Int; val canvasH: Int
+        if (direction == "vertical") {
+            canvasW = maxOf(effW[0], effW[1])
+            canvasH = effH[0] + effH[1] - overlap
+        } else {
+            canvasW = effW[0] + effW[1] - overlap
+            canvasH = maxOf(effH[0], effH[1])
+        }
+        if (canvasW <= 0 || canvasH <= 0) return null
+
+        val result = android.graphics.Bitmap.createBitmap(canvasW, canvasH, android.graphics.Bitmap.Config.ARGB_8888)
+        val canvas = android.graphics.Canvas(result)
+        val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG or android.graphics.Paint.FILTER_BITMAP_FLAG)
+        val dstRects = Array(2) { android.graphics.RectF() }
+        if (direction == "vertical") {
+            dstRects[0].set(0f, 0f, effW[0].toFloat(), effH[0].toFloat())
+            dstRects[1].set(0f, (effH[0] - overlap).toFloat(), effW[1].toFloat(), (effH[0] - overlap + effH[1]).toFloat())
+        } else {
+            dstRects[0].set(0f, 0f, effW[0].toFloat(), effH[0].toFloat())
+            dstRects[1].set((effW[0] - overlap).toFloat(), 0f, (effW[0] - overlap + effW[1]).toFloat(), effH[1].toFloat())
+        }
+        val drawOrder = if (topLayerIndex == 0) intArrayOf(1, 0) else intArrayOf(0, 1)
+        for (idx in drawOrder) canvas.drawBitmap(bitmaps[idx], srcRects[idx], dstRects[idx], paint)
+
+        val outPath = "${reactApplicationContext.cacheDir.absolutePath}/stitch_result_${System.currentTimeMillis()}.png"
+        java.io.FileOutputStream(outPath).use { fos -> result.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, fos) }
+        result.recycle(); bitmaps.forEach { it.recycle() }
+        return outPath
+    }
+
+    private fun compositeGrid(imagesArr: org.json.JSONArray, cols: Int, overlap: Int): String? {
+        val n = imagesArr.length()
+        val rowCount = (n + cols - 1) / cols
+
+        data class CellInfo(
+            val path: String, val width: Int, val height: Int,
+            val cropLeft: Float, val cropTop: Float, val cropRight: Float, val cropBottom: Float
+        )
+        val cells = (0 until n).map { i ->
+            val obj = imagesArr.getJSONObject(i)
+            val crop = obj.optJSONObject("crop")
+            CellInfo(
+                obj.getString("path"), obj.getInt("width"), obj.getInt("height"),
+                crop?.optDouble("cropLeft", 0.0)?.toFloat() ?: 0f,
+                crop?.optDouble("cropTop", 0.0)?.toFloat() ?: 0f,
+                crop?.optDouble("cropRight", 0.0)?.toFloat() ?: 0f,
+                crop?.optDouble("cropBottom", 0.0)?.toFloat() ?: 0f,
+            )
+        }
+
+        val cellW = cells.maxOf { ((1f - it.cropLeft - it.cropRight) * it.width).toInt() }
+        val cellH = cells.maxOf { ((1f - it.cropTop - it.cropBottom) * it.height).toInt() }
+
+        val isVerticalStrip = cols == 1
+        val isHorizontalStrip = cols >= n
+        val ovl = if (isVerticalStrip || isHorizontalStrip) overlap else 0
+
+        val canvasW: Int
+        val canvasH: Int
+        if (isVerticalStrip) {
+            canvasW = cellW
+            canvasH = cellH * rowCount - ovl * (rowCount - 1)
+        } else if (isHorizontalStrip) {
+            canvasW = cellW * cols - ovl * (cols - 1)
+            canvasH = cellH
+        } else {
+            canvasW = cellW * cols
+            canvasH = cellH * rowCount
+        }
+        if (canvasW <= 0 || canvasH <= 0) return null
+
+        val result = android.graphics.Bitmap.createBitmap(canvasW, canvasH, android.graphics.Bitmap.Config.ARGB_8888)
+        val canvas = android.graphics.Canvas(result)
+        val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG or android.graphics.Paint.FILTER_BITMAP_FLAG)
+
+        for ((i, cell) in cells.withIndex()) {
+            val col = i % cols
+            val row = i / cols
+            val bmp = android.graphics.BitmapFactory.decodeFile(cell.path) ?: continue
+            val srcRect = android.graphics.Rect(
+                (cell.width * cell.cropLeft).toInt(),
+                (cell.height * cell.cropTop).toInt(),
+                (cell.width * (1f - cell.cropRight)).toInt(),
+                (cell.height * (1f - cell.cropBottom)).toInt()
+            )
+            val effW = srcRect.width().toFloat()
+            val effH = srcRect.height().toFloat()
+            val scaleToFit = kotlin.math.min(cellW / effW, cellH / effH)
+            val drawW = effW * scaleToFit
+            val drawH = effH * scaleToFit
+
+            val ox: Float
+            val oy: Float
+            if (isVerticalStrip) {
+                ox = (cellW - drawW) / 2f
+                oy = row * (cellH - ovl) + (cellH - drawH) / 2f
+            } else if (isHorizontalStrip) {
+                ox = col * (cellW - ovl) + (cellW - drawW) / 2f
+                oy = (cellH - drawH) / 2f
+            } else {
+                ox = col * cellW + (cellW - drawW) / 2f
+                oy = row * cellH + (cellH - drawH) / 2f
+            }
+
+            canvas.drawBitmap(bmp, srcRect, android.graphics.RectF(ox, oy, ox + drawW, oy + drawH), paint)
+            bmp.recycle()
+        }
+
+        val outPath = "${reactApplicationContext.cacheDir.absolutePath}/stitch_grid_${System.currentTimeMillis()}.png"
+        java.io.FileOutputStream(outPath).use { fos -> result.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, fos) }
+        result.recycle()
+        return outPath
+    }
+
+    @ReactMethod
     fun handleDocScreenshot() {
         handler.post {
             removeAll()
@@ -1907,6 +2296,23 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 emitEvent("onNativePanelOpen", Arguments.createMap().apply { putString("panel", "screenshot") })
                 DocScreenshotPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show()
             }
+        }
+    }
+
+    fun openDocScreenshotPanel() {
+        handler.post {
+            removeAll()
+            callClosePluginView()
+            emitEvent("onNativePanelOpen", Arguments.createMap().apply { putString("panel", "screenshot") })
+            DocScreenshotPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show("queue")
+        }
+    }
+
+    private fun startAppendPageCapture() {
+        handler.post {
+            removeAll()
+            LassoScreenshotPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule)
+                .captureAndShow(fromBubble = false, mode = "appendPage")
         }
     }
 
@@ -1960,6 +2366,26 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
     fun emitEventPublic(name: String, params: WritableMap) = emitEvent(name, params)
 
+    fun onAppendPageCaptured(
+        imagePath: String,
+        cropX: Int = -1, cropY: Int = -1, cropW: Int = -1, cropH: Int = -1,
+        imgW: Int = -1, imgH: Int = -1,
+    ) {
+        handler.post {
+            emitEvent("onAppendPageAction", Arguments.createMap().apply {
+                putString("imagePath", imagePath)
+                if (cropX >= 0) {
+                    putInt("cropX", cropX)
+                    putInt("cropY", cropY)
+                    putInt("cropW", cropW)
+                    putInt("cropH", cropH)
+                    putInt("imgW", imgW)
+                    putInt("imgH", imgH)
+                }
+            })
+        }
+    }
+
     fun cancelPendingScreen() {
         pendingScreen = ""
     }
@@ -1968,6 +2394,8 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         handler.post {
             Log.i(TAG, "destroyAll: removing all overlays + closing plugin")
 
+            emitEvent("onToolbarDestroyAll", Arguments.createMap())
+
             stopForegroundMonitor()
             pendingScreen = ""
             pendingOpenMain = false
@@ -1975,15 +2403,9 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
             removeAll()
 
-            captureToastView?.let {
-                try {
-                    val wm = reactApplicationContext.getSystemService(android.content.Context.WINDOW_SERVICE) as WindowManager
-                    wm.removeView(it)
-                } catch (_: Exception) {}
-                captureToastView = null
-            }
-
             ToolRegistry.hideAll()
+            ScreenshotBubble.pendingReshow = false
+            ScreenshotBubble.hide()
 
             callClosePluginView()
             Log.i(TAG, "destroyAll: done")
@@ -2000,12 +2422,24 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         handler.post { hideAllNativePanels() }
     }
 
-    private fun rebuildClipIcons() {
-        for (i in 0 until 4) {
-            val tv = clipIconViews[i] ?: continue
-            val filled = titleClipFilled.getOrElse(i) { false }
-            tv.setTextColor(if (filled) Color.WHITE else Color.BLACK)
+    private fun forwardTapToClip(overlay: View, event: android.view.MotionEvent) {
+        val loc = IntArray(2); overlay.getLocationOnScreen(loc)
+        val touchY = event.rawY - loc[1]
+        val iconH = dpToPx(CLIP_ICON_DP) + dpToPx(2)
+        val idx = (touchY / iconH).toInt().coerceIn(0, 3)
+        clipIconViews[idx]?.performClick()
+    }
 
+    private fun rebuildClipIcons() {
+        val count = if (orientation == "vertical") 4 else 6
+        val offset = if (orientation == "vertical") clipPage * 2 else 0
+        for (vi in 0 until count) {
+            val tv = clipIconViews[vi] ?: continue
+            val di = offset + vi
+            val filled = titleClipFilled.getOrElse(di) { false }
+            val slot = di + 1
+            tv.text = slot.toString()
+            tv.setTextColor(if (filled) Color.WHITE else Color.BLACK)
             tv.background = if (filled) {
                 GradientDrawable().apply {
                     shape = GradientDrawable.RECTANGLE
@@ -2014,6 +2448,13 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 }
             } else {
                 null
+            }
+            tv.setOnClickListener {
+                emitEvent("onTitleClipTap", Arguments.createMap().apply { putString("slot", slot.toString()) })
+            }
+            tv.setOnLongClickListener {
+                emitEvent("onTitleClipLongPress", Arguments.createMap().apply { putString("slot", slot.toString()) })
+                true
             }
             tv.invalidate()
         }
@@ -2027,7 +2468,20 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     }
 
     private fun runMonitorTick() {
-        val inNote = checkIsNoteAppForeground()
+        val fgPkg = foregroundPackage()
+
+        if (fgPkg == SETTINGS_PACKAGE) {
+            if (ScreenshotBubble.isShowing) {
+                Log.i(TAG, "foreground monitor: in ratta settings, hiding ScreenshotBubble")
+                monitorHandler.post { ScreenshotBubble.hideForSettings() }
+            }
+        } else if (ScreenshotBubble.hiddenBySettings) {
+
+            Log.i(TAG, "foreground monitor: left ratta settings, restoring ScreenshotBubble")
+            monitorHandler.post { ScreenshotBubble.reshowIfHiddenBySettings() }
+        }
+
+        val inNote = if (fgPkg == null) true else (fgPkg == NOTE_PACKAGE || fgPkg == PLUGIN_PACKAGE)
         if (inNote != isInNoteApp) {
             isInNoteApp = inNote
             if (!inNote) {
@@ -2038,6 +2492,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     suspendAllNativePanels()
                     FloatingBubbleModule.hideStatic()
                     AiBubbleModule.hideStatic()
+
                 }
             } else {
                 Log.i(TAG, "foreground monitor: returned to note app")
@@ -2049,7 +2504,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                         || LassoScreenshotPanel.currentInstance != null
                         || DocScreenshotPanel.currentInstance != null
                     if (!anyPanelOpen) {
-                        if (wasVisibleBeforeBackground && tools.isNotEmpty() && rootView == null) {
+                        if ((wasVisibleBeforeBackground || ScreenshotBubble.isShowing || ScreenshotBubble.pendingReshow) && tools.isNotEmpty() && rootView == null) {
                             collapsed = false
                             createExpandedToolbar()
                         }
@@ -2078,7 +2533,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
     private val resumedActivityRegex = Regex("""mResumedActivity:.*?(\S+)/(\S+)\s""")
 
-    private fun checkIsNoteAppForeground(): Boolean {
+    private fun foregroundPackage(): String? {
         return try {
             val proc = Runtime.getRuntime().exec(arrayOf("dumpsys", "activity", "activities"))
             val reader = proc.inputStream.bufferedReader()
@@ -2098,15 +2553,20 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     if (it.startsWith(".")) pkg + it else it
                 }
                 Log.d(TAG, "foreground: $pkg/$cls")
-                pkg == NOTE_PACKAGE || pkg == PLUGIN_PACKAGE
+                pkg
             } else {
-                Log.w(TAG, "checkIsNoteAppForeground: no mResumedActivity found")
-                true
+                Log.w(TAG, "foregroundPackage: no mResumedActivity found")
+                null
             }
         } catch (e: Exception) {
-            Log.w(TAG, "checkIsNoteAppForeground: ${e.message}")
-            true
+            Log.w(TAG, "foregroundPackage: ${e.message}")
+            null
         }
+    }
+
+    private fun checkIsNoteAppForeground(): Boolean {
+        val pkg = foregroundPackage() ?: return true
+        return pkg == NOTE_PACKAGE || pkg == PLUGIN_PACKAGE
     }
 
     @ReactMethod
@@ -2191,6 +2651,35 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             strokeEraserOverlay?.dismiss()
             strokeEraserOverlay = null
         }
+    }
+
+    private var insertTimerRunning = false
+    private var insertTimerInterval = 800L
+    private val insertTimerRunnable = object : Runnable {
+        override fun run() {
+            if (!insertTimerRunning) return
+            try {
+                reactApplicationContext
+                    .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+                    .emit("onInsertTimerTick", null)
+            } catch (_: Exception) {}
+            handler.postDelayed(this, insertTimerInterval)
+        }
+    }
+
+    @ReactMethod
+    fun startInsertTimer(ms: Int) {
+        handler.removeCallbacks(insertTimerRunnable)
+        insertTimerInterval = ms.toLong().coerceAtLeast(100L)
+        insertTimerRunning = true
+        handler.postDelayed(insertTimerRunnable, insertTimerInterval)
+        Log.i(TAG, "startInsertTimer intervalMs=$insertTimerInterval")
+    }
+
+    @ReactMethod
+    fun stopInsertTimer() {
+        insertTimerRunning = false
+        handler.removeCallbacks(insertTimerRunnable)
     }
 
     @ReactMethod fun addListener(eventName: String) {}

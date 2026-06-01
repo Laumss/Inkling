@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="24" android:viewportHeight="24">
+  <!-- note page on the right -->
+  <path android:strokeColor="#1A1A1A" android:strokeWidth="2.0" android:fillColor="#00000000"
+        android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:pathData="M12,2.5 L20,2.5 A1.2,1.2 0 0 1 21.2,3.7 L21.2,20.3 A1.2,1.2 0 0 1 20,21.5 L12,21.5"/>
+  <!-- arrow entering the page from the left -->
+  <path android:strokeColor="#1A1A1A" android:strokeWidth="2.0" android:fillColor="#00000000"
+        android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:pathData="M2.8,12 L13,12 M9,8 L13,12 L9,16"/>
+</vector>

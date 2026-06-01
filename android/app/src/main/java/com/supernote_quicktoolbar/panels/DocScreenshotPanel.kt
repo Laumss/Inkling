@@ -6,6 +6,7 @@ import com.supernote_quicktoolbar.bubbles.*
 import android.content.Intent
 import android.graphics.*
 import android.graphics.Bitmap
+import android.graphics.Typeface
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Paint
@@ -20,6 +21,7 @@ import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 import com.supernote_quicktoolbar.ui_common.PanelBase
+import com.supernote_quicktoolbar.ui_common.PanelGrid
 import com.supernote_quicktoolbar.ui_common.PanelHeader
 import com.supernote_quicktoolbar.ui_common.PanelScrollHost
 import com.supernote_quicktoolbar.ui_common.PanelTabBar
@@ -36,8 +38,7 @@ class DocScreenshotPanel(
 
     override val tag = "DocScreenshotPanel"
     override val panelName = "screenshot"
-    override val widthRatio = 0.6
-    override val heightRatio = 0.65
+    override val heightRatio = 0.81
 
     companion object {
         @Volatile var currentInstance: DocScreenshotPanel? = null
@@ -61,10 +62,12 @@ class DocScreenshotPanel(
     private var insertBtn: SelectionButton? = null
     private var deleteBtn: SelectionButton? = null
 
-    fun show() {
+    fun show(initialTab: String = "history") {
+        ScreenshotBubble.pendingReshow = false
+        ScreenshotBubble.hide()
         currentInstance = this
         selectedPath = null
-        activeTab = "history"
+        activeTab = initialTab
         showPanel()
         handler.post { refreshContent() }
     }
@@ -82,7 +85,7 @@ class DocScreenshotPanel(
             PanelTabBar.Tab.Icon("icons/ic_tab_queue.xml", "queue"),
             PanelTabBar.Tab.Icon("icons/ic_tab_history.xml", "history")
         )) { idx -> switchTab(if (idx == 0) "queue" else "history") }
-        tabBar!!.setSelection(1)
+        tabBar!!.setSelection(if (activeTab == "queue") 0 else 1)
         root.addView(tabBar!!.createView())
 
         scrollHost = PanelScrollHost(reactContext)
@@ -98,6 +101,7 @@ class DocScreenshotPanel(
             leftButtons = listOf(deleteTv),
             rightButtons = listOf(
                 makeOutlinedBtn(NativeLocale.t("cancel")) { closeAndRestore() },
+                makeOutlinedBtn(NativeLocale.t("screenshot_bubble")) { showBubbleAndClose() },
                 insertTv
             )
         ))
@@ -150,52 +154,19 @@ class DocScreenshotPanel(
     }
 
     private fun buildGrid(files: List<File>) {
-        val grid = contentGrid ?: return
-        val gap = dp(5)
-        val innerW = scrollHost?.availableContentWidth(winW) ?: winW
-        val colW = (innerW - gap * 3) / 2
-
-        var row: LinearLayout? = null
-        for ((idx, file) in files.withIndex()) {
-            if (idx % 2 == 0) {
-                row = LinearLayout(reactContext).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    setPadding(gap, gap, gap, 0)
-                }
-                grid.addView(row)
-            }
-            val cell = createCell(file, colW)
-            (cell.layoutParams as? LinearLayout.LayoutParams)?.apply {
-                if (idx % 2 == 0) rightMargin = gap
-            }
-            row?.addView(cell)
-        }
-        if (files.size % 2 != 0) {
-            row?.addView(View(reactContext).apply {
-                layoutParams = LinearLayout.LayoutParams(colW, 1)
-            })
+        val host = scrollHost ?: return
+        PanelGrid.build(reactContext, host, screenW, winW, files) { file, colW ->
+            createCell(file, colW)
         }
     }
 
     private fun createCell(file: File, width: Int): LinearLayout {
-        val thumbH = (width / 1.2f).toInt()
+        val thumbH = (width * 1.1f).toInt()
         val isSelected = selectedPath == file.absolutePath
 
         val cell = LinearLayout(reactContext).apply {
             orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(width, LinearLayout.LayoutParams.WRAP_CONTENT)
-            background = GradientDrawable().apply {
-                setColor(Color.WHITE)
-                setStroke(if (isSelected) dp(3) else dp(1),
-                    if (isSelected) Color.BLACK else Color.parseColor("#999999"))
-                cornerRadius = dp(6).toFloat()
-            }
-            clipToOutline = true
-            outlineProvider = object : ViewOutlineProvider() {
-                override fun getOutline(v: View, o: android.graphics.Outline) {
-                    o.setRoundRect(0, 0, v.width, v.height, dp(6).toFloat())
-                }
-            }
             setOnClickListener {
                 selectedPath = if (selectedPath == file.absolutePath) null else file.absolutePath
                 updateButtons()
@@ -203,42 +174,50 @@ class DocScreenshotPanel(
             }
         }
 
-        val thumbContainer = FrameLayout(reactContext).apply {
+        val thumbFrame = FrameLayout(reactContext).apply {
             layoutParams = LinearLayout.LayoutParams(width, thumbH)
-            setBackgroundColor(Color.parseColor("#EEEEEE"))
+            background = GradientDrawable().apply {
+                setColor(Color.WHITE)
+                setStroke(if (isSelected) dp(2) else dp(1),
+                    if (isSelected) Color.BLACK else Color.parseColor("#CCCCCC"))
+                cornerRadius = dp(4).toFloat()
+            }
+            clipToOutline = true
+            outlineProvider = object : ViewOutlineProvider() {
+                override fun getOutline(v: View, o: android.graphics.Outline) {
+                    o.setRoundRect(0, 0, v.width, v.height, dp(4).toFloat())
+                }
+            }
         }
         val imageView = ImageView(reactContext).apply {
             layoutParams = FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
             )
-            scaleType = ImageView.ScaleType.CENTER_CROP
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            setPadding(dp(2), dp(2), dp(2), dp(2))
         }
-        thumbContainer.addView(imageView)
+        thumbFrame.addView(imageView)
         loadThumbnail(file.absolutePath, width, thumbH, imageView)
-        cell.addView(thumbContainer)
+        cell.addView(thumbFrame)
 
-        cell.addView(View(reactContext).apply {
-            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1))
-            setBackgroundColor(Color.parseColor("#D8D8D8"))
-        })
-        val info = LinearLayout(reactContext).apply {
+        val textContainer = LinearLayout(reactContext).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(6), dp(4), dp(6), dp(4))
-            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(2), dp(6), dp(2), dp(4))
         }
         val ts = file.name.removeSuffix(".png").toLongOrNull() ?: 0L
         val timeStr = if (ts > 0) {
             java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault()).format(java.util.Date(ts))
         } else file.name
-        info.addView(TextView(reactContext).apply {
-            text = timeStr; textSize = 11f; setTextColor(Color.parseColor("#666666"))
-            gravity = Gravity.CENTER
+        textContainer.addView(TextView(reactContext).apply {
+            text = timeStr; textSize = sp(12f); setTextColor(Color.BLACK)
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            maxLines = 2
         })
-        info.addView(TextView(reactContext).apply {
-            text = formatSize(file.length()); textSize = 10f
-            setTextColor(Color.parseColor("#999999")); gravity = Gravity.CENTER
+        textContainer.addView(TextView(reactContext).apply {
+            text = formatSize(file.length()); textSize = sp(10f)
+            setTextColor(Color.parseColor("#666666"))
         })
-        cell.addView(info)
+        cell.addView(textContainer)
         return cell
     }
 
@@ -263,6 +242,14 @@ class DocScreenshotPanel(
         selectedPath = null
         updateButtons()
         refreshContent()
+    }
+
+    private fun showBubbleAndClose() {
+        dismissWithoutPenRelease()
+        handler.postDelayed({
+            ScreenshotBubble.show(reactContext, toolbarModule)
+            toolbarModule.restoreToolbar()
+        }, 200)
     }
 
     private fun closeAndRestore() {

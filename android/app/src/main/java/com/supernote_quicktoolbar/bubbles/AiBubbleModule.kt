@@ -27,6 +27,15 @@ class AiBubbleModule(reactContext: ReactApplicationContext) :
     private val TAG = "AiBubble"
     private val handler = Handler(Looper.getMainLooper())
 
+    private val CLR_BG       = Color.WHITE
+    private val CLR_BORDER   = Color.parseColor("#111111")
+    private val CLR_TEXT     = Color.parseColor("#1A1A1A")
+    private val CLR_DOT     = Color.parseColor("#111111")
+    private val CLR_BTN_BG   = Color.WHITE
+    private val CLR_BTN_BORDER = Color.parseColor("#111111")
+    private val CLR_BTN_TEXT = Color.parseColor("#1A1A1A")
+    private val CLR_SEP      = Color.parseColor("#E8E8E5")
+
     init { currentInstance = this }
 
     companion object {
@@ -46,6 +55,7 @@ class AiBubbleModule(reactContext: ReactApplicationContext) :
 
         @Volatile @JvmStatic private var pageHeight = 1872
         @Volatile @JvmStatic private var screenHeight = 1872
+        @Volatile @JvmStatic private var screenWidth = 1404
 
         @Volatile @JvmStatic private var stickyY: Int = 120
 
@@ -83,6 +93,24 @@ class AiBubbleModule(reactContext: ReactApplicationContext) :
                     try { windowManager?.removeView(bubbleView) } catch (_: Exception) {}
                     bubbleView = null; statusText = null; dotView = null; actionRow = null; layoutParams = null
                 }
+            }
+        }
+
+        @JvmStatic fun handleOrientationChange() {
+            Handler(Looper.getMainLooper()).post {
+                val inst = currentInstance ?: return@post
+                try {
+                    val dm = inst.reactApplicationContext.resources.displayMetrics
+                    val newW = dm.widthPixels; val newH = dm.heightPixels
+                    if (newW == screenWidth && newH == screenHeight) return@post
+                    screenWidth = newW; screenHeight = newH
+                    val lp = layoutParams ?: return@post
+                    val v = bubbleView ?: return@post
+                    val vh = v.height.takeIf { it > 0 } ?: 60
+                    lp.y = lp.y.coerceIn(0, (screenHeight - vh).coerceAtLeast(0))
+                    stickyY = lp.y
+                    try { windowManager?.updateViewLayout(v, lp) } catch (_: Exception) {}
+                } catch (_: Exception) {}
             }
         }
     }
@@ -158,15 +186,17 @@ class AiBubbleModule(reactContext: ReactApplicationContext) :
         windowManager = context.getSystemService(android.content.Context.WINDOW_SERVICE) as WindowManager
         val dm = context.resources.displayMetrics
         screenHeight = dm.heightPixels
+        screenWidth = dm.widthPixels
         val d = dm.density
+        val borderW = (1.5f * d).toInt()
 
         bubbleView = TouchSinkLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding((14*d).toInt(), (10*d).toInt(), (14*d).toInt(), (10*d).toInt())
+            setPadding((12*d).toInt(), (8*d).toInt(), (12*d).toInt(), (8*d).toInt())
             background = GradientDrawable().apply {
-                setColor(Color.parseColor("#1a1812"))
-                setStroke((1.4f*d).toInt(), Color.parseColor("#1a1812"))
-                cornerRadius = 3f*d
+                setColor(CLR_BG)
+                setStroke(borderW, CLR_BORDER)
+                cornerRadius = 0f
             }
         }
 
@@ -175,15 +205,17 @@ class AiBubbleModule(reactContext: ReactApplicationContext) :
             gravity = Gravity.CENTER_VERTICAL
         }
         dotView = View(context).apply {
-            layoutParams = LinearLayout.LayoutParams((12*d).toInt(), (12*d).toInt()).apply { rightMargin = (10*d).toInt() }
+            layoutParams = LinearLayout.LayoutParams((8*d).toInt(), (8*d).toInt()).apply {
+                rightMargin = (8*d).toInt()
+            }
             background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
-                setColor(Color.parseColor("#f6f4ee"))
+                setColor(CLR_DOT)
             }
         }
         statusRow.addView(dotView)
         statusText = TextView(context).apply {
-            this.text = text; textSize = 16f; setTextColor(Color.parseColor("#f6f4ee"))
+            this.text = text; textSize = 14f; setTextColor(CLR_TEXT)
             typeface = Typeface.DEFAULT_BOLD; maxLines = 1
         }
         statusRow.addView(statusText)
@@ -194,13 +226,13 @@ class AiBubbleModule(reactContext: ReactApplicationContext) :
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { topMargin = (8*d).toInt() }
+            ).apply { topMargin = (6*d).toInt() }
         }
         bubbleView!!.addView(actionRow)
         rebuildActionRow()
 
-        val wmType = if (Build.VERSION.SDK_INT >= 26) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-            else @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
+        @Suppress("DEPRECATION")
+        val wmType = WindowManager.LayoutParams.TYPE_PHONE
         layoutParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
             wmType,
@@ -208,7 +240,7 @@ class AiBubbleModule(reactContext: ReactApplicationContext) :
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.END
-            x = 24; y = stickyY
+            x = 24; y = stickyY.coerceIn(0, (screenHeight - 60).coerceAtLeast(0))
         }
 
         val longPressR = Runnable { if (!isDragging && bubbleView != null) { longPressFired = true; emitEvent("onAiBubbleLongPress", Arguments.createMap()) } }
@@ -263,22 +295,46 @@ class AiBubbleModule(reactContext: ReactApplicationContext) :
             if (arr.length() == 0) { row.visibility = View.GONE; tryUpdateLayout(); return }
             row.visibility = View.VISIBLE
             val d = reactApplicationContext.resources.displayMetrics.density
+            val borderW = (1 * d).toInt()
+
+            if (arr.length() > 0) {
+                val sep = View(reactApplicationContext).apply {
+                    layoutParams = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT, (1 * d).toInt()
+                    ).apply { bottomMargin = (6*d).toInt() }
+                    setBackgroundColor(CLR_SEP)
+                }
+
+                val parent = row.parent as? LinearLayout
+                if (parent != null) {
+                    val idx = parent.indexOfChild(row)
+                    if (idx > 0) {
+
+                        val prev = parent.getChildAt(idx - 1)
+                        if (prev.tag != "ai_sep") {
+                            sep.tag = "ai_sep"
+                            parent.addView(sep, idx)
+                        }
+                    }
+                }
+            }
+
             for (i in 0 until arr.length()) {
                 val obj = arr.getJSONObject(i)
                 val actionId = obj.getString("id"); val icon = obj.optString("icon","?")
                 val label = obj.optString("label", actionId)
                 if (i > 0) { row.addView(View(reactApplicationContext).apply {
-                    layoutParams = LinearLayout.LayoutParams((8*d).toInt(),1) })
+                    layoutParams = LinearLayout.LayoutParams((6*d).toInt(),1) })
                 }
                 row.addView(TextView(reactApplicationContext).apply {
-                    text = icon; textSize = 15f; setTextColor(Color.parseColor("#f6f4ee"))
+                    text = icon; textSize = 14f; setTextColor(CLR_BTN_TEXT)
                     typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER
-                    minWidth = (44*d).toInt(); minHeight = (40*d).toInt()
-                    setPadding((14*d).toInt(),(10*d).toInt(),(14*d).toInt(),(10*d).toInt())
+                    minWidth = (40*d).toInt(); minHeight = (36*d).toInt()
+                    setPadding((12*d).toInt(),(8*d).toInt(),(12*d).toInt(),(8*d).toInt())
                     background = GradientDrawable().apply {
-                        setColor(Color.parseColor("#4a4636"))
-                        setStroke((1*d).toInt(), Color.parseColor("#7a7158"))
-                        cornerRadius = 2f*d
+                        setColor(CLR_BTN_BG)
+                        setStroke(borderW, CLR_BTN_BORDER)
+                        cornerRadius = 0f
                     }
                     contentDescription = label
                     setOnClickListener {
@@ -301,6 +357,7 @@ class AiBubbleModule(reactContext: ReactApplicationContext) :
     private fun removeBubble() {
         pendingLongPress?.let { handler.removeCallbacks(it) }
         pendingLongPress = null
+
         if (bubbleView != null) {
             try { windowManager?.removeView(bubbleView) } catch (e: Exception) { Log.w(TAG, "removeView: ${e.message}") }
             bubbleView = null; statusText = null; dotView = null; actionRow = null; layoutParams = null

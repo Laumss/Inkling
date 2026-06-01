@@ -9,7 +9,9 @@ import android.util.Log
 import android.view.*
 import android.widget.*
 import com.facebook.react.bridge.ReactApplicationContext
+import com.supernote_quicktoolbar.ui_common.PanelBar
 import com.supernote_quicktoolbar.ui_common.PanelBase
+import com.supernote_quicktoolbar.ui_common.UiUtils
 import java.io.File
 import java.io.FileOutputStream
 import kotlin.math.max
@@ -40,20 +42,32 @@ class CropPanel(
             return inst
         }
 
-        private const val HEADER_H_DP = 56
-        private const val IMAGE_PAD_DP = 16
+        private const val IMAGE_PAD_DP = 48
         private const val EDGE_HIT_ZONE_DP = 40
         private const val MIN_CROP_DP = 50
-        private const val DIM_ALPHA = 115
-        private const val CORNER_SIZE_DP = 30
-        private const val CORNER_THICK_DP = 12
-        private const val HANDLE_LONG_DP = 32
-        private const val HANDLE_SHORT_DP = 12
+        private const val CORNER_ARM_DP = 28
+        private const val CORNER_WIDTH_DP = 10
+        private const val CORNER_STROKE_DP = 2f
+        private const val CORNER_OUTSET_DP = 4
+        private const val MID_CAP_LONG_DP = 28
+        private const val MID_CAP_SHORT_DP = 10
+        private const val MID_CAP_STROKE_DP = 2f
+        private const val FRAME_STROKE_DP = 2f
+        private const val DASH_ON_DP = 16
+        private const val DASH_OFF_DP = 10
     }
 
     private var imagePath: String? = null
     private var bitmap: Bitmap? = null
     private var onCropConfirm: ((CropResult) -> Unit)? = null
+    private var showFooter = false
+    private var multiMode = false
+    private var hasStitchSession = false
+    private var onLongScreenshot: (() -> Unit)? = null
+    private var onAddToHistory: ((CropResult) -> Unit)? = null
+    private var onFooterCancel: (() -> Unit)? = null
+
+    private var actionBar: PanelBar.Handle? = null
 
     data class CropResult(
         val offsetX: Int, val offsetY: Int,
@@ -65,14 +79,52 @@ class CropPanel(
         currentInstance = this
         imagePath = path
         onCropConfirm = onConfirm
+        showFooter = false
         showPanel()
     }
+
+    fun showWithFooter(
+        path: String,
+        hasStitchSession: Boolean,
+        onConfirm: (CropResult, Boolean) -> Unit,
+        onLongScreenshot: () -> Unit,
+        onAddToHistory: (CropResult, Boolean) -> Unit,
+        onScreenshotToNote: (CropResult) -> Unit,
+        onCancel: () -> Unit
+    ) {
+        Log.i(tag, "showWithFooter() path=$path stitch=$hasStitchSession")
+        currentInstance = this
+        imagePath = path
+        this.hasStitchSession = hasStitchSession
+        this.showFooter = true
+        this.multiMode = false
+        this.onCropConfirmMulti = onConfirm
+        this.onLongScreenshot = onLongScreenshot
+        this.onAddToHistoryMulti = onAddToHistory
+        this.onScreenshotToNote = onScreenshotToNote
+        this.onFooterCancel = onCancel
+        showPanel()
+    }
+
+    private var onCropConfirmMulti: ((CropResult, Boolean) -> Unit)? = null
+    private var onAddToHistoryMulti: ((CropResult, Boolean) -> Unit)? = null
+    private var onScreenshotToNote: ((CropResult) -> Unit)? = null
 
     override fun onHide() {
         bitmap?.recycle()
         bitmap = null
         imagePath = null
         onCropConfirm = null
+        onCropConfirmMulti = null
+        onAddToHistoryMulti = null
+        onScreenshotToNote = null
+        showFooter = false
+        multiMode = false
+        hasStitchSession = false
+        onLongScreenshot = null
+        onAddToHistory = null
+        onFooterCancel = null
+        actionBar = null
         currentInstance = null
     }
 
@@ -84,23 +136,62 @@ class CropPanel(
             setBackgroundColor(Color.parseColor("#E8E8E8"))
         }
 
-        val headerH = dp(HEADER_H_DP)
-        val header = LinearLayout(reactContext).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setBackgroundColor(Color.BLACK)
-            layoutParams = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT, headerH
-            ).apply { gravity = Gravity.TOP }
-            setPadding(dp(16), 0, dp(16), 0)
+        val center: List<PanelBar.Cell> = if (showFooter) {
+
+            val lsLabel = if (hasStitchSession) NativeLocale.t("long_screenshot_active") else NativeLocale.t("long_screenshot")
+            listOf(
+                PanelBar.Action("icons/ic_edit_stitch.xml", lsLabel) {
+                    onLongScreenshot?.invoke()
+                    clearMultiAfterAction()
+                },
+                PanelBar.Action("icons/ic_edit_save.xml", NativeLocale.t("add_to_history")) {
+                    val cv = cropView ?: return@Action
+                    val bmpW = bitmap?.width ?: return@Action
+                    val bmpH = bitmap?.height ?: return@Action
+                    val wasMulti = multiMode
+                    onAddToHistoryMulti?.invoke(cv.getCropResult(bmpW, bmpH), wasMulti)
+
+                    if (wasMulti) clearMultiAfterAction() else hide()
+                },
+                PanelBar.Action("icons/ic_edit_confirm.xml", NativeLocale.t("insert_next")) {
+                    doConfirm()
+                },
+
+                PanelBar.Action("icons/ic_edit_to_note.xml", NativeLocale.t("screenshot_to_note")) {
+                    val cv = cropView ?: return@Action
+                    val bmpW = bitmap?.width ?: return@Action
+                    val bmpH = bitmap?.height ?: return@Action
+                    onScreenshotToNote?.invoke(cv.getCropResult(bmpW, bmpH))
+                }
+            )
+        } else {
+
+            emptyList()
         }
 
-        header.addView(makeHeaderBtn(NativeLocale.t("cancel")) { closeAndRestore() })
-        header.addView(View(reactContext).apply {
-            layoutParams = LinearLayout.LayoutParams(0, 1, 1f)
-        })
-        header.addView(makeHeaderBtn(NativeLocale.t("confirm")) { doConfirm() })
-        root.addView(header)
+        val right: List<PanelBar.Cell> = if (showFooter) {
+            listOf(PanelBar.Check(NativeLocale.t("multi")) {
+                multiMode = !multiMode
+                actionBar?.setChecked(multiMode)
+            })
+        } else {
+
+            listOf(PanelBar.TextBtn(NativeLocale.t("confirm")) { doConfirm() })
+        }
+
+        val bar = PanelBar.build(
+            ctx = reactContext,
+            style = PanelBar.Style.INBOX,
+            left = listOf(PanelBar.TextBtn(NativeLocale.t("cancel")) { closeAndRestore() }),
+            center = center,
+            right = right
+        )
+        actionBar = bar
+        val headerH = bar.heightPx
+        bar.view.layoutParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT, headerH
+        ).apply { gravity = Gravity.TOP }
+        root.addView(bar.view)
 
         if (bmp != null) {
             val cropView = CropView(reactContext, bmp, headerH)
@@ -115,28 +206,42 @@ class CropPanel(
         return root
     }
 
+    private fun clearMultiAfterAction() {
+        if (multiMode) {
+            multiMode = false
+            actionBar?.setChecked(false)
+        }
+    }
+
     private var cropView: CropView? = null
 
     private fun doConfirm() {
         val cv = cropView ?: return
         val bmp = bitmap ?: return
         val result = cv.getCropResult(bmp.width, bmp.height)
-        onCropConfirm?.invoke(result)
-        hide()
-        toolbarModule.restoreToolbar()
+        val hasFooter = showFooter
+        val multi = multiMode
+        if (hasFooter) {
+            onCropConfirmMulti?.invoke(result, multi)
+        } else {
+            onCropConfirm?.invoke(result)
+        }
+        if (multi) {
+
+            clearMultiAfterAction()
+        } else {
+            hide()
+        }
+        if (!hasFooter) toolbarModule.restoreToolbar()
     }
 
     private fun closeAndRestore() {
+        val cancelCb = onFooterCancel
         hide()
-        toolbarModule.restoreToolbar()
-    }
-
-    private fun makeHeaderBtn(label: String, onClick: () -> Unit): TextView {
-        return TextView(reactContext).apply {
-            text = label; textSize = 19f; setTextColor(Color.WHITE)
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-            setPadding(dp(16), dp(10), dp(16), dp(10))
-            setOnClickListener { onClick() }
+        if (cancelCb != null) {
+            cancelCb.invoke()
+        } else {
+            toolbarModule.restoreToolbar()
         }
     }
 
@@ -149,10 +254,11 @@ class CropPanel(
         private val imgPad = dp(IMAGE_PAD_DP)
         private val edgeHitZone = dp(EDGE_HIT_ZONE_DP)
         private val minCropSize = dp(MIN_CROP_DP)
-        private val cornerSize = dp(CORNER_SIZE_DP)
-        private val cornerThick = dp(CORNER_THICK_DP)
-        private val handleLong = dp(HANDLE_LONG_DP)
-        private val handleShort = dp(HANDLE_SHORT_DP)
+        private val cornerArm = dp(CORNER_ARM_DP)
+        private val cornerWidth = dp(CORNER_WIDTH_DP)
+        private val cornerOutset = dp(CORNER_OUTSET_DP)
+        private val midCapLong = dp(MID_CAP_LONG_DP)
+        private val midCapShort = dp(MID_CAP_SHORT_DP)
 
         private var imgRect = RectF()
 
@@ -163,19 +269,26 @@ class CropPanel(
         private var dragStartY = 0f
         private var dragStartBox = RectF()
 
-        private val dimPaint = Paint().apply { color = Color.argb(DIM_ALPHA, 0, 0, 0) }
         private val framePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.BLACK; style = Paint.Style.STROKE; strokeWidth = 2f * density
-            pathEffect = DashPathEffect(floatArrayOf(dp(4).toFloat(), dp(4).toFloat()), 0f)
+            color = Color.BLACK; style = Paint.Style.STROKE
+            strokeWidth = FRAME_STROKE_DP * density
+            pathEffect = DashPathEffect(floatArrayOf(dp(DASH_ON_DP).toFloat(), dp(DASH_OFF_DP).toFloat()), 0f)
         }
-        private val cornerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.BLACK; style = Paint.Style.STROKE; strokeWidth = 2f * density
+        private val cornerFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE; style = Paint.Style.FILL
         }
-        private val cornerFillPaint = Paint().apply { color = Color.WHITE }
-        private val handlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.BLACK; style = Paint.Style.STROKE; strokeWidth = 2f * density
+        private val cornerStrokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.BLACK; style = Paint.Style.STROKE
+            strokeWidth = CORNER_STROKE_DP * density
+            strokeJoin = Paint.Join.MITER
         }
-        private val handleFillPaint = Paint().apply { color = Color.WHITE }
+        private val midCapStrokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.BLACK; style = Paint.Style.STROKE
+            strokeWidth = MID_CAP_STROKE_DP * density
+        }
+        private val midCapFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE; style = Paint.Style.FILL
+        }
         private val borderPaint = Paint().apply {
             color = Color.parseColor("#999999"); style = Paint.Style.STROKE; strokeWidth = 1f * density
         }
@@ -183,13 +296,7 @@ class CropPanel(
         override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
             super.onSizeChanged(w, h, oldw, oldh)
             computeImageRect(w, h)
-
-            cropBox.set(
-                imgRect.left + imgRect.width() * 0.05f,
-                imgRect.top + imgRect.height() * 0.05f,
-                imgRect.right - imgRect.width() * 0.05f,
-                imgRect.bottom - imgRect.height() * 0.05f
-            )
+            cropBox.set(imgRect)
         }
 
         private fun computeImageRect(viewW: Int, viewH: Int) {
@@ -217,50 +324,50 @@ class CropPanel(
 
             canvas.drawRect(imgRect, borderPaint)
 
-            val cl = max(cropBox.left, imgRect.left)
-            val ct = max(cropBox.top, imgRect.top)
-            val cr = min(cropBox.right, imgRect.right)
-            val cb = min(cropBox.bottom, imgRect.bottom)
-
-            canvas.drawRect(imgRect.left, imgRect.top, imgRect.right, ct, dimPaint)
-
-            canvas.drawRect(imgRect.left, cb, imgRect.right, imgRect.bottom, dimPaint)
-
-            canvas.drawRect(imgRect.left, ct, cl, cb, dimPaint)
-
-            canvas.drawRect(cr, ct, imgRect.right, cb, dimPaint)
-
             canvas.drawRect(cropBox, framePaint)
 
-            val co = -(cornerThick - density) / 2f
-            drawCorner(canvas, cropBox.left + co, cropBox.top + co, 1, 1)
-            drawCorner(canvas, cropBox.right - cornerSize - co, cropBox.top + co, -1, 1)
-            drawCorner(canvas, cropBox.left + co, cropBox.bottom - cornerSize - co, 1, -1)
-            drawCorner(canvas, cropBox.right - cornerSize - co, cropBox.bottom - cornerSize - co, -1, -1)
+            drawCornerOutside(canvas, cropBox.left, cropBox.top, -1, -1)
+            drawCornerOutside(canvas, cropBox.right, cropBox.top, 1, -1)
+            drawCornerOutside(canvas, cropBox.left, cropBox.bottom, -1, 1)
+            drawCornerOutside(canvas, cropBox.right, cropBox.bottom, 1, 1)
 
             val midX = cropBox.centerX()
             val midY = cropBox.centerY()
-            drawHandle(canvas, midX - handleLong / 2f, cropBox.top - handleShort / 2f, handleLong.toFloat(), handleShort.toFloat())
-            drawHandle(canvas, midX - handleLong / 2f, cropBox.bottom - handleShort / 2f, handleLong.toFloat(), handleShort.toFloat())
-            drawHandle(canvas, cropBox.left - handleShort / 2f, midY - handleLong / 2f, handleShort.toFloat(), handleLong.toFloat())
-            drawHandle(canvas, cropBox.right - handleShort / 2f, midY - handleLong / 2f, handleShort.toFloat(), handleLong.toFloat())
+
+            drawMidCap(canvas, midX, cropBox.top, horizontal = true)
+            drawMidCap(canvas, midX, cropBox.bottom, horizontal = true)
+
+            drawMidCap(canvas, cropBox.left, midY, horizontal = false)
+            drawMidCap(canvas, cropBox.right, midY, horizontal = false)
         }
 
-        private fun drawCorner(canvas: Canvas, x: Float, y: Float, @Suppress("UNUSED_PARAMETER") dx: Int, @Suppress("UNUSED_PARAMETER") dy: Int) {
+        private fun drawCornerOutside(canvas: Canvas, cx: Float, cy: Float, dx: Int, dy: Int) {
+            val o = cornerOutset.toFloat()
+            val arm = cornerArm.toFloat()
+            val w = cornerWidth.toFloat()
 
-            val hRect = RectF(x, y, x + cornerSize, y + cornerThick)
-            canvas.drawRect(hRect, cornerFillPaint)
-            canvas.drawRect(hRect, cornerPaint)
+            val ox = cx + dx * o
+            val oy = cy + dy * o
 
-            val vRect = RectF(x, y, x + cornerThick, y + cornerSize)
-            canvas.drawRect(vRect, cornerFillPaint)
-            canvas.drawRect(vRect, cornerPaint)
+            val path = Path().apply {
+                moveTo(ox, oy)
+                lineTo(ox - dx * arm, oy)
+                lineTo(ox - dx * arm, oy - dy * w)
+                lineTo(ox - dx * w, oy - dy * w)
+                lineTo(ox - dx * w, oy - dy * arm)
+                lineTo(ox, oy - dy * arm)
+                close()
+            }
+            canvas.drawPath(path, cornerFillPaint)
+            canvas.drawPath(path, cornerStrokePaint)
         }
 
-        private fun drawHandle(canvas: Canvas, x: Float, y: Float, w: Float, h: Float) {
-            val r = RectF(x, y, x + w, y + h)
-            canvas.drawRect(r, handleFillPaint)
-            canvas.drawRect(r, handlePaint)
+        private fun drawMidCap(canvas: Canvas, cx: Float, cy: Float, horizontal: Boolean) {
+            val w = if (horizontal) midCapLong.toFloat() else midCapShort.toFloat()
+            val h = if (horizontal) midCapShort.toFloat() else midCapLong.toFloat()
+            val r = RectF(cx - w / 2f, cy - h / 2f, cx + w / 2f, cy + h / 2f)
+            canvas.drawRect(r, midCapFillPaint)
+            canvas.drawRect(r, midCapStrokePaint)
         }
 
         override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -340,6 +447,11 @@ class CropPanel(
                 nb = min(nb, imgRect.bottom)
                 cropBox.set(nl, nt, nr, nb)
             }
+        }
+
+        fun resetCropBox() {
+            cropBox.set(imgRect)
+            invalidate()
         }
 
         fun getCropResult(origW: Int, origH: Int): CropResult {

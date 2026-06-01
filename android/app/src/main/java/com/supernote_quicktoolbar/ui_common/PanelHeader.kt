@@ -13,17 +13,18 @@ object PanelHeader {
 
     fun create(ctx: ReactApplicationContext, title: String, onClose: (() -> Unit)? = null): LinearLayout {
         val density = ctx.resources.displayMetrics.density
-        fun dp(v: Int) = (v * density).roundToInt()
+        val scale = ScreenScale.factor(ctx)
+        fun dp(v: Int) = (v * density * scale).roundToInt()
 
         val wrapper = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
         val bar = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(16), dp(26), dp(16), dp(26))
+            setPadding(dp(16), dp(22), dp(16), dp(22))
         }
         bar.addView(TextView(ctx).apply {
             text = title
-            textSize = 20f; setTextColor(Color.BLACK)
+            textSize = 23f * scale; setTextColor(Color.BLACK)
             typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
             gravity = Gravity.CENTER
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)

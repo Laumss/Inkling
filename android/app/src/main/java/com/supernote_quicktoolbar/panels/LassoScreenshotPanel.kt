@@ -146,7 +146,7 @@ class LassoScreenshotPanel(
 
         val hint = TextView(reactContext).apply {
             text = NativeLocale.t("lasso_hint")
-            setTextColor(Color.WHITE); textSize = 14f
+            setTextColor(Color.WHITE); textSize = sp(14f)
             setBackgroundColor(Color.argb(180, 0, 0, 0))
             setPadding(dp(14), dp(6), dp(14), dp(6))
             gravity = Gravity.CENTER
@@ -177,6 +177,13 @@ class LassoScreenshotPanel(
     private fun onCancel() {
         hide()
         emitCloseAndRestore()
+    }
+
+    override val closeOnRotation = true
+
+    override fun onRotation(): Boolean {
+        if (isShowing) onCancel()
+        return false
     }
 
     private fun onClear() { drawView?.clearPoints() }
@@ -210,14 +217,37 @@ class LassoScreenshotPanel(
                         emitCloseAndRestore()
                     }
                 }
+            } else if (confirmMode == "appendPage") {
+                val srcBmp = BitmapFactory.decodeFile(srcPath)
+                val bmpW = srcBmp?.width ?: 0
+                val bmpH = srcBmp?.height ?: 0
+                srcBmp?.recycle()
+                var minX = imgPoints[0].x; var maxX = minX
+                var minY = imgPoints[0].y; var maxY = minY
+                for (p in imgPoints) {
+                    if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x
+                    if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y
+                }
+                val cx = minX.roundToInt().coerceIn(0, bmpW - 1)
+                val cy = minY.roundToInt().coerceIn(0, bmpH - 1)
+                val cw = (maxX - minX).roundToInt().coerceAtLeast(1).coerceAtMost(bmpW - cx)
+                val ch = (maxY - minY).roundToInt().coerceAtLeast(1).coerceAtMost(bmpH - cy)
+                val croppedPath = cropToBoundingBox(srcPath, imgPoints)
+                handler.post {
+                    if (croppedPath != null) {
+                        toolbarModule.onAppendPageCaptured(croppedPath, cx, cy, cw, ch, bmpW, bmpH)
+                    } else {
+                        emitCloseAndRestore()
+                    }
+                }
             } else {
-                stageAndBroadcast(srcPath, imgPoints)
-                handler.post { emitCloseAndRestore() }
+                val bbox = stageAndBroadcast(srcPath, imgPoints)
+                handler.post { emitCloseAndRestore(bbox) }
             }
         }
     }
 
-    private fun stageAndBroadcast(srcPath: String, imgPoints: List<PointF>): Boolean {
+    private fun stageAndBroadcast(srcPath: String, imgPoints: List<PointF>): IntArray? {
         return try {
             val dir = File(STAGE_DIR)
             if (!dir.exists()) dir.mkdirs()
@@ -255,10 +285,11 @@ class LassoScreenshotPanel(
                 putExtra("prompt", "")
             }
             reactContext.sendBroadcast(intent)
-            true
+            intArrayOf(minX.roundToInt(), minY.roundToInt(),
+                       maxX.roundToInt(), maxY.roundToInt())
         } catch (e: Exception) {
             Log.e(tag, "stageAndBroadcast failed: ${e.message}", e)
-            false
+            null
         }
     }
 
@@ -290,12 +321,20 @@ class LassoScreenshotPanel(
         }
     }
 
-    private fun emitCloseAndRestore() {
+    private fun emitCloseAndRestore(bbox: IntArray? = null) {
         try {
             toolbarModule.emitEventPublic("onNativePanelClose",
                 Arguments.createMap().apply {
                     putString("panel", "lassoScreenshot")
                     putBoolean("cameFromBubble", cameFromBubble)
+                    if (bbox != null) {
+                        putMap("screenshotBbox", Arguments.createMap().apply {
+                            putInt("left", bbox[0])
+                            putInt("top", bbox[1])
+                            putInt("right", bbox[2])
+                            putInt("bottom", bbox[3])
+                        })
+                    }
                 })
         } catch (_: Exception) {}
         if (cameFromBubble) {

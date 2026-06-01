@@ -1,3 +1,5 @@
+
+
 import { NativeModules } from 'react-native';
 import { ToolItem, withLatchFlag } from './FloatingToolbarBridge';
 import { t } from './i18n';
@@ -8,16 +10,11 @@ const CONFIG_STORE_KEY = 1;
 const CLIP_STORE_KEY = 99;
 
 export function getLayoutForCount(n: number): { cols: number; rows: number } {
-  const hasPenLock = n !== 5;
-  const hasSwap = n >= 6 && n % 2 === 0;
-  const total = n + (hasPenLock ? 1 : 0) + (hasSwap ? 1 : 0);
-  if (total <= 5) return { cols: total, rows: 1 };
-  const perRow = Math.ceil(total / 2);
-  return { cols: perRow, rows: 2 };
+  return { cols: n, rows: 1 };
 }
 
 export function isValidToolCount(n: number): boolean {
-  return n >= 4 && n <= 8;
+  return n >= 1 && n <= 10;
 }
 
 export interface ConfigData {
@@ -34,17 +31,11 @@ const TOOL_DEFS: { id: string; icon: string; action: string; nameKey: string; na
   { id: 'insert_image',          icon: 'Im', action: 'insert_image',          nameKey: 'tool_insert_image',          category: 'insert' },
   { id: 'insert_doc_screenshot', icon: 'Sc', action: 'insert_doc_screenshot', nameKey: 'tool_insert_doc_screenshot', category: 'insert' },
   { id: 'insert_text',           icon: 'Tx', action: 'insert_text',           nameKey: 'tool_insert_text',           category: 'insert' },
+  { id: 'send_ai',               icon: 'AI', action: 'lasso_smart_send',      nameKey: 'tool_lasso_smart_send',      category: 'lasso' },
   { id: 'insert_link',           icon: 'Lk', action: 'insert_link',           nameKey: 'tool_insert_link',           category: 'insert' },
+  { id: 'voice_transcribe',      icon: 'Vc', action: 'voice_transcribe',      nameKey: 'tool_voice_transcribe',      category: 'insert' },
+  { id: 'invert_ink',            icon: 'Rl', action: 'invert_ink',            nameKey: 'tool_invert_ink',            category: 'insert' },
 ];
-
-const MIGRATION_MAP: Record<string, string> = {
-  'ins_image':           'insert_image',
-  'ins_doc_screenshot':  'insert_doc_screenshot',
-  'text_recv_nospacing': 'insert_text',
-  'text_recv_paragraph': 'insert_text',
-  'layer_prev':          '',
-  'layer_next':          '',
-};
 
 export interface BubbleAction {
   id: string;
@@ -62,6 +53,7 @@ const BUBBLE_ACTION_DEFS: { id: string; icon: string; action: string; nameKey: s
 const AI_BUBBLE_ACTION_DEFS: { id: string; icon: string; action: string; nameKey: string }[] = [
   { id: 'lasso_ai',       icon: 'AI', action: 'lasso_ai',       nameKey: 'tool_lasso_ai' },
   { id: 'screenshot_ai',  icon: 'St', action: 'screenshot_ai',  nameKey: 'tool_screenshot_ai' },
+  { id: 'pen_lasso_ai',   icon: 'Sl', action: 'pen_lasso_ai',   nameKey: 'tool_pen_lasso_ai' },
   { id: 'cancel_ai',      icon: '✕',  action: 'cancel_ai',      nameKey: 'tool_cancel_ai' },
 ];
 
@@ -76,7 +68,7 @@ export function getAvailableBubbleActions(): BubbleAction[] {
 
 const DEFAULT_BUBBLE_ACTIONS = ['lasso_send', 'screenshot_send', 'toggle_spacing'];
 
-const DEFAULT_AI_BUBBLE_ACTIONS = ['lasso_ai', 'screenshot_ai', 'cancel_ai'];
+const DEFAULT_AI_BUBBLE_ACTIONS = ['lasso_ai', 'screenshot_ai', 'pen_lasso_ai', 'cancel_ai'];
 
 const BUBBLE_ACTION_STORE_KEY = 98;
 
@@ -137,7 +129,17 @@ export async function loadAiBubbleActions(): Promise<string[]> {
     const json = await FloatingToolbar?.loadPreset(AI_BUBBLE_ACTION_STORE_KEY);
     if (json) {
       const data = JSON.parse(json);
-      if (Array.isArray(data.enabledIds)) return data.enabledIds;
+      if (Array.isArray(data.enabledIds)) {
+        const saved: string[] = data.enabledIds;
+        const allKnown = new Set(AI_BUBBLE_ACTION_DEFS.map(d => d.id));
+        const newIds = DEFAULT_AI_BUBBLE_ACTIONS.filter(id => allKnown.has(id) && !saved.includes(id));
+        if (newIds.length > 0) {
+          const merged = DEFAULT_AI_BUBBLE_ACTIONS.filter(id => saved.includes(id) || newIds.includes(id));
+          saveAiBubbleActions(merged);
+          return merged;
+        }
+        return saved;
+      }
     }
   } catch (e) {
     console.warn('[ToolPresets]: loadAiBubbleActions:', e);
@@ -179,19 +181,6 @@ export function getToolCategory(id: string): ToolCategory | null {
 export const AVAILABLE_TOOLS: ToolItem[] = getAvailableTools();
 export const DEFAULT_TOOLS = getAvailableTools();
 
-function localizeTool(stored: ToolItem): ToolItem | null {
-  let id = stored.id;
-
-  if (id in MIGRATION_MAP) {
-    const mapped = MIGRATION_MAP[id];
-    if (!mapped) return null;
-    id = mapped;
-  }
-  const def = TOOL_DEFS.find(d => d.id === id);
-  if (!def) return null;
-  return withLatchFlag({ ...stored, id: def.id, name: t(def.nameKey as any, def.nameParams), icon: def.icon, action: def.action });
-}
-
 let _configCache: ConfigData | null = null;
 let _clipCache: ClipData | null = null;
 
@@ -205,29 +194,22 @@ export async function warmupCache(): Promise<void> {
   _clipCache = clips;
 }
 
+const DEFAULT_EXCLUDED_TOOL_IDS = new Set(['send_ai', 'voice_transcribe']);
+
 export async function loadConfig(): Promise<ConfigData> {
   try {
     const json = await FloatingToolbar?.loadPreset(CONFIG_STORE_KEY);
     if (json) {
       const data = JSON.parse(json) as ConfigData;
-      if (data.tools?.length) {
-
-        const seen = new Set<string>();
-        const migrated = data.tools
-          .map(localizeTool)
-          .filter((t): t is ToolItem => t !== null && !seen.has(t.id) && (seen.add(t.id), true));
-        if (migrated.length) {
-          const result = { tools: migrated };
-          _configCache = result;
-          return result;
-        }
+      if (Array.isArray(data.tools) && data.tools.length > 0) {
+        _configCache = data;
+        return data;
       }
     }
   } catch (e) {
     console.warn('[ToolPresets]: loadConfig:', e);
   }
-
-  const result = { tools: getAvailableTools() };
+  const result = { tools: getAvailableTools().filter(t => !DEFAULT_EXCLUDED_TOOL_IDS.has(t.id)) };
   _configCache = result;
   return result;
 }
@@ -255,13 +237,16 @@ export async function loadClips(): Promise<ClipData> {
     const json = await FloatingToolbar?.loadPreset(CLIP_STORE_KEY);
     if (json) {
       const result = JSON.parse(json) as ClipData;
+
+      if (!('5' in result)) result['5'] = null;
+      if (!('6' in result)) result['6'] = null;
       _clipCache = result;
       return result;
     }
   } catch (e) {
     console.warn('[ToolPresets]: loadClips:', e);
   }
-  const result = { '1': null, '2': null, '3': null, '4': null };
+  const result = { '1': null, '2': null, '3': null, '4': null, '5': null, '6': null };
   _clipCache = result;
   return result;
 }

@@ -26,6 +26,8 @@ class InklingPackages : ReactPackage {
         tryAdd("ScreenshotModule") { ScreenshotModule(reactContext) }
         tryAdd("AiBubble") { AiBubbleModule(reactContext) }
         tryAdd("TextLayoutEngine") { TextLayoutEngine(reactContext) }
+        tryAdd("TextboxMetrics") { TextboxMetricsModule(reactContext) }
+        tryAdd("WeChatTransferModule") { WeChatTransferModule(reactContext) }
         return modules
     }
 

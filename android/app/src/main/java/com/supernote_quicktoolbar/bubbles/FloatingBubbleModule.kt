@@ -3,10 +3,8 @@ import com.supernote_quicktoolbar.*
 import com.supernote_quicktoolbar.overlays.*
 import com.supernote_quicktoolbar.panels.*
 
-import android.graphics.Color
-import android.graphics.PixelFormat
-import android.graphics.Typeface
-import android.graphics.drawable.GradientDrawable
+import android.content.Context
+import android.graphics.*
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -14,10 +12,8 @@ import android.provider.Settings
 import android.util.Log
 import android.view.*
 import android.widget.LinearLayout
-import android.widget.TextView
 import com.facebook.react.bridge.*
 import com.facebook.react.modules.core.DeviceEventManagerModule
-import org.json.JSONArray
 
 class FloatingBubbleModule(reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext) {
@@ -32,9 +28,6 @@ class FloatingBubbleModule(reactContext: ReactApplicationContext) :
     companion object {
         @Volatile @JvmStatic private var windowManager: WindowManager? = null
         @Volatile @JvmStatic private var bubbleView: LinearLayout? = null
-        @Volatile @JvmStatic private var statusText: TextView? = null
-        @Volatile @JvmStatic private var dotView: View? = null
-        @Volatile @JvmStatic private var actionRow: LinearLayout? = null
         @Volatile @JvmStatic private var layoutParams: WindowManager.LayoutParams? = null
 
         @Volatile @JvmStatic private var startX = 0
@@ -45,10 +38,13 @@ class FloatingBubbleModule(reactContext: ReactApplicationContext) :
 
         @Volatile @JvmStatic private var pageHeight = 1872
         @Volatile @JvmStatic private var screenHeight = 1872
+        @Volatile @JvmStatic private var pageWidth = 1404
+        @Volatile @JvmStatic private var screenWidth = 1404
 
         @Volatile @JvmStatic private var stickyY: Int = 80
 
-        @Volatile @JvmStatic private var cachedActionsJson: String = "[]"
+        @Volatile @JvmStatic private var pendingInitX: Int = -1
+        @Volatile @JvmStatic private var pendingInitY: Int = -1
 
         @Volatile @JvmStatic var lastShownText: String = ""
         @Volatile @JvmStatic var lastShownMode: String = ""
@@ -61,13 +57,10 @@ class FloatingBubbleModule(reactContext: ReactApplicationContext) :
             val handler = Handler(Looper.getMainLooper())
             handler.post {
                 try {
-                    if (bubbleView != null) {
-                        statusText?.text = lastShownText
-                    } else {
-                        val inst = currentInstance
-                            ?: try { ctx.getNativeModule(FloatingBubbleModule::class.java) } catch (_: Exception) { null }
-                        inst?.createBubble(lastShownText)
-                    }
+                    if (bubbleView != null) return@post
+                    val inst = currentInstance
+                        ?: try { ctx.getNativeModule(FloatingBubbleModule::class.java) } catch (_: Exception) { null }
+                    inst?.createBubble(lastShownText)
                 } catch (e: Exception) { Log.w("FloatingBubble", "reshowLast: ${e.message}") }
             }
         }
@@ -77,8 +70,28 @@ class FloatingBubbleModule(reactContext: ReactApplicationContext) :
             h.post {
                 if (bubbleView != null) {
                     try { windowManager?.removeView(bubbleView) } catch (_: Exception) {}
-                    bubbleView = null; statusText = null; dotView = null; actionRow = null; layoutParams = null
+                    bubbleView = null; layoutParams = null
                 }
+            }
+        }
+
+        @JvmStatic fun handleOrientationChange() {
+            Handler(Looper.getMainLooper()).post {
+                val inst = currentInstance ?: return@post
+                try {
+                    val dm = inst.reactApplicationContext.resources.displayMetrics
+                    val newW = dm.widthPixels; val newH = dm.heightPixels
+                    if (newW == screenWidth && newH == screenHeight) return@post
+                    screenWidth = newW; screenHeight = newH
+                    val lp = layoutParams ?: return@post
+                    val v = bubbleView ?: return@post
+                    val vh = v.height.takeIf { it > 0 } ?: 60
+                    val vw = v.width.takeIf { it > 0 } ?: 240
+                    lp.x = lp.x.coerceIn(0, (screenWidth - vw).coerceAtLeast(0))
+                    lp.y = lp.y.coerceIn(0, (screenHeight - vh).coerceAtLeast(0))
+                    stickyY = lp.y
+                    try { windowManager?.updateViewLayout(v, lp) } catch (_: Exception) {}
+                } catch (_: Exception) {}
             }
         }
     }
@@ -88,9 +101,25 @@ class FloatingBubbleModule(reactContext: ReactApplicationContext) :
         lastShownMode = mode ?: ""
         handler.post {
             try {
-                if (bubbleView != null) { statusText?.text = text; return@post }
+                if (bubbleView != null) return@post
                 createBubble(text)
             } catch (e: Exception) { Log.e(TAG, "show: ${e.message}", e) }
+        }
+    }
+
+    @ReactMethod fun showAt(text: String, pageX: Int, pageY: Int) {
+        lastShownText = text
+        handler.post {
+            try {
+                if (bubbleView != null) return@post
+                val dm = reactApplicationContext.resources.displayMetrics
+                screenHeight = dm.heightPixels
+                screenWidth = dm.widthPixels
+                pendingInitX = if (pageWidth > 0) (pageX.toFloat() * screenWidth / pageWidth).toInt() else pageX
+                pendingInitY = if (pageHeight > 0) (pageY.toFloat() * screenHeight / pageHeight).toInt() else pageY
+                Log.i(TAG, "showAt page=($pageX,$pageY) -> screen=($pendingInitX,$pendingInitY)")
+                createBubble(text)
+            } catch (e: Exception) { Log.e(TAG, "showAt: ${e.message}", e) }
         }
     }
 
@@ -100,18 +129,16 @@ class FloatingBubbleModule(reactContext: ReactApplicationContext) :
         handler.post { try { removeBubble() } catch (e: Exception) { Log.e(TAG, "hide: ${e.message}", e) } }
     }
 
-    @ReactMethod fun updateText(text: String) { handler.post { statusText?.text = text } }
+    @ReactMethod fun updateText(text: String) {  }
 
-    @ReactMethod fun setActionButtons(json: String) {
-        cachedActionsJson = json
-        handler.post { try { rebuildActionRow() } catch (e: Exception) { Log.e(TAG, "setActionButtons: ${e.message}", e) } }
-    }
+    @ReactMethod fun setActionButtons(json: String) {  }
 
     @ReactMethod fun setPageHeight(height: Int) { pageHeight = height }
     @ReactMethod fun setScreenHeight(height: Int) { screenHeight = height }
+    @ReactMethod fun setPageWidth(width: Int) { pageWidth = width }
+    @ReactMethod fun setScreenWidth(width: Int) { screenWidth = width }
 
     @ReactMethod fun setPositionY(pageY: Int) {
-
         Log.d(TAG, "setPositionY($pageY) ignored — bubble position is sticky")
     }
 
@@ -161,47 +188,40 @@ class FloatingBubbleModule(reactContext: ReactApplicationContext) :
         windowManager = context.getSystemService(android.content.Context.WINDOW_SERVICE) as WindowManager
         val dm = context.resources.displayMetrics
         screenHeight = dm.heightPixels
+        screenWidth = dm.widthPixels
         val d = dm.density
+        val bubbleSize = (36 * d).toInt()
+
+        val iconView = PenNibBubbleView(context, d)
+        iconView.layoutParams = LinearLayout.LayoutParams(bubbleSize, bubbleSize)
 
         bubbleView = TouchSinkLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding((14*d).toInt(), (10*d).toInt(), (14*d).toInt(), (10*d).toInt())
-            minimumWidth = (240*d).toInt()
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor("#f6f4ee")); setStroke((1.4f*d).toInt(), Color.parseColor("#1a1812")); cornerRadius = 3f*d
-            }
+            addView(iconView)
         }
 
-        val statusRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        dotView = View(context).apply {
-            layoutParams = LinearLayout.LayoutParams((12*d).toInt(), (12*d).toInt()).apply { rightMargin = (10*d).toInt() }
-            background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.parseColor("#1a1812")) }
-        }
-        statusRow.addView(dotView)
-        statusText = TextView(context).apply {
-            this.text = text; textSize = 16f; setTextColor(Color.parseColor("#1a1812")); typeface = Typeface.DEFAULT_BOLD; maxLines = 1
-        }
-        statusRow.addView(statusText)
-        bubbleView!!.addView(statusRow)
-
-        actionRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_HORIZONTAL
-            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-                .apply { topMargin = (8*d).toInt() }
-        }
-        bubbleView!!.addView(actionRow)
-        rebuildActionRow()
-
-        val wmType = if (Build.VERSION.SDK_INT >= 26) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-            else @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
+        @Suppress("DEPRECATION")
+        val wmType = WindowManager.LayoutParams.TYPE_PHONE
         layoutParams = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
+            bubbleSize, bubbleSize,
             wmType,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
             PixelFormat.TRANSLUCENT
-        ).apply { gravity = Gravity.TOP or Gravity.START; x = 24; y = stickyY }
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            if (pendingInitX >= 0 && pendingInitY >= 0) {
 
-        statusRow.setOnTouchListener { _, ev ->
+                x = pendingInitX.coerceIn(0, (screenWidth - bubbleSize).coerceAtLeast(0))
+                y = pendingInitY.coerceIn(0, (screenHeight - bubbleSize).coerceAtLeast(0))
+                stickyY = y
+            } else {
+                x = 24; y = stickyY.coerceIn(0, (screenHeight - 60).coerceAtLeast(0))
+            }
+        }
+
+        pendingInitX = -1; pendingInitY = -1
+
+        bubbleView!!.setOnTouchListener { _, ev ->
             val lp = layoutParams ?: return@setOnTouchListener false
             val view = bubbleView ?: return@setOnTouchListener false
             when (ev.action) {
@@ -211,16 +231,15 @@ class FloatingBubbleModule(reactContext: ReactApplicationContext) :
                 }
                 MotionEvent.ACTION_MOVE -> {
                     val dx = ev.rawX - startRawX; val dy = ev.rawY - startRawY
-                    if (!isDragging && (Math.abs(dx)>10||Math.abs(dy)>10)) { isDragging = true }
-                    if (isDragging) { lp.x = startX+dx.toInt(); lp.y = startY+dy.toInt(); try { windowManager?.updateViewLayout(view, lp) } catch (_: Exception) {} }
+                    if (!isDragging && (Math.abs(dx) > 10 || Math.abs(dy) > 10)) { isDragging = true }
+                    if (isDragging) { lp.x = startX + dx.toInt(); lp.y = startY + dy.toInt(); try { windowManager?.updateViewLayout(view, lp) } catch (_: Exception) {} }
                     true
                 }
                 MotionEvent.ACTION_CANCEL -> true
                 MotionEvent.ACTION_UP -> {
                     if (isDragging) {
                         stickyY = lp.y
-                        val sy = lp.y.toFloat(); val r = pageHeight.toFloat()/screenHeight.toFloat()
-                        emitEvent("onBubbleDragEnd", Arguments.createMap().apply { putDouble("screenY",sy.toDouble()); putInt("pageY",(sy*r).toInt()) })
+                        emitBubbleCoords(view, lp, "onBubbleDragEnd")
                     } else { emitEvent("onBubbleTap", Arguments.createMap()) }
                     true
                 }
@@ -230,42 +249,42 @@ class FloatingBubbleModule(reactContext: ReactApplicationContext) :
 
         windowManager?.addView(bubbleView, layoutParams)
         Log.i(TAG, "bubble shown: '$text'")
+
+        bubbleView?.post {
+            val lp = layoutParams ?: return@post
+            val v = bubbleView ?: return@post
+            emitBubbleCoords(v, lp, "onBubbleLayout")
+        }
     }
 
-    private fun rebuildActionRow() {
-        val row = actionRow ?: return
-        row.removeAllViews()
-        try {
-            val arr = JSONArray(cachedActionsJson)
-            if (arr.length() == 0) { row.visibility = View.GONE; tryUpdateLayout(); return }
-            row.visibility = View.VISIBLE
-            val d = reactApplicationContext.resources.displayMetrics.density
-            for (i in 0 until arr.length()) {
-                val obj = arr.getJSONObject(i)
-                val actionId = obj.getString("id"); val icon = obj.optString("icon","?"); val label = obj.optString("label", actionId)
-                if (i > 0) { row.addView(View(reactApplicationContext).apply { layoutParams = LinearLayout.LayoutParams((8*d).toInt(),1) }) }
-                row.addView(TextView(reactApplicationContext).apply {
-                    text = icon; textSize = 15f; setTextColor(Color.parseColor("#1a1812")); typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER
-                    minWidth = (44*d).toInt(); minHeight = (40*d).toInt()
-                    setPadding((14*d).toInt(),(10*d).toInt(),(14*d).toInt(),(10*d).toInt())
-                    background = GradientDrawable().apply { setColor(Color.parseColor("#efece3")); setStroke((1*d).toInt(), Color.parseColor("#b0aa9a")); cornerRadius = 2f*d }
-                    contentDescription = label
-                    setOnClickListener {
-                        android.util.Log.i(TAG, "[LASSO-DBG/Kt] bubble action tapped: $actionId")
-                        emitEvent("onBubbleAction", Arguments.createMap().apply { putString("actionId", actionId) })
-                    }
-                })
-            }
-            tryUpdateLayout()
-        } catch (e: Exception) { Log.e(TAG, "rebuildActionRow: ${e.message}"); row.visibility = View.GONE }
+    private fun emitBubbleCoords(view: View, lp: WindowManager.LayoutParams, eventName: String) {
+        val sx = lp.x.toFloat()
+        val sy = lp.y.toFloat()
+        val bubbleH = view.height
+        val bubbleW = view.width
+        val sBottom = sy + bubbleH.toFloat()
+        val ry = if (screenHeight > 0) pageHeight.toFloat() / screenHeight.toFloat() else 1f
+        val rx = if (screenWidth > 0) pageWidth.toFloat() / screenWidth.toFloat() else 1f
+        Log.i(TAG, "[COORD] $eventName sx=$sx sy=$sy bubbleH=$bubbleH bubbleW=$bubbleW" +
+                " sBottom=$sBottom ry=$ry rx=$rx pageY=${(sy*ry).toInt()} pageBottomY=${(sBottom*ry).toInt()}")
+        emitEvent(eventName, Arguments.createMap().apply {
+            putDouble("screenY", sy.toDouble())
+            putDouble("screenX", sx.toDouble())
+            putDouble("screenBottomY", sBottom.toDouble())
+            putInt("pageY", (sy * ry).toInt())
+            putInt("pageX", (sx * rx).toInt())
+            putInt("pageBottomY", (sBottom * ry).toInt())
+            putInt("bubbleHeight", bubbleH)
+            putInt("bubbleWidth", bubbleW)
+            putDouble("ratioY", ry.toDouble())
+            putDouble("ratioX", rx.toDouble())
+        })
     }
-
-    private fun tryUpdateLayout() { try { if (bubbleView != null && layoutParams != null) windowManager?.updateViewLayout(bubbleView, layoutParams) } catch (_: Exception) {} }
 
     private fun removeBubble() {
         if (bubbleView != null) {
             try { windowManager?.removeView(bubbleView) } catch (e: Exception) { Log.w(TAG, "removeView: ${e.message}") }
-            bubbleView = null; statusText = null; dotView = null; actionRow = null; layoutParams = null
+            bubbleView = null; layoutParams = null
         }
     }
 
@@ -281,4 +300,59 @@ class FloatingBubbleModule(reactContext: ReactApplicationContext) :
 
     @ReactMethod fun addListener(eventName: String) {}
     @ReactMethod fun removeListeners(count: Int) {}
+}
+
+private class PenNibBubbleView(ctx: Context, private val density: Float) : View(ctx) {
+
+    private val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE; style = Paint.Style.FILL
+    }
+    private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#111111"); style = Paint.Style.STROKE
+        strokeWidth = 1.5f * density
+    }
+    private val iconPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#111111"); style = Paint.Style.FILL
+    }
+    private val iconPath = Path()
+
+    override fun onDraw(canvas: Canvas) {
+        val w = width.toFloat()
+        val h = height.toFloat()
+        val cx = w / 2f
+        val cy = h / 2f
+        val r = (w / 2f) - (1.5f * density)
+
+        canvas.drawCircle(cx, cy, r, bgPaint)
+
+        canvas.drawCircle(cx, cy, r, borderPaint)
+
+        drawPenIcon(canvas, cx, cy, r * 0.52f)
+    }
+
+    private fun drawPenIcon(canvas: Canvas, cx: Float, cy: Float, size: Float) {
+        iconPath.reset()
+
+        val bodyTop = cy - size * 0.9f
+        val bodyBottom = cy + size * 0.15f
+        val bodyHalfW = size * 0.22f
+
+        canvas.save()
+        canvas.rotate(-35f, cx, cy)
+
+        val bodyRect = RectF(cx - bodyHalfW, bodyTop, cx + bodyHalfW, bodyBottom)
+        canvas.drawRoundRect(bodyRect, bodyHalfW * 0.4f, bodyHalfW * 0.4f, iconPaint)
+
+        iconPath.reset()
+        iconPath.moveTo(cx - bodyHalfW, bodyBottom)
+        iconPath.lineTo(cx + bodyHalfW, bodyBottom)
+        iconPath.lineTo(cx, cy + size * 0.85f)
+        iconPath.close()
+        canvas.drawPath(iconPath, iconPaint)
+
+        val dotR = size * 0.06f
+        canvas.drawCircle(cx, cy + size * 0.85f + dotR * 0.5f, dotR, iconPaint)
+
+        canvas.restore()
+    }
 }

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="24" android:viewportHeight="24">
+  <!-- 层级下移：箭头指向底部横条（置底语义，描边风格与其余图标统一）-->
+  <path android:strokeColor="#1A1A1A" android:strokeWidth="1.5" android:fillColor="#00000000"
+        android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:pathData="M5,20 L19,20"/>
+  <path android:strokeColor="#1A1A1A" android:strokeWidth="1.5" android:fillColor="#00000000"
+        android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:pathData="M12,4 L12,15"/>
+  <path android:strokeColor="#1A1A1A" android:strokeWidth="1.5" android:fillColor="#00000000"
+        android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:pathData="M7.5,10.5 L12,15 L16.5,10.5"/>
+</vector>
