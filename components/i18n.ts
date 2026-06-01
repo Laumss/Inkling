@@ -1,3 +1,5 @@
+
+
 import { NativeModules, Platform, DeviceEventEmitter } from 'react-native';
 
 export type Locale = 'zh' | 'en';
@@ -31,7 +33,7 @@ const STRINGS = {
   tool_layer_next:        { zh: '下一图层',     en: 'Layer Down' },
   tool_insert_image:      { zh: '插入图片',     en: 'Insert Image' },
   tool_insert_doc_screenshot: { zh: '文档截图', en: 'Doc Screenshot' },
-  tool_insert_link:       { zh: '插入链接',   en: 'Insert Link' },
+  tool_insert_link:       { zh: '链接文档',   en: 'Insert Link' },
   tool_clip:              { zh: '剪贴板 {n}',   en: 'Clip {n}' },
   tool_clip_paste:        { zh: '粘贴 {n}',     en: 'Paste {n}' },
   tool_text_nospacing:    { zh: '文本(无间距)', en: 'Text (No Gap)' },
@@ -79,10 +81,18 @@ const STRINGS = {
 
   tool_screenshot_ai:     { zh: '截图发 AI',  en: 'Screenshot AI' },
   tool_screenshot_send:   { zh: '截图发送',   en: 'Screenshot Send' },
+  tool_pen_lasso_ai:      { zh: '笔套索 AI',  en: 'Pen Lasso AI' },
 
   tool_toggle_spacing:    { zh: '切换间距',   en: 'Toggle Gap' },
   tool_send_ai:           { zh: '接收 AI',    en: 'AI Receive' },
+  tool_insert_text:       { zh: '文本接收',   en: 'Text Receive' },
+  tool_voice_transcribe:  { zh: '接收 AI',    en: 'AI Receive' },
+  tool_lasso_smart_send:  { zh: '套索发送',   en: 'Lasso Send' },
+  tool_invert_ink:        { zh: 'Inkling 工坊',     en: 'Relay' },
+  tool_cancel_ai:         { zh: '取消 AI',    en: 'Cancel AI' },
   bubble_screenshot_todo: { zh: '截图功能开发中…', en: 'Screenshot coming soon…' },
+  append_page_ok:         { zh: '已追加页面 {info}', en: 'Page appended {info}' },
+  append_page_fail:       { zh: '追加页面失败',      en: 'Append page failed' },
   bubble_actions_title:   { zh: '气泡快捷按钮', en: 'Bubble Actions' },
   bubble_actions_hint:    { zh: '选择显示在文本接收气泡上的按钮', en: 'Choose buttons shown on the text bubble' },
 

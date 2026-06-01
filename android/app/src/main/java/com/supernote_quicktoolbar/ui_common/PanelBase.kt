@@ -22,6 +22,10 @@ abstract class PanelBase(
     protected val reactContext: ReactApplicationContext,
     protected val toolbarModule: FloatingToolbarModule
 ) {
+    companion object {
+
+        const val PANEL_WIDTH_DP = 558.93f
+    }
 
     abstract val tag: String
     abstract val panelName: String
@@ -32,24 +36,44 @@ abstract class PanelBase(
     open val fullScreen: Boolean = false
     open fun buildFullScreenContent(): View? = null
 
-    open val widthRatio: Double = 0.65
-    open val heightRatio: Double = 0.72
+    open val heightRatio: Double = 0.81
 
     open val windowFlags: Int = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+
+    open val forcedOrientation: Int? = null
+
+    open val closeOnRotation: Boolean get() = !fullScreen
+
+    open fun onRotation(): Boolean {
+        if (isShowing && closeOnRotation) { hide(); return true }
+        return false
+    }
 
     protected val handler = Handler(Looper.getMainLooper())
     protected var windowManager: WindowManager? = null
     protected var rootView: View? = null
+    protected var layoutParams: WindowManager.LayoutParams? = null
 
     val isShowing: Boolean get() = rootView != null
 
     protected val density get() = reactContext.resources.displayMetrics.density
-    protected val screenW get() = reactContext.resources.displayMetrics.widthPixels
-    protected val screenH get() = reactContext.resources.displayMetrics.heightPixels
-    protected val winW get() = (screenW * widthRatio).toInt()
-    protected val winH get() = (screenH * heightRatio).toInt()
-    protected fun dp(v: Int) = (v * density).roundToInt()
-    protected fun dp(v: Float) = (v * density).roundToInt()
+    protected val screenW get() = FloatingToolbarModule.screenWidth
+    protected val screenH get() = FloatingToolbarModule.screenHeight
+    protected val isLandscape get() = screenW > screenH
+    protected val screenLong get() = maxOf(screenW, screenH)
+    protected val winW: Int get() {
+        val base = (PANEL_WIDTH_DP * density).toInt()
+        if (screenLong >= 2560) return (screenW * 0.64).toInt()
+        return base
+    }
+    protected val winH: Int get() {
+        val ratio = if (screenLong >= 2560) 0.76 else heightRatio
+        return (screenH * ratio).toInt()
+    }
+    private val _scaleFactor: Float by lazy { ScreenScale.factor(reactContext) }
+    protected fun dp(v: Int) = (v * density * _scaleFactor).roundToInt()
+    protected fun dp(v: Float) = (v * density * _scaleFactor).roundToInt()
+    protected fun sp(v: Float) = v * _scaleFactor
 
     protected fun showPanel() {
         handler.post {
@@ -60,11 +84,11 @@ abstract class PanelBase(
             }
 
             toolbarModule.enablePenBlock()
+            toolbarModule.refreshScreenDimensions()
             windowManager = reactContext.getSystemService(android.content.Context.WINDOW_SERVICE) as WindowManager
 
-            val wmType = if (Build.VERSION.SDK_INT >= 26)
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-            else @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
+            @Suppress("DEPRECATION")
+            val wmType = WindowManager.LayoutParams.TYPE_PHONE
 
             if (fullScreen) {
                 val root = buildFullScreenContent() ?: return@post
@@ -78,6 +102,8 @@ abstract class PanelBase(
                     PixelFormat.TRANSLUCENT
                 ).apply { gravity = Gravity.TOP or Gravity.START }
 
+                forcedOrientation?.let { lp.screenOrientation = it }
+                layoutParams = lp
                 rootView = root
                 try {
                     windowManager?.addView(root, lp)
@@ -110,9 +136,11 @@ abstract class PanelBase(
                     PixelFormat.TRANSLUCENT
                 ).apply { gravity = Gravity.CENTER }
 
+                forcedOrientation?.let { lp.screenOrientation = it }
+                layoutParams = lp
                 rootView = root
                 windowManager?.addView(root, lp)
-                Log.i(tag, "panel shown ${winW}x$winH")
+                Log.i(tag, "panel shown ${winW}x$winH screen=${screenW}x${screenH} landscape=$isLandscape")
             }
         }
     }
@@ -122,9 +150,30 @@ abstract class PanelBase(
             try { windowManager?.removeView(rootView) } catch (_: Exception) {}
             rootView = null
             windowManager = null
+            layoutParams = null
             onHide()
             toolbarModule.disablePenBlock()
             emitCloseEvent()
+        }
+    }
+
+    protected fun dismissWithoutPenRelease() {
+        handler.post {
+            try { windowManager?.removeView(rootView) } catch (_: Exception) {}
+            rootView = null
+            windowManager = null
+            layoutParams = null
+            onHide()
+            emitCloseEvent()
+        }
+    }
+
+    protected fun applyOrientation(orientation: Int) {
+        handler.post {
+            val lp = layoutParams ?: return@post
+            if (lp.screenOrientation == orientation) return@post
+            lp.screenOrientation = orientation
+            try { windowManager?.updateViewLayout(rootView, lp) } catch (_: Exception) {}
         }
     }
 
@@ -158,7 +207,7 @@ abstract class PanelBase(
             gravity = Gravity.CENTER_HORIZONTAL
             setPadding(dp(30), dp(60), dp(30), 0)
             addView(android.widget.TextView(reactContext).apply {
-                this.text = text; textSize = 14f
+                this.text = text; textSize = sp(14f)
                 setTextColor(Color.parseColor("#999999"))
                 gravity = Gravity.CENTER
             })
@@ -171,13 +220,13 @@ abstract class PanelBase(
             gravity = Gravity.CENTER_HORIZONTAL
             setPadding(dp(20), dp(60), dp(20), 0)
             addView(android.widget.TextView(reactContext).apply {
-                text = title; textSize = 15f
+                text = title; textSize = sp(15f)
                 setTextColor(Color.parseColor("#999999"))
                 typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
                 gravity = Gravity.CENTER
             })
             addView(android.widget.TextView(reactContext).apply {
-                text = hint; textSize = 12f
+                text = hint; textSize = sp(12f)
                 setTextColor(Color.parseColor("#BBBBBB"))
                 gravity = Gravity.CENTER
                 setPadding(dp(20), dp(8), dp(20), 0)
@@ -187,7 +236,7 @@ abstract class PanelBase(
 
     protected fun makeOutlinedBtn(label: String, onClick: () -> Unit): android.widget.TextView {
         return android.widget.TextView(reactContext).apply {
-            text = label; textSize = 17f; setTextColor(Color.BLACK)
+            text = label; textSize = sp(17f); setTextColor(Color.BLACK)
             typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
             gravity = Gravity.CENTER
             minWidth = dp(106); minHeight = dp(48)
@@ -206,7 +255,7 @@ abstract class PanelBase(
 
     protected fun makeFilledBtn(label: String, onClick: () -> Unit): android.widget.TextView {
         return android.widget.TextView(reactContext).apply {
-            text = label; textSize = 17f; setTextColor(Color.WHITE)
+            text = label; textSize = sp(17f); setTextColor(Color.WHITE)
             typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
             gravity = Gravity.CENTER
             minWidth = dp(106); minHeight = dp(48)
@@ -239,7 +288,7 @@ abstract class PanelBase(
         val bar = LinearLayout(reactContext).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(16), dp(28), dp(28), dp(28))
+            setPadding(dp(28), dp(28), dp(28), dp(28))
         }
         for (btn in leftButtons) bar.addView(btn)
         if (leftFlex != null) {

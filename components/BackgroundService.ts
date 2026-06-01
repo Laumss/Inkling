@@ -1,3 +1,5 @@
+
+
 import { NativeModules, NativeEventEmitter, DeviceEventEmitter } from 'react-native';
 import { PluginCommAPI } from 'sn-plugin-lib';
 import { TextInserter, InsertMode, TextSource } from './TextInserter';
@@ -56,6 +58,8 @@ let _cachedAiBubbleActionIds: string[] = [];
 
 let _aiActive = false;
 
+let _aiPositionLocked = false;
+
 let _switchVersion = 0;
 
 let _localSendStarted = false;
@@ -76,7 +80,9 @@ function emitInsertMode(mode: InsertMode | null): void {
 function _pushActiveModes(): void {
   const modes: string[] = [];
   if (_activeMode) modes.push('insert_text');
-  if (_aiActive) modes.push('send_ai');
+  if (_aiActive) {
+    modes.push('voice_transcribe');
+  }
   FloatingToolbarBridge.setActiveModes(modes);
 }
 
@@ -94,6 +100,8 @@ function reviveBridge(): void {
   _broadcastTextSub = bbEmitter.addListener('onTextFromRelay', (text: string) => {
     console.log('[BackgroundService]: onTextFromRelay len=', text.length);
     FileLogger.logTextReceived('Broadcast', text);
+
+    try { BroadcastBridge.sendAck(text, true, null); } catch (_) {}
 
     clearAiTimeout();
 
@@ -147,6 +155,10 @@ function _getBubbleStatusText(): string {
     ? t('bubble_recv_nospacing')
     : t('bubble_recv_paragraph');
 
+  if (_textInserter?.isWaitingPage()) {
+    return base + ' ⊕';
+  }
+
   const qLen = _textInserter?.getQueueLength() ?? 0;
   if (qLen > 0) return base + ` (${qLen})`;
   return base;
@@ -182,6 +194,10 @@ export function ensureInit(): void {
 
   _textInserter = new TextInserter(
     (text, success, error) => {
+
+      if (BroadcastBridge) {
+        try { BroadcastBridge.sendAck(text, success, error); } catch (_) {}
+      }
       if (_aiWaiting) {
         _aiWaiting = false;
 
@@ -199,9 +215,20 @@ export function ensureInit(): void {
     },
     (page, nextTop, source, isPageChange) => {
 
-      if (isPageChange && FloatingBubbleBridge.isAvailable) {
-        const ps = _textInserter?.getPageSize();
-        if (ps) FloatingBubbleBridge.setPageHeight(ps.height);
+      try {
+        if (BroadcastBridge?.sendInsertPosition) {
+          BroadcastBridge.sendInsertPosition(page, nextTop);
+        }
+      } catch (e) {
+        console.warn('[BackgroundService]: sendInsertPosition failed:', e);
+      }
+
+      if (FloatingBubbleBridge.isAvailable) {
+        if (isPageChange) {
+          const ps = _textInserter?.getPageSize();
+          if (ps) { FloatingBubbleBridge.setPageHeight(ps.height); FloatingBubbleBridge.setPageWidth(ps.width); }
+        }
+        FloatingBubbleBridge.updateText(_getBubbleStatusText());
       }
 
     },
@@ -209,25 +236,38 @@ export function ensureInit(): void {
     (reason, detail) => {
       console.warn('[BackgroundService]: note context changed:', reason, detail);
       FileLogger.logEvent('NoteContextChanged', `${reason}: ${detail}`);
+      const prevMode = _activeMode;
       _activeMode = null;
-      _aiWaiting = false;
       clearAiTimeout();
       _pushActiveModes();
       emitInsertMode(null);
-      if (FloatingBubbleBridge.isAvailable) {
+
+      if (_aiWaiting) {
+        _aiWaiting = false;
+        if (_aiActive && AiBubbleBridge.isAvailable) {
+          AiBubbleBridge.updateText(t('bubble_ai_ready'));
+        }
+      }
+
+      if (reason === 'note_switched' && prevMode && _textInserter) {
+        console.log('[BackgroundService]: note switched, restarting inserter mode=', prevMode);
+        _textInserter.clearQueue();
+        _textInserter.start(prevMode).then(ok => {
+          if (ok) {
+            _activeMode = prevMode;
+            _pushActiveModes();
+            emitInsertMode(prevMode);
+            if (FloatingBubbleBridge.isAvailable) {
+              FloatingBubbleBridge.show(_getBubbleStatusText());
+            }
+          }
+        });
+      } else if (FloatingBubbleBridge.isAvailable) {
         const msg = reason === 'note_switched'
           ? t('note_switched_stop')
           : t('pages_changed_stop');
         FloatingBubbleBridge.show(msg);
         setTimeout(() => FloatingBubbleBridge.hide(), 3500);
-      }
-
-      if (_aiWaiting) {
-        _aiWaiting = false;
-        clearAiTimeout();
-        if (_aiActive && AiBubbleBridge.isAvailable) {
-          AiBubbleBridge.updateText(t('bubble_ai_ready'));
-        }
       }
     },
   );
@@ -243,10 +283,34 @@ export function ensureInit(): void {
     });
   }
 
+  try { BroadcastBridge?.sendAlive?.(); } catch (_) {}
+
+  DeviceEventEmitter.addListener('onLocalSendStopped', () => {
+    console.log('[BackgroundService]: WiFi lost – LocalSend server stopped');
+    _localSendStarted = false;
+    _localSendProbing = false;
+  });
+
   if (FloatingBubbleBridge.isAvailable) {
-    FloatingBubbleBridge.onDragEnd(({ pageY }) => {
-      _textInserter?.forceSetNextTop(pageY);
-    });
+    const applyBubblePosition = (data: {
+      pageY: number; pageX: number;
+      pageBottomY: number; bubbleHeight: number;
+      screenY: number; screenBottomY: number;
+    }) => {
+
+      const bottomY = (data.pageBottomY > data.pageY) ? data.pageBottomY : data.pageY;
+
+      const insertTop = bottomY + 4;
+
+      const insertLeft = Math.max(0, data.pageX);
+      console.log('[BackgroundService]: applyBubblePosition raw=', JSON.stringify(data),
+        'insertTop=', insertTop, 'insertLeft=', insertLeft);
+      _textInserter?.forceSetNextTop(insertTop);
+      _textInserter?.forceSetNextLeft(insertLeft);
+    };
+
+    FloatingBubbleBridge.onDragEnd((d) => { _aiPositionLocked = false; applyBubblePosition(d); });
+    FloatingBubbleBridge.onLayout((d) => { if (!_aiPositionLocked) applyBubblePosition(d); });
 
     if (!_bubbleActionSub) {
       _bubbleActionSub = FloatingBubbleBridge.onBubbleAction(({ actionId }) => {
@@ -279,6 +343,31 @@ export function ensureInit(): void {
           handleAiSend().catch(e => console.error('[BackgroundService]: AI lasso_ai error:', e));
         } else if (actionId === 'screenshot_ai') {
           handleScreenshotAi().catch(e => console.error('[BackgroundService]: AI screenshot_ai error:', e));
+        } else if (actionId === 'pen_lasso_ai') {
+          if (AiBubbleBridge.isAvailable) AiBubbleBridge.hide();
+          if (FloatingBubbleBridge.isAvailable) FloatingBubbleBridge.hide();
+
+          const bboxSub = FloatingToolbarBridge.onPenLassoBbox(() => {
+            bboxSub.remove();
+            cancelSub.remove();
+            setTimeout(() => {
+              restoreBubbleAfterLasso();
+              handleAiSend().catch(e => console.error('[BackgroundService]: pen_lasso_ai handleAiSend error:', e));
+            }, 300);
+          });
+          const cancelSub = FloatingToolbarBridge.onPenLassoCancel(() => {
+            bboxSub.remove();
+            cancelSub.remove();
+            setTimeout(() => restoreBubbleAfterLasso(), 300);
+          });
+
+          const { PenLasso } = require('./PenTools');
+          PenLasso.arm().catch((e: any) => {
+            console.error('[BackgroundService]: PenLasso.arm error:', e);
+            bboxSub.remove();
+            cancelSub.remove();
+            restoreBubbleAfterLasso();
+          });
         } else if (actionId === 'cancel_ai') {
           stopAiMode();
         }
@@ -286,8 +375,15 @@ export function ensureInit(): void {
     }
 
     if (!_nativePanelCloseSub) {
-      _nativePanelCloseSub = FloatingToolbarBridge.onNativePanelClose(({ panel, cameFromBubble }) => {
+      _nativePanelCloseSub = FloatingToolbarBridge.onNativePanelClose(({ panel, cameFromBubble, screenshotBbox }) => {
         console.log('[BackgroundService]: onNativePanelClose panel=', panel, 'fromBubble=', cameFromBubble);
+
+        if (screenshotBbox && _textInserter) {
+          _textInserter.forceSetNextTop(screenshotBbox.bottom + AI_REPLY_GAP_PX);
+          _textInserter.forceSetNextLeft(screenshotBbox.left);
+          _aiPositionLocked = true;
+          console.log('[BackgroundService]: screenshot insert pos set to left=', screenshotBbox.left, 'top=', screenshotBbox.bottom + AI_REPLY_GAP_PX);
+        }
         if (cameFromBubble) {
 
           setTimeout(() => restoreBubbleAfterLasso(), 300);
@@ -321,6 +417,8 @@ export function isAiWaiting(): boolean {
 export async function toggleMode(target: InsertMode): Promise<InsertMode | null> {
   ensureInit();
   if (!_textInserter) return null;
+
+  ensureLocalSendReady().catch(() => {});
 
   const cur = _activeMode;
 
@@ -373,9 +471,15 @@ export async function startAiReceiveMode(): Promise<void> {
 export function stopAiMode(): void {
   _aiActive = false;
   _aiWaiting = false;
+  _aiPositionLocked = false;
   clearAiTimeout();
   AiBubbleBridge.hide();
   _pushActiveModes();
+}
+
+export function stopAllModes(): void {
+  stopMode();
+  stopAiMode();
 }
 
 export async function switchToMode(mode: InsertMode): Promise<boolean> {
@@ -415,7 +519,7 @@ export async function switchToMode(mode: InsertMode): Promise<boolean> {
     _activeMode = mode;
     if (FloatingBubbleBridge.isAvailable) {
       const ps = _textInserter.getPageSize();
-      if (ps) FloatingBubbleBridge.setPageHeight(ps.height);
+      if (ps) { FloatingBubbleBridge.setPageHeight(ps.height); FloatingBubbleBridge.setPageWidth(ps.width); }
     }
   } else {
     let retryOk = false;
@@ -436,7 +540,7 @@ export async function switchToMode(mode: InsertMode): Promise<boolean> {
       _activeMode = mode;
       if (FloatingBubbleBridge.isAvailable) {
         const ps = _textInserter.getPageSize();
-        if (ps) FloatingBubbleBridge.setPageHeight(ps.height);
+        if (ps) { FloatingBubbleBridge.setPageHeight(ps.height); FloatingBubbleBridge.setPageWidth(ps.width); }
       }
     } else {
       _activeMode = null;
@@ -517,6 +621,8 @@ export async function handleAiSend(): Promise<void> {
       return;
     }
 
+    reviveBridge();
+
     try {
       await Promise.race([
         (PluginCommAPI.setLassoBoxState as any)(2),
@@ -541,21 +647,54 @@ export async function handleAiSend(): Promise<void> {
           emitInsertMode('nospacing');
 
           if (FloatingBubbleBridge.isAvailable) {
-            FloatingBubbleBridge.show(_getBubbleStatusText());
+            _aiPositionLocked = false;
+
+            const ps = _textInserter.getPageSize();
+            if (ps) { FloatingBubbleBridge.setPageHeight(ps.height); FloatingBubbleBridge.setPageWidth(ps.width); }
+
+            const anchorRect = extracted.lassoRect ?? extracted.lastTextBoxRect;
+            if (anchorRect) {
+              console.log('[BackgroundService]: showAt lasso anchor left=', anchorRect.left, 'bottom=', anchorRect.bottom);
+              FloatingBubbleBridge.showAt(
+                _getBubbleStatusText(),
+                anchorRect.left,
+                anchorRect.bottom,
+              );
+            } else {
+              FloatingBubbleBridge.show(_getBubbleStatusText());
+            }
             syncBubbleActionsToNative();
           }
         }
       }
     }
 
-    if (extracted.lastTextBoxRect && _textInserter) {
-      const startTop = extracted.lastTextBoxRect.bottom + AI_REPLY_GAP_PX;
-      _textInserter.setStartTopIfAdvance(startTop);
-    }
+    try { BroadcastBridge.sendAlive?.(); } catch (_) {}
+    BroadcastBridge.sendQuery(extracted.text);
+    _aiWaiting = true;
+    _lastAiSendAt = Date.now();
+    _lastAiSendText = extracted.text;
+    if (AiBubbleBridge.isAvailable) AiBubbleBridge.updateText(t('bubble_ai_waiting'));
+    FileLogger.logEvent('SendToAI', `${extracted.text.length} chars`);
 
-    console.warn('[BackgroundService]: AI send unavailable — relay not connected');
-    FileLogger.logEvent('AiSendUnavailable', 'relay not connected');
-    if (AiBubbleBridge.isAvailable) AiBubbleBridge.updateText(t('bubble_ai_ready'));
+    clearAiTimeout();
+    _aiTimeoutRef = setTimeout(() => {
+      _aiTimeoutRef = null;
+      if (_aiWaiting) {
+        console.warn('[BackgroundService]: AI reply timeout');
+        FileLogger.logEvent('AiTimeout', 'no reply in 90s');
+        if (AiBubbleBridge.isAvailable) {
+          AiBubbleBridge.updateText('AI 无响应，请检查中转站');
+          setTimeout(() => {
+            if (!_aiWaiting) return;
+            AiBubbleBridge.updateText(t('bubble_ai_ready'));
+            _aiWaiting = false;
+          }, 5000);
+        } else {
+          _aiWaiting = false;
+        }
+      }
+    }, 90_000);
 
   } catch (e) {
     console.error('[BackgroundService]: handleAiSend error:', e);
@@ -586,6 +725,14 @@ export async function ensureLocalSendReady(): Promise<void> {
   if (_localSendStarted || _localSendProbing) return;
   _localSendProbing = true;
   try {
+
+    const status = await LocalSendBridge.getServerStatus();
+    if (status?.running) {
+      console.log('[BackgroundService]: native server already running, adopting');
+      _localSendStarted = true;
+      return;
+    }
+
     console.log('[BackgroundService]: probing LAN for LocalSend peers...');
     FileLogger.logEvent('LocalSendProbe', 'start');
     await LocalSendBridge.scanForPeers();

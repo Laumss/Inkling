@@ -3,14 +3,20 @@ import com.supernote_quicktoolbar.*
 import com.supernote_quicktoolbar.overlays.*
 import com.supernote_quicktoolbar.bubbles.*
 
+import android.content.Context
 import android.content.Intent
 import android.graphics.Color
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
+import android.os.FileObserver
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.util.Log
 import android.view.*
 import android.widget.LinearLayout
-import android.widget.ScrollView
+import android.widget.HorizontalScrollView
 import android.widget.TextView
 import com.facebook.react.bridge.*
 import com.facebook.react.bridge.Arguments
@@ -18,6 +24,7 @@ import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.modules.core.DeviceEventManagerModule
 import com.supernote_quicktoolbar.ui_common.PanelBase
 import com.supernote_quicktoolbar.ui_common.PanelHeader
+import com.supernote_quicktoolbar.ui_common.PanelScrollHost
 import java.io.*
 import java.net.*
 import java.security.*
@@ -58,6 +65,7 @@ class SendPanel(
 
     private var statusTextView: TextView? = null
     private var previewTextView: TextView? = null
+    private var scrollHost: PanelScrollHost? = null
     private var peerContainer: LinearLayout? = null
     private var sendTextBtn: TextView? = null
     private var cancelBtn: View? = null
@@ -71,6 +79,7 @@ class SendPanel(
         showPanel()
         handler.post {
             startPeerPolling()
+            LocalSendModule.reprobeKnownPeers()
             LocalSendModule.triggerScan()
         }
     }
@@ -86,7 +95,7 @@ class SendPanel(
     }
 
     override fun onHide() {
-        statusTextView = null; previewTextView = null; peerContainer = null
+        statusTextView = null; previewTextView = null; peerContainer = null; scrollHost = null
         sendTextBtn = null; cancelBtn = null; fileButtonsContainer = null
         currentInstance = null
     }
@@ -137,11 +146,11 @@ class SendPanel(
         }
         statusTextView = TextView(reactContext).apply {
             text = NativeLocale.t("extracting")
-            textSize = 13f; setTextColor(Color.parseColor("#666666"))
+            textSize = sp(13f); setTextColor(Color.parseColor("#666666"))
             typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
         }
         previewTextView = TextView(reactContext).apply {
-            textSize = 12f; setTextColor(Color.parseColor("#999999"))
+            textSize = sp(12f); setTextColor(Color.parseColor("#999999"))
             maxLines = 3; visibility = View.GONE
             setPadding(0, dp(6), 0, 0)
             setLineSpacing(dp(2).toFloat(), 1f)
@@ -156,34 +165,27 @@ class SendPanel(
         })
         root.addView(statusBar)
 
-        val scrollView = ScrollView(reactContext).apply {
-            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
-        }
-        peerContainer = LinearLayout(reactContext).apply {
-            orientation = LinearLayout.VERTICAL
+        scrollHost = PanelScrollHost(reactContext)
+        peerContainer = scrollHost!!.content.apply {
             setPadding(dp(5), dp(5), dp(5), dp(5))
         }
-        scrollView.addView(peerContainer)
-        root.addView(scrollView)
+        root.addView(scrollHost!!.view)
         refreshPeerList()
 
         root.addView(createBottomBar())
     }
 
     private fun createBottomBar(): LinearLayout {
-        val wrapper = LinearLayout(reactContext).apply { orientation = LinearLayout.VERTICAL }
-        wrapper.addView(makeDivider())
-        val bar = LinearLayout(reactContext).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(16), dp(12), dp(16), dp(12))
-        }
 
         fileButtonsContainer = LinearLayout(reactContext).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        bar.addView(fileButtonsContainer)
+        val fileScroll = HorizontalScrollView(reactContext).apply {
+            isHorizontalScrollBarEnabled = false
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            addView(fileButtonsContainer)
+        }
 
         val rescanBtn = makeOutlinedBtn(NativeLocale.t("rescan")) {
             statusTextView?.text = NativeLocale.t("peers_scanning")
@@ -194,24 +196,14 @@ class SendPanel(
                 handler.post { refreshPeerList() }
             }
         }
-        bar.addView(rescanBtn, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.WRAP_CONTENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply { marginEnd = dp(8) })
-
-        bar.addView(View(reactContext).apply {
-            layoutParams = LinearLayout.LayoutParams(0, 1, 1f)
-        })
-
         cancelBtn = makeOutlinedBtn(NativeLocale.t("cancel")) { closeAndRestore() }
-        bar.addView(cancelBtn)
-
         sendTextBtn = makeFilledBtn(NativeLocale.t("send_text_btn")) { handleSendText() }
         updateSendBtnState()
-        bar.addView(sendTextBtn)
 
-        wrapper.addView(bar)
-        return wrapper
+        return makeBottomBar(
+            leftFlex = fileScroll,
+            rightButtons = listOf(rescanBtn, cancelBtn!!, sendTextBtn!!)
+        )
     }
 
     private fun refreshPeerList() {
@@ -235,6 +227,7 @@ class SendPanel(
 
             for (peer in peers) container.addView(createPeerRow(peer))
             updateSendBtnState()
+            scrollHost?.refreshThumb()
         }
     }
 
@@ -264,7 +257,7 @@ class SendPanel(
             "desktop" -> "PC"; "mobile" -> "MB"; "tablet" -> "TB"; "web" -> "WB"; else -> "DV"
         }
         row.addView(TextView(reactContext).apply {
-            text = iconText; textSize = 14f; setTextColor(Color.BLACK)
+            text = iconText; textSize = sp(14f); setTextColor(Color.BLACK)
             typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
             gravity = Gravity.CENTER
             layoutParams = LinearLayout.LayoutParams(dp(42), dp(42)).apply { rightMargin = dp(10) }
@@ -278,20 +271,20 @@ class SendPanel(
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
         info.addView(TextView(reactContext).apply {
-            text = peer.alias; textSize = 13f; setTextColor(Color.BLACK)
+            text = peer.alias; textSize = sp(13f); setTextColor(Color.BLACK)
             typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
             setSingleLine(true); ellipsize = android.text.TextUtils.TruncateAt.END
         })
         info.addView(TextView(reactContext).apply {
             text = "${peer.ip}:${peer.port} · ${peer.deviceType}"
-            textSize = 10f; setTextColor(Color.parseColor("#999999"))
+            textSize = sp(10f); setTextColor(Color.parseColor("#999999"))
             setPadding(0, dp(2), 0, 0)
         })
         row.addView(info)
 
         if (isSelected) {
             row.addView(TextView(reactContext).apply {
-                text = "✓"; textSize = 16f; setTextColor(Color.BLACK)
+                text = "✓"; textSize = sp(16f); setTextColor(Color.BLACK)
                 typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
                 gravity = Gravity.CENTER
                 layoutParams = LinearLayout.LayoutParams(dp(28), dp(28))
@@ -348,10 +341,15 @@ class SendPanel(
         }
     }
 
+    private var pollCount = 0
+
     private fun startPeerPolling() {
         stopPeerPolling()
+        pollCount = 0
         peerPollRunnable = object : Runnable {
             override fun run() {
+                pollCount++
+                if (pollCount % 5 == 0) LocalSendModule.reprobeKnownPeers()
                 refreshPeerList()
                 handler.postDelayed(this, 3000)
             }
@@ -426,6 +424,43 @@ class SendPanel(
 class LocalSendModule(reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext) {
 
+    init {
+        startInboxWatcher()
+        registerNetworkListener()
+    }
+
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+
+    private fun registerNetworkListener() {
+        val cm = reactApplicationContext
+            .getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            override fun onLost(network: Network) {
+                if (!staticIsRunning) return
+                Log.i(TAG, "WiFi network lost – stopping LocalSend server")
+                forceCloseAll()
+                sendEvent("onLocalSendStopped", Arguments.createMap())
+            }
+        }
+        try {
+            val req = NetworkRequest.Builder()
+                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                .build()
+            cm.registerNetworkCallback(req, cb)
+            networkCallback = cb
+            Log.i(TAG, "WiFi network callback registered")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to register network callback: ${e.message}")
+        }
+    }
+
+    override fun onCatalystInstanceDestroy() {
+        val cm = reactApplicationContext
+            .getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        networkCallback?.let { try { cm?.unregisterNetworkCallback(it) } catch (_: Exception) {} }
+        networkCallback = null
+    }
+
     companion object {
         private const val TAG = "LocalSendModule"
         private const val PROTOCOL_VERSION = "2.0"
@@ -481,6 +516,9 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
         @Volatile @JvmStatic
         var staticDiscoveredPeers: ConcurrentHashMap<String, DiscoveredPeer> = ConcurrentHashMap()
 
+        private const val INBOX_DIR = "/sdcard/INBOX"
+        private val IMAGE_EXTS_RECV = setOf("jpg", "jpeg", "png", "bmp", "gif", "webp")
+
         private val sessionReceivedImages = mutableListOf<ReceivedFileInfo>()
 
         @JvmStatic
@@ -490,9 +528,50 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
 
         @JvmStatic
         fun getReceivedImageFiles(): List<ReceivedFileInfo> {
-            synchronized(sessionReceivedImages) {
-                return sessionReceivedImages.filter { File(it.path).exists() }.toList()
+            val inboxImages = try {
+                val dir = File(INBOX_DIR)
+                if (dir.exists() && dir.isDirectory) {
+                    (dir.listFiles() ?: emptyArray())
+                        .filter { !it.isDirectory && !it.name.startsWith(".") }
+                        .filter { IMAGE_EXTS_RECV.contains(it.extension.lowercase()) }
+                        .map { ReceivedFileInfo(it.name, it.absolutePath, it.length(), it.lastModified(), true) }
+                } else emptyList()
+            } catch (_: Exception) { emptyList() }
+
+            val sessionImages = synchronized(sessionReceivedImages) {
+                sessionReceivedImages.filter { File(it.path).exists() }.toList()
             }
+
+            val seen = mutableSetOf<String>()
+            val merged = mutableListOf<ReceivedFileInfo>()
+            for (f in inboxImages + sessionImages) {
+                if (seen.add(f.path)) merged.add(f)
+            }
+            merged.sortByDescending { it.modified }
+            return merged
+        }
+
+        private var inboxObserver: FileObserver? = null
+
+        @JvmStatic
+        fun startInboxWatcher() {
+            if (inboxObserver != null) return
+            File(INBOX_DIR).mkdirs()
+            @Suppress("DEPRECATION")
+            inboxObserver = object : FileObserver(INBOX_DIR, CREATE or CLOSE_WRITE) {
+                override fun onEvent(event: Int, path: String?) {
+                    if (path == null) return
+                    val ext = path.substringAfterLast('.', "").lowercase()
+                    if (IMAGE_EXTS_RECV.contains(ext)) {
+                        ImagePanel.currentInstance?.onFileReceived()
+                    }
+                    if (DocLinkPanel.DOC_EXTS.contains(ext)) {
+                        DocLinkPanel.currentInstance?.onFileReceived()
+                    }
+                }
+            }
+            inboxObserver!!.startWatching()
+            Log.i(TAG, "INBOX watcher started: $INBOX_DIR")
         }
 
         @JvmStatic
@@ -500,6 +579,23 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             val now = System.currentTimeMillis()
             staticDiscoveredPeers.entries.removeIf { now - it.value.lastSeen > 30_000 }
             return staticDiscoveredPeers.values.toList()
+        }
+
+        @Volatile private var reprobeRunning = false
+
+        @JvmStatic
+        fun reprobeKnownPeers() {
+            if (reprobeRunning) return
+            val known = staticDiscoveredPeers.values.map { it.ip to it.port }.distinct()
+            if (known.isEmpty()) return
+            kotlin.concurrent.thread(isDaemon = true, name = "NativePanel-Reprobe") {
+                reprobeRunning = true
+                try {
+                    for ((ip, port) in known) probeHostStatic(ip, port)
+                } finally {
+                    reprobeRunning = false
+                }
+            }
         }
 
         @JvmStatic
@@ -661,7 +757,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                     val localIp = getLocalIpStatic()
                     if (localIp == "0.0.0.0") return@thread
                     val subnet = localIp.substringBeforeLast('.')
-                    val executor = Executors.newFixedThreadPool(20)
+                    val executor = Executors.newFixedThreadPool(50)
                     for (i in 1..254) {
                         val ip = "$subnet.$i"
                         if (ip == localIp) continue
@@ -696,26 +792,24 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
         }
 
         private fun probeHostStatic(ip: String, port: Int) {
-            for (scheme in arrayOf("https", "http")) {
-                try {
-                    val conn = staticOpenConn("$scheme://$ip:$port$API_BASE/info", 2000, 2000)
-                    conn.requestMethod = "GET"
-                    if (conn.responseCode == 200) {
-                        val body = conn.inputStream.bufferedReader().readText()
-                        conn.disconnect()
-                        val data = JSONObject(body)
-                        val fp = data.optString("fingerprint", "")
-                        if (fp.isNotEmpty() && fp != staticDeviceFingerprint) {
-                            staticDiscoveredPeers[fp] = DiscoveredPeer(
-                                data.optString("alias", "Unknown"), ip,
-                                data.optInt("port", port), data.optString("deviceType", "desktop"), fp
-                            )
-                        }
-                        return
-                    }
+            try {
+                val conn = staticOpenConn("https://$ip:$port$API_BASE/info", 500, 500)
+                conn.requestMethod = "GET"
+                if (conn.responseCode == 200) {
+                    val body = conn.inputStream.bufferedReader().readText()
                     conn.disconnect()
-                } catch (_: Exception) {}
-            }
+                    val data = JSONObject(body)
+                    val fp = data.optString("fingerprint", "")
+                    if (fp.isNotEmpty() && fp != staticDeviceFingerprint) {
+                        staticDiscoveredPeers[fp] = DiscoveredPeer(
+                            data.optString("alias", "Unknown"), ip,
+                            data.optInt("port", port), data.optString("deviceType", "desktop"), fp
+                        )
+                    }
+                    return
+                }
+                conn.disconnect()
+            } catch (_: Exception) {}
         }
     }
 
@@ -899,7 +993,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
 
                 val subnet = localIp.substringBeforeLast('.')
                 val localSuffix = localIp.substringAfterLast('.').toIntOrNull() ?: 0
-                val executor = Executors.newFixedThreadPool(20)
+                val executor = Executors.newFixedThreadPool(50)
 
                 val knownCopy = synchronized(knownSenderIps) { knownSenderIps.toList() }
                 Log.i(TAG, "scanForPeers: phase1 known IPs: $knownCopy")
@@ -916,8 +1010,12 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                 }
 
                 executor.shutdown()
-                executor.awaitTermination(6, TimeUnit.SECONDS)
-                Log.i(TAG, "scanForPeers: done, discovered ${discoveredPeers.size} peers total")
+                val finished = executor.awaitTermination(6, TimeUnit.SECONDS)
+                if (!finished) {
+
+                    executor.awaitTermination(4, TimeUnit.SECONDS)
+                }
+                Log.i(TAG, "scanForPeers: done (allFinished=$finished), discovered ${discoveredPeers.size} peers total")
                 promise.resolve("scan_done")
             } catch (e: Exception) {
                 Log.e(TAG, "scanForPeers error", e)
@@ -929,50 +1027,44 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
     }
 
     private fun probeHost(ip: String, port: Int) {
-
-        for (scheme in arrayOf("https", "http")) {
-            try {
-                val url = "$scheme://$ip:$port$API_BASE/info"
-                Log.d(TAG, "probeHost: trying $url")
-                val conn = openConn(url, connectTimeout = 2000, readTimeout = 2000)
-                conn.requestMethod = "GET"
-                val code = conn.responseCode
-                Log.d(TAG, "probeHost: $url → HTTP $code")
-                if (code == 200) {
-                    val body = conn.inputStream.bufferedReader().readText()
-                    conn.disconnect()
-                    Log.d(TAG, "probeHost: $ip response body: $body")
-                    val data = JSONObject(body)
-                    val fp = data.optString("fingerprint", "")
-                    if (fp.isNotEmpty() && fp != deviceFingerprint) {
-                        val peerAlias = data.optString("alias", "Unknown")
-                        val peerPort = data.optInt("port", port)
-                        val peerDeviceType = data.optString("deviceType", "desktop")
-                        Log.i(TAG, "probeHost: FOUND peer $peerAlias @ $ip:$peerPort ($scheme)")
-                        discoveredPeers[fp] = DiscoveredPeer(
-                            alias = peerAlias,
-                            ip = ip,
-                            port = peerPort,
-                            deviceType = peerDeviceType,
-                            fingerprint = fp
-                        )
-                        sendEvent("onPeerFound", Arguments.createMap().apply {
-                            putString("alias", peerAlias)
-                            putString("ip", ip)
-                            putString("deviceType", peerDeviceType)
-                            putInt("port", peerPort)
-                            putString("fingerprint", fp)
-                        })
-                    }
-                    return
-                } else {
-                    conn.disconnect()
-                    Log.d(TAG, "probeHost: $url responded $code, trying next scheme")
+        try {
+            val url = "https://$ip:$port$API_BASE/info"
+            Log.d(TAG, "probeHost: trying $url")
+            val conn = openConn(url, connectTimeout = 500, readTimeout = 500)
+            conn.requestMethod = "GET"
+            val code = conn.responseCode
+            Log.d(TAG, "probeHost: $url → HTTP $code")
+            if (code == 200) {
+                val body = conn.inputStream.bufferedReader().readText()
+                conn.disconnect()
+                Log.d(TAG, "probeHost: $ip response body: $body")
+                val data = JSONObject(body)
+                val fp = data.optString("fingerprint", "")
+                if (fp.isNotEmpty() && fp != deviceFingerprint) {
+                    val peerAlias = data.optString("alias", "Unknown")
+                    val peerPort = data.optInt("port", port)
+                    val peerDeviceType = data.optString("deviceType", "desktop")
+                    Log.i(TAG, "probeHost: FOUND peer $peerAlias @ $ip:$peerPort")
+                    discoveredPeers[fp] = DiscoveredPeer(
+                        alias = peerAlias,
+                        ip = ip,
+                        port = peerPort,
+                        deviceType = peerDeviceType,
+                        fingerprint = fp
+                    )
+                    sendEvent("onPeerFound", Arguments.createMap().apply {
+                        putString("alias", peerAlias)
+                        putString("ip", ip)
+                        putString("deviceType", peerDeviceType)
+                        putInt("port", peerPort)
+                        putString("fingerprint", fp)
+                    })
                 }
-            } catch (e: Exception) {
-                Log.d(TAG, "probeHost: $scheme://$ip:$port failed: ${e.javaClass.simpleName}: ${e.message}")
-
+                return
             }
+            conn.disconnect()
+        } catch (e: Exception) {
+            Log.d(TAG, "probeHost: https://$ip:$port failed: ${e.javaClass.simpleName}: ${e.message}")
         }
     }
 
@@ -1496,6 +1588,9 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                     ))
                     Log.i(TAG, "Added to session received: ${destFile.absolutePath}, total=${getReceivedImageFiles().size}")
                     ImagePanel.currentInstance?.onFileReceived()
+                }
+                if (DocLinkPanel.DOC_EXTS.contains(fileInfo.fileName.substringAfterLast('.', "").lowercase())) {
+                    DocLinkPanel.currentInstance?.onFileReceived()
                 }
                 sendEvent("onFileReceived", Arguments.createMap().apply {
                     putString("fileName", fileInfo.fileName)

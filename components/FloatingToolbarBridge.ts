@@ -1,3 +1,5 @@
+
+
 import { NativeModules, NativeEventEmitter } from 'react-native';
 
 const { FloatingToolbar } = NativeModules;
@@ -15,7 +17,7 @@ const LATCHING_ACTIONS = new Set<string>([
   'insert_text',
   'text_recv_nospacing',
   'text_recv_paragraph',
-  'send_ai',
+  'voice_transcribe',
 ]);
 
 export function withLatchFlag(tool: Omit<ToolItem, 'latches'>): ToolItem {
@@ -158,14 +160,6 @@ const FloatingToolbarBridge = {
     try { FloatingToolbar?.dumpPluginAppFields(); } catch (_) {}
   },
 
-  showCaptureToast(message?: string): void {
-    try { FloatingToolbar?.showCaptureToast(message ?? ''); } catch (_) {}
-  },
-
-  hideCaptureToast(): void {
-    try { FloatingToolbar?.hideCaptureToast(); } catch (_) {}
-  },
-
   openPanel(screen: string): void {
     try { FloatingToolbar?.openPanel(screen); } catch (_) {}
   },
@@ -243,6 +237,14 @@ const FloatingToolbarBridge = {
       (FloatingToolbar as any)?.handleDocScreenshot?.();
     } catch (e) {
       console.warn('[FloatingToolbarBridge]: handleDocScreenshot failed:', e);
+    }
+  },
+
+  handleDocScreenshotCrop(): void {
+    try {
+      (FloatingToolbar as any)?.handleDocScreenshotCrop?.();
+    } catch (e) {
+      console.warn('[FloatingToolbarBridge]: handleDocScreenshotCrop failed:', e);
     }
   },
 
@@ -345,7 +347,11 @@ const FloatingToolbarBridge = {
   },
 
   onNativePanelClose(
-    callback: (data: { panel: string; cameFromBubble: boolean }) => void
+    callback: (data: {
+      panel: string;
+      cameFromBubble: boolean;
+      screenshotBbox?: { left: number; top: number; right: number; bottom: number };
+    }) => void
   ): { remove(): void } {
     const emitter = getEmitter();
     if (!emitter) return { remove() {} };
@@ -373,6 +379,12 @@ const FloatingToolbarBridge = {
 
   destroyAll(): void {
     try { FloatingToolbar?.destroyAllFromJs(); } catch (_) {}
+  },
+
+  onDestroyAll(callback: () => void): { remove(): void } {
+    const emitter = getEmitter();
+    if (!emitter) return { remove() {} };
+    return emitter.addListener('onToolbarDestroyAll', () => callback());
   },
 
   isPenLockedSync(): boolean {
@@ -437,6 +449,12 @@ const FloatingToolbarBridge = {
     const emitter = getEmitter();
     if (!emitter) return { remove() {} };
     return emitter.addListener('onTitlePenLassoAction', callback);
+  },
+
+  onAppendPageAction(callback: () => void): { remove(): void } {
+    const emitter = getEmitter();
+    if (!emitter) return { remove() {} };
+    return emitter.addListener('onAppendPageAction', callback);
   },
 
   showPenLassoOverlay(): void {

@@ -20,8 +20,9 @@ class PanelScrollHost(
     private val overlayScrollbar: Boolean = false
 ) {
     private val density = ctx.resources.displayMetrics.density
-    private fun dp(v: Int) = (v * density).roundToInt()
-    private fun dpf(v: Float) = v * density
+    private val scale = ScreenScale.factor(ctx)
+    private fun dp(v: Int) = (v * density * scale).roundToInt()
+    private fun dpf(v: Float) = v * density * scale
 
     companion object {
 
@@ -56,7 +57,7 @@ class PanelScrollHost(
             viewTreeObserver.addOnScrollChangedListener { syncBarFromScroll() }
         }
 
-        scrollBar = RattaScrollBar(ctx, density).apply {
+        scrollBar = RattaScrollBar(ctx, density * scale).apply {
             onDragScrollPercent = { pct ->
                 scrollView.getChildAt(0)?.let { child ->
                     val maxScroll = (child.height - scrollView.height).coerceAtLeast(0)

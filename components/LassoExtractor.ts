@@ -14,6 +14,8 @@ export interface ExtractedContent {
   linkedFiles: LinkedFile[];
 
   lastTextBoxRect?: { left: number; top: number; right: number; bottom: number };
+
+  lassoRect?: { left: number; top: number; right: number; bottom: number };
   stats: {
     strokes: number;
     textBoxes: number;
@@ -67,6 +69,19 @@ export class LassoExtractor {
 
     const elements = res.result;
     FileLogger.logEvent('LassoExtract', `found ${elements.length} elements`);
+
+    try {
+      const lr: any = await PluginCommAPI.getLassoRect();
+      if (lr?.success && lr.result &&
+          typeof lr.result.bottom === 'number' && typeof lr.result.left === 'number') {
+        result.lassoRect = {
+          left: lr.result.left, top: lr.result.top,
+          right: lr.result.right, bottom: lr.result.bottom,
+        };
+      }
+    } catch (e) {
+      FileLogger.logEvent('LassoExtract', `getLassoRect failed (non-fatal): ${String(e)}`);
+    }
 
     type SortableItem = {
       sortY: number;
@@ -282,3 +297,4 @@ export class LassoExtractor {
     }
   }
 }
+

@@ -28,7 +28,7 @@ object NativeLocale {
                                  to "No images received yet\nSend images from another device via LocalSend"),
 
         "doc_panel_title"    to ("插入文档链接" to "Insert Doc Link"),
-        "doc_insert_link"    to ("插入链接" to "Insert Link"),
+        "doc_insert_link"    to ("链接文档" to "Insert Link"),
         "doc_no_files"       to ("此目录没有文档文件" to "No document files in this directory"),
         "doc_dir_localsend"  to ("LocalSend" to "LocalSend"),
         "doc_dir_download"   to ("下载" to "Download"),
@@ -59,6 +59,22 @@ object NativeLocale {
         "lasso_hint"             to ("在要发送的内容外画一个闭合圈" to "Draw a closed shape around the content"),
 
         "multi_select"           to ("选择多项" to "Select Multiple"),
+
+        "long_screenshot"        to ("长截图" to "Stitch"),
+        "long_screenshot_active" to ("✦ 长截图" to "✦ Stitch"),
+        "add_to_history"         to ("添加到队列" to "Add to Queue"),
+        "insert_next"            to ("下次插入" to "Insert Next"),
+        "screenshot_to_note"     to ("添加进队列并跳转笔记" to "Queue + Note"),
+        "multi"                  to ("连续" to "Multi"),
+        "compositing"            to ("合成中..." to "Compositing…"),
+
+        "screenshot_bubble"      to ("截图" to "Snip"),
+        "screencap_failed"       to ("截图失败\n\n请手动按 电源+音量下 截图，\n然后重新打开插件。"
+                                     to "Could not capture screenshot.\n\nPlease press Power + Volume Down\nto take a screenshot manually,\nthen reopen the plugin."),
+
+        "stitch_waiting"         to ("等待第二张截图..." to "Waiting for second image…"),
+        "stitch_waiting_hint"    to ("翻到下一页，然后再按一次截图按钮。"
+                                     to "Flip the page, then press the DOC button again."),
 
         "page_indicator"         to ("%d / %d" to "%d / %d"),
     )

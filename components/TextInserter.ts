@@ -1,6 +1,9 @@
 import { PluginFileAPI, PluginCommAPI, PluginNoteAPI, PluginManager } from 'sn-plugin-lib';
-import { NativeModules } from 'react-native';
+import { NativeModules, NativeEventEmitter } from 'react-native';
 import { FileLogger } from './FileLogger';
+import { splitTextForHeight } from './TextboxMetrics';
+
+const { FloatingToolbar } = NativeModules;
 
 const { TextLayoutEngine } = NativeModules;
 
@@ -20,9 +23,9 @@ const TOP_MARGIN_BASE     = 150;
 
 const BASE_PAGE_HEIGHT    = 1872;
 
-const CHAR_WIDTH_FACTOR_CJK = 1.0;
+const CHAR_WIDTH_FACTOR_CJK = 1.15;
 
-const CHAR_WIDTH_FACTOR_LATIN = 0.62;
+const CHAR_WIDTH_FACTOR_LATIN = 0.65;
 const FONT_SIZE         = 36;
 const INTERVAL_MS       = 200;
 
@@ -84,6 +87,9 @@ export class TextInserter {
   private currentPage = 0;
   private targetPage  = 0;
   private pageNextTop = new Map<number, number>();
+  private pageNextLeft = new Map<number, number>();
+
+  private _bubbleAnchorTop: number = -1;
 
   private timerRef: ReturnType<typeof setTimeout> | null = null;
   private activeMode: InsertMode | null = null;
@@ -99,6 +105,7 @@ export class TextInserter {
   private _paused = false;
   private _scheduleNextDeferred: InsertMode | null = null;
   private _deferredTimerRef: any = null;
+  private _nativeTickSub: { remove(): void } | null = null;
 
   private _occupiedRanges: OccupiedRange[] = [];
   private _occupiedPage = -1;
@@ -203,6 +210,10 @@ export class TextInserter {
     return this._paused;
   }
 
+  isWaitingPage(): boolean {
+    return this.activeMode !== null && this.currentPage < this.targetPage;
+  }
+
   getNotePath(): string {
     return this.notePath;
   }
@@ -223,8 +234,18 @@ export class TextInserter {
     const tm = this._topMargin();
     const clamped = Math.max(tm, top);
     this.pageNextTop.set(this.targetPage, clamped);
-    console.log('[TextInserter]: forceSetNextTop page=', this.targetPage, 'top=', clamped);
+
+    this._bubbleAnchorTop = clamped;
+    console.warn('[TextInserter/DIAG]: forceSetNextTop page=', this.targetPage, 'top=', clamped,
+      'bubbleAnchor=', this._bubbleAnchorTop,
+      'allEntries=', JSON.stringify(Array.from(this.pageNextTop.entries())));
     this.onPositionChanged?.(this.targetPage, clamped, 'unknown', false);
+  }
+
+  forceSetNextLeft(left: number) {
+    if (left < 0) { this.pageNextLeft.delete(this.targetPage); return; }
+    this.pageNextLeft.set(this.targetPage, left);
+    console.log('[TextInserter]: forceSetNextLeft page=', this.targetPage, 'left=', left);
   }
 
   getTargetPage(): number { return this.targetPage; }
@@ -296,6 +317,8 @@ export class TextInserter {
     this.stop(true);
     if (!preservePosition) {
       this.pageNextTop.clear();
+      this.pageNextLeft.clear();
+      this._bubbleAnchorTop = -1;
     }
     this.activeMode = mode;
     this.lastPenUpAt = 0;
@@ -364,6 +387,7 @@ export class TextInserter {
       clearTimeout(this.timerRef as any);
       this.timerRef = null;
     }
+    this._stopNativeTick();
     if (clearActive) {
       this.activeMode = null;
       this._paused = false;
@@ -546,11 +570,39 @@ export class TextInserter {
     const ps = this.pageSize;
     const tm = this._topMargin();
 
-    if (this._occupiedPage !== this.targetPage) {
-      await this._refreshOccupiedRanges();
+    try {
+      const pgCheck = await sdkCall(PluginCommAPI.getCurrentPageNum(), 'getCurrentPageNum(preLayout)');
+      if (pgCheck?.success && typeof pgCheck.result === 'number') {
+        this.currentPage = pgCheck.result;
+        if (this.currentPage < this.targetPage) {
+
+          console.log('[TextInserter]: waiting for user to navigate to target page',
+            this.currentPage, '→', this.targetPage);
+          if (isFromQueue) {
+            this.textQueue.unshift({ text, source: itemSource });
+          }
+          this.onPositionChanged?.(this.targetPage, this.getNextTop(), itemSource, false);
+          return 'pause';
+        } else if (this.currentPage > this.targetPage) {
+          console.log('[TextInserter]: user on forward page, relocating',
+            this.targetPage, '→', this.currentPage);
+          FileLogger.logEvent('PageAutoRelocate',
+            `target=${this.targetPage} → current=${this.currentPage}`);
+          this.relocateTo(this.currentPage);
+        }
+      }
+    } catch (e) {
+      console.warn('[TextInserter]: pre-layout page check failed:', e);
     }
 
+    this._occupiedPage = -1;
+    await this._refreshOccupiedRanges();
+
     const nextTopVal = this.pageNextTop.get(this.targetPage) ?? tm;
+    const nextLeftVal = this.pageNextLeft.get(this.targetPage);
+    console.warn('[TextInserter/DIAG]: pre-layout targetPage=', this.targetPage,
+      'nextTopVal=', nextTopVal, 'nextLeftVal=', nextLeftVal,
+      'pageNextTop=', JSON.stringify(Array.from(this.pageNextTop.entries())));
 
     const layout = await sdkCall(TextLayoutEngine.calculateLayout({
       text,
@@ -559,6 +611,7 @@ export class TextInserter {
       pageHeight: ps.height,
       nextTop: nextTopVal,
       occupiedRanges: this._occupiedRanges,
+      ...(nextLeftVal !== undefined ? { overrideLeft: nextLeftVal } : {}),
     }), 'TextLayoutEngine.calculateLayout');
 
     const { left, right, boxHeight: boxH, lines } = layout;
@@ -570,14 +623,113 @@ export class TextInserter {
       `mode=${mode} lines=${lines} boxH=${boxH} top=${top} maxH=${maxH} remainH=${remainH} gap=${layout.boxGap} fits=${boxH <= remainH} topMargin=${tm}`);
 
     if (layout.newPage) {
-      if (isFromQueue) {
+
+      const splitAvailH: number = layout.remainingHeight ?? 0;
+      const boxWidth = right - left;
+      let fittingInserted = false;
+
+      if (splitAvailH > FONT_SIZE * 2) {
+
+        let splitFitting: string | null = null;
+        let splitOverflow: string | null = null;
+        let splitHeight: number = splitAvailH;
+
+        try {
+          const splitResult = await splitTextForHeight(text, boxWidth, FONT_SIZE, splitAvailH);
+          if (splitResult && splitResult.didSplit && splitResult.fittingText.trim().length > 0) {
+            splitFitting = splitResult.fittingText;
+            splitOverflow = splitResult.overflowText;
+            splitHeight = splitResult.fittingHeight;
+            console.log('[TextInserter]: native split: fitting=', splitFitting.length, 'overflow=', splitOverflow.length);
+          }
+        } catch (e) {
+          console.warn('[TextInserter]: splitTextForHeight error:', e);
+        }
+
+        if (!splitFitting && layout.lines > 0 && layout.charsPerLine > 0) {
+          const lineH = boxH / layout.lines;
+          const fittingLines = Math.max(1, Math.floor(splitAvailH / lineH) - 1);
+          if (fittingLines < layout.lines) {
+            const approxSplitChar = fittingLines * layout.charsPerLine;
+
+            let splitAt = Math.min(approxSplitChar, text.length);
+            const searchStart = Math.max(0, splitAt - Math.floor(splitAt * 0.15));
+
+            const lastNL = text.lastIndexOf('\n', splitAt);
+            if (lastNL >= searchStart) { splitAt = lastNL + 1; }
+            else {
+
+              const sentenceEnds = ['。', '！', '？', '.', '!', '?'];
+              for (let i = splitAt - 1; i >= searchStart; i--) {
+                if (sentenceEnds.includes(text[i])) { splitAt = i + 1; break; }
+              }
+            }
+            const fit = text.substring(0, splitAt).trimEnd();
+            const over = text.substring(splitAt).trimStart();
+            if (fit.length > 0 && over.length > 0) {
+              splitFitting = fit;
+              splitOverflow = over;
+              splitHeight = Math.ceil(fittingLines * lineH);
+              console.log('[TextInserter]: JS fallback split: fitting=', fit.length,
+                'overflow=', over.length, 'fittingLines=', fittingLines);
+            }
+          }
+        }
+
+        if (splitFitting && splitFitting.trim().length > 0) {
+          const fitTop = top;
+          const fitBottom = Math.min(ps.height, fitTop + splitHeight);
+          try {
+            const fitRes = await sdkCall(
+              PluginNoteAPI.insertText({
+                textContentFull: splitFitting,
+                textRect: { left, top: fitTop, right, bottom: fitBottom },
+                fontSize: FONT_SIZE,
+                textAlign: 0,
+                textBold: 0,
+                textItalics: 0,
+                textFrameWidthType: 0,
+                textFrameStyle: 0,
+                textEditable: 1,
+              }),
+              'insertText(split-fit)',
+            );
+
+            if (fitRes?.success) {
+              FileLogger.logEvent('SplitInsert',
+                `page=${this.targetPage} fittingLen=${splitFitting.length} overflowLen=${splitOverflow?.length ?? 0} fitH=${splitHeight}`);
+              this.onAck?.(splitFitting, true, null);
+              this._addToOccupied(fitTop, fitBottom);
+              fittingInserted = true;
+
+              if (splitOverflow && splitOverflow.trim().length > 0) {
+                this.textQueue.unshift({ text: splitOverflow, source: itemSource });
+              }
+            }
+          } catch (e) {
+            console.warn('[TextInserter]: split-fit insertText failed:', e);
+          }
+        }
+      }
+
+      if (!fittingInserted) {
         this.textQueue.unshift({ text, source: itemSource });
+      }
+
+      if (fittingInserted && this.textQueue.length === 0) {
+        const actualBottom = await this._readBackActualBottom();
+        const maxReasonableBottom = ps.height;
+        const effectiveBottom = (actualBottom !== null && actualBottom > top && actualBottom <= maxReasonableBottom)
+          ? actualBottom : (top + (layout.remainingHeight ?? boxH));
+        const newNextTop = effectiveBottom + layout.boxGap;
+        this.pageNextTop.set(this.targetPage, newNextTop);
+        this.onPositionChanged?.(this.targetPage, newNextTop, itemSource, false);
+        return 'continue';
       }
 
       const candidateTemplates: string[] = [];
       try {
         const templates = await sdkCall(PluginCommAPI.getNoteSystemTemplates(), 'getNoteSystemTemplates');
-
         if (Array.isArray(templates) && templates.length > 0) {
           for (const t of templates) {
             if (t?.name) candidateTemplates.push(t.name);
@@ -585,7 +737,6 @@ export class TextInserter {
         }
         console.log('[TextInserter]: parsed templates count=', candidateTemplates.length);
       } catch (_) {}
-
       if (!candidateTemplates.includes('style_white')) {
         candidateTemplates.push('style_white');
       }
@@ -607,12 +758,16 @@ export class TextInserter {
 
           if (npRes?.success) {
             console.log('[TextInserter]: page created with template=', templateName);
+            const prevLeft = this.pageNextLeft.get(this.targetPage);
             this.targetPage = newPageIndex;
-            this.pageNextTop.set(newPageIndex, tm);
 
+            const newPageTop = this._bubbleAnchorTop > 0 ? this._bubbleAnchorTop : tm;
+            this.pageNextTop.set(newPageIndex, newPageTop);
+            if (prevLeft !== undefined) this.pageNextLeft.set(newPageIndex, prevLeft);
+            console.log('[TextInserter]: new page top=', newPageTop,
+              'bubbleAnchor=', this._bubbleAnchorTop, 'topMargin=', tm);
             this._occupiedRanges = [];
             this._occupiedPage = newPageIndex;
-
             if (this._expectedTotalPages > 0) this._expectedTotalPages++;
             pageCreated = true;
 
@@ -623,8 +778,7 @@ export class TextInserter {
               console.warn('[TextInserter]: reloadFile failed (non-fatal):', e);
             }
 
-            this.onPositionChanged?.(newPageIndex, tm, itemSource, true);
-
+            this.onPositionChanged?.(newPageIndex, newPageTop, itemSource, true);
             break;
           } else {
             console.warn('[TextInserter]: insertNotePage failed with template=', templateName, ':', npRes?.error?.message);
@@ -637,7 +791,6 @@ export class TextInserter {
       if (!pageCreated) {
         console.error('[TextInserter]: all template candidates failed, pausing (not stopping)');
         FileLogger.logEvent('InsertPageAllFailed', `page=${newPageIndex} candidates=${candidateTemplates.join(',')}`);
-
         this.targetPage = newPageIndex;
       }
       return 'pause';
@@ -648,25 +801,7 @@ export class TextInserter {
       return 'done';
     }
 
-    try {
-      const pgCheck = await sdkCall(PluginCommAPI.getCurrentPageNum(), 'getCurrentPageNum(preInsert)');
-      if (pgCheck?.success && typeof pgCheck.result === 'number') {
-        this.currentPage = pgCheck.result;
-        if (this.currentPage !== this.targetPage) {
-          console.warn('[TextInserter]: page mismatch! current=', this.currentPage,
-            'target=', this.targetPage, ', pausing to prevent wrong-page insertion');
-          FileLogger.logEvent('PageMismatchPause',
-            `current=${this.currentPage} target=${this.targetPage} textLen=${text.length}`);
-
-          if (isFromQueue) this.textQueue.unshift({ text, source: itemSource });
-          return 'pause';
-        }
-      }
-    } catch (e) {
-      console.warn('[TextInserter]: pre-insert page check failed (proceeding cautiously):', e);
-    }
-
-    const renderBottom = Math.min(ps.height, bottom + (lines >= 6 ? 7 : 0));
+    const renderBottom = Math.min(ps.height, bottom);
     try {
       const res = await sdkCall(
         PluginNoteAPI.insertText({
@@ -697,7 +832,15 @@ export class TextInserter {
           && actualBottom <= maxReasonableBottom)
           ? actualBottom
           : bottom;
-        this.pageNextTop.set(this.targetPage, effectiveBottom + layout.boxGap);
+        const newNextTop = effectiveBottom + layout.boxGap;
+        const currentNextTop = this.pageNextTop.get(this.targetPage) ?? 0;
+
+        if (newNextTop >= currentNextTop) {
+          this.pageNextTop.set(this.targetPage, newNextTop);
+          console.warn('[TextInserter/DIAG]: postInsert SET nextTop=', newNextTop, 'was=', currentNextTop);
+        } else {
+          console.warn('[TextInserter/DIAG]: postInsert SKIP nextTop=', newNextTop, '<', currentNextTop, '(kept higher)');
+        }
 
         this._addToOccupied(top, effectiveBottom);
 
@@ -726,13 +869,36 @@ export class TextInserter {
   private _deferNextTick(mode: InsertMode, delay: number) {
     this._scheduleNextDeferred = mode;
     clearTimeout(this._deferredTimerRef);
-
     this._deferredTimerRef = setTimeout(() => {
       if (this._scheduleNextDeferred === mode && !this.inserting) {
+        this._stopNativeTick();
         this._scheduleNextDeferred = null;
         this._scheduleNext(mode);
       }
     }, delay);
+    this._startNativeTick(mode, delay);
+  }
+
+  private _startNativeTick(mode: InsertMode, intervalMs: number) {
+    this._stopNativeTick();
+    try {
+      FloatingToolbar?.startInsertTimer(Math.max(intervalMs, 500));
+      const emitter = new NativeEventEmitter(FloatingToolbar);
+      this._nativeTickSub = emitter.addListener('onInsertTimerTick', () => {
+        if (this._scheduleNextDeferred === mode && !this.inserting) {
+          this._stopNativeTick();
+          clearTimeout(this._deferredTimerRef);
+          this._scheduleNextDeferred = null;
+          this._scheduleNext(mode);
+        }
+      });
+    } catch (_) {}
+  }
+
+  private _stopNativeTick() {
+    this._nativeTickSub?.remove();
+    this._nativeTickSub = null;
+    try { FloatingToolbar?.stopInsertTimer(); } catch (_) {}
   }
 
   private _scheduleNext(mode: InsertMode) {
@@ -767,9 +933,10 @@ export class TextInserter {
           this._deferNextTick(mode, INTERVAL_MS);
         }
       } else if (result === 'pause') {
-        this.timerRef = null;
-        this.activeMode = null;
-        console.log('[TextInserter]: stopped after page change — restart text insertion to continue');
+
+        console.log('[TextInserter]: page changed, continuing after delay');
+        this.timerRef = 1 as any;
+        this._deferNextTick(mode, 800);
       } else {
         this.timerRef = null;
         this.activeMode = null;
@@ -806,15 +973,11 @@ export class TextInserter {
           const actual = tpRes.result;
           if (actual !== this._expectedTotalPages) {
             const diff = actual - this._expectedTotalPages;
-            console.warn('[TextInserter]: totalPages changed externally: expected=',
+            console.log('[TextInserter]: totalPages updated: expected=',
               this._expectedTotalPages, 'actual=', actual, 'diff=', diff);
-            FileLogger.logEvent('PagesChanged',
+            FileLogger.logEvent('PagesUpdated',
               `expected=${this._expectedTotalPages} actual=${actual} diff=${diff} targetPage=${this.targetPage}`);
             this._expectedTotalPages = actual;
-            this.stop(true);
-            this.onNoteChanged?.('pages_changed',
-              `totalPages ${actual - diff} → ${actual}, targetPage was ${this.targetPage}`);
-            return false;
           }
         }
       }

@@ -5,7 +5,6 @@ import com.supernote_quicktoolbar.bubbles.*
 
 import android.content.Context
 import android.graphics.*
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.view.*
@@ -15,11 +14,14 @@ class PenLassoOverlay(private val context: Context) {
 
     companion object {
         private const val TAG = "PenLassoOverlay"
-        private const val STROKE_WIDTH = 4f
+        private const val STROKE_WIDTH_BASE = 4f
         private const val STROKE_COLOR = 0xCC333333.toInt()
         private const val TIMEOUT_MS = 30_000L
         private const val MIN_POINT_DIST_SQ = 9f
     }
+
+    private val strokeWidth: Float get() = STROKE_WIDTH_BASE *
+        com.supernote_quicktoolbar.ui_common.ScreenScale.factor(context)
 
     private var windowManager: WindowManager? = null
     private var rootView: View? = null
@@ -59,9 +61,8 @@ class PenLassoOverlay(private val context: Context) {
             FrameLayout.LayoutParams.MATCH_PARENT
         ))
 
-        val wmType = if (Build.VERSION.SDK_INT >= 26)
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-        else @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
+        @Suppress("DEPRECATION")
+        val wmType = WindowManager.LayoutParams.TYPE_PHONE
 
         val lp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -96,7 +97,7 @@ class PenLassoOverlay(private val context: Context) {
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = STROKE_COLOR
             style = Paint.Style.STROKE
-            strokeWidth = STROKE_WIDTH
+            strokeWidth = this@PenLassoOverlay.strokeWidth
             strokeCap = Paint.Cap.ROUND
             strokeJoin = Paint.Join.ROUND
         }

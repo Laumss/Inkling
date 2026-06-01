@@ -1,5 +1,9 @@
 package com.supernote_quicktoolbar
 
+import android.os.Build
+import android.text.Layout
+import android.text.StaticLayout
+import android.text.TextPaint
 import com.facebook.react.bridge.*
 import kotlin.math.ceil
 import kotlin.math.floor
@@ -14,12 +18,13 @@ class TextLayoutEngine(reactContext: ReactApplicationContext) :
 
     companion object {
         private const val FONT_SIZE = 36
-        private const val CHAR_WIDTH_FACTOR_CJK = 1.0
-        private const val CHAR_WIDTH_FACTOR_LATIN = 0.62
         private const val PAGE_MARGIN_LEFT = 0.07
         private const val PAGE_MARGIN_RIGHT = 0.04
         private const val TOP_MARGIN_BASE = 150
         private const val BASE_PAGE_HEIGHT = 1872
+        private const val WIDTH_ADJUSTMENT = 30
+
+        private const val HEIGHT_SAFETY_FACTOR = 1.15
     }
 
     private data class ModeConfig(
@@ -34,6 +39,26 @@ class TextLayoutEngine(reactContext: ReactApplicationContext) :
         "paragraph" to ModeConfig(boxGap = 40, threshold = 0.80, lineHeightRatio = 1.6, newlineGapLines = 0.3),
     )
 
+    private val textPaint = TextPaint().apply {
+        isAntiAlias = true
+        textSize = FONT_SIZE.toFloat()
+    }
+
+    private fun buildStaticLayout(text: String, width: Int): StaticLayout {
+        val measuredWidth = max(24, width - WIDTH_ADJUSTMENT)
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            StaticLayout.Builder.obtain(text, 0, text.length, textPaint, measuredWidth)
+                .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+                .setIncludePad(true)
+                .setBreakStrategy(Layout.BREAK_STRATEGY_SIMPLE)
+                .setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NONE)
+                .build()
+        } else {
+            @Suppress("DEPRECATION")
+            StaticLayout(text, textPaint, measuredWidth, Layout.Alignment.ALIGN_NORMAL, 1.0f, 0.0f, true)
+        }
+    }
+
     @ReactMethod
     fun calculateLayout(params: ReadableMap, promise: Promise) {
         try {
@@ -47,33 +72,34 @@ class TextLayoutEngine(reactContext: ReactApplicationContext) :
             val cfg = modeConfigs[mode] ?: modeConfigs["nospacing"]!!
 
             val topMargin = (TOP_MARGIN_BASE * (pageHeight.toDouble() / BASE_PAGE_HEIGHT)).roundToInt()
-            val left = floor(pageWidth * PAGE_MARGIN_LEFT).toInt()
+            val defaultLeft = floor(pageWidth * PAGE_MARGIN_LEFT).toInt()
             val right = pageWidth - floor(pageWidth * PAGE_MARGIN_RIGHT).toInt()
+            val overrideLeft = if (params.hasKey("overrideLeft") && !params.isNull("overrideLeft")) params.getInt("overrideLeft") else -1
+            val left = if (overrideLeft >= 0) max(0, min(overrideLeft, right - (FONT_SIZE * 3))) else defaultLeft
             val maxH = floor(pageHeight * cfg.threshold).toInt()
             val boxWidth = right - left
 
-            val cjkCount = text.count { isCJK(it) }
-            val cjkRatio = if (text.isNotEmpty()) cjkCount.toDouble() / text.length else 0.0
-            val charWidthFactor = CHAR_WIDTH_FACTOR_CJK * cjkRatio + CHAR_WIDTH_FACTOR_LATIN * (1 - cjkRatio)
-            val charsPerLine = max(1, floor(boxWidth / (FONT_SIZE * charWidthFactor)).toInt())
+            val layout = buildStaticLayout(text, boxWidth)
+            val nativeHeight = layout.height
+            val lineCount = layout.lineCount
 
             val segments = text.split("\n").filter { it.trim().isNotEmpty() }
-            var lines = 0.0
-            for ((idx, seg) in segments.withIndex()) {
-                val segLines = max(1.0, ceil(seg.length.toDouble() / charsPerLine))
-                val newlineGap = if (cfg.newlineGapLines > 0 &&
-                    idx < segments.size - 1 && segments.getOrNull(idx + 1)?.trim()?.isNotEmpty() == true
-                ) cfg.newlineGapLines else 0.0
-                lines += segLines + newlineGap
-            }
-            val boxH = ceil(lines * FONT_SIZE * cfg.lineHeightRatio).toInt()
+            val gapCount = if (cfg.newlineGapLines > 0 && segments.size > 1) segments.size - 1 else 0
+            val extraGap = ceil(gapCount * cfg.newlineGapLines * FONT_SIZE * cfg.lineHeightRatio).toInt()
+
+            val boxH = ceil((nativeHeight + extraGap) * HEIGHT_SAFETY_FACTOR).toInt()
 
             val occupied = parseOccupiedRanges(occupiedArray)
-            var top = skipOccupiedArea(nextTop, boxH, max(cfg.boxGap, 10), occupied)
+            val top = skipOccupiedArea(nextTop, boxH, max(cfg.boxGap, 10), occupied)
 
             val bottom = min(top + boxH, pageHeight - topMargin)
 
-            val newPage = top >= maxH || (top > topMargin + 80 && top + boxH > pageHeight - topMargin)
+            val usableHeight = pageHeight - 2 * topMargin
+            val newPage = top >= maxH
+                || (top > topMargin + 80 && top + boxH > pageHeight - topMargin)
+                || (top <= topMargin + 80 && boxH > usableHeight)
+
+            val remainingHeight = max(0, (pageHeight - topMargin) - top)
 
             val result = Arguments.createMap().apply {
                 putInt("top", top)
@@ -83,10 +109,12 @@ class TextLayoutEngine(reactContext: ReactApplicationContext) :
                 putInt("maxH", maxH)
                 putInt("left", left)
                 putInt("right", right)
-                putInt("charsPerLine", charsPerLine)
-                putInt("lines", lines.toInt())
+                putInt("charsPerLine", if (lineCount > 0) max(1, text.length / lineCount) else 1)
+                putInt("lines", lineCount)
                 putInt("topMargin", topMargin)
                 putInt("boxGap", cfg.boxGap)
+                putInt("nativeHeight", nativeHeight)
+                putInt("remainingHeight", remainingHeight)
             }
             promise.resolve(result)
         } catch (e: Exception) {
@@ -117,25 +145,20 @@ class TextLayoutEngine(reactContext: ReactApplicationContext) :
             for (i in 0 until texts.size()) {
                 val text = texts.getString(i) ?: ""
 
-                val cjkCount = text.count { isCJK(it) }
-                val cjkRatio = if (text.isNotEmpty()) cjkCount.toDouble() / text.length else 0.0
-                val charWidthFactor = CHAR_WIDTH_FACTOR_CJK * cjkRatio + CHAR_WIDTH_FACTOR_LATIN * (1 - cjkRatio)
-                val charsPerLine = max(1, floor(boxWidth / (FONT_SIZE * charWidthFactor)).toInt())
+                val layout = buildStaticLayout(text, boxWidth)
+                val nativeHeight = layout.height
 
                 val segments = text.split("\n").filter { it.trim().isNotEmpty() }
-                var lines = 0.0
-                for ((idx, seg) in segments.withIndex()) {
-                    val segLines = max(1.0, ceil(seg.length.toDouble() / charsPerLine))
-                    val newlineGap = if (cfg.newlineGapLines > 0 &&
-                        idx < segments.size - 1 && segments.getOrNull(idx + 1)?.trim()?.isNotEmpty() == true
-                    ) cfg.newlineGapLines else 0.0
-                    lines += segLines + newlineGap
-                }
-                val boxH = ceil(lines * FONT_SIZE * cfg.lineHeightRatio).toInt()
+                val gapCount = if (cfg.newlineGapLines > 0 && segments.size > 1) segments.size - 1 else 0
+                val extraGap = ceil(gapCount * cfg.newlineGapLines * FONT_SIZE * cfg.lineHeightRatio).toInt()
+                val boxH = ceil((nativeHeight + extraGap) * HEIGHT_SAFETY_FACTOR).toInt()
 
                 val top = skipOccupiedArea(nextTop, boxH, max(cfg.boxGap, 10), occupied)
                 val bottom = min(top + boxH, pageHeight - topMargin)
-                val newPage = top >= maxH || (top > topMargin + 80 && top + boxH > pageHeight - topMargin)
+                val batchUsableH = pageHeight - 2 * topMargin
+                val newPage = top >= maxH
+                    || (top > topMargin + 80 && top + boxH > pageHeight - topMargin)
+                    || (top <= topMargin + 80 && boxH > batchUsableH)
 
                 val item = Arguments.createMap().apply {
                     putInt("top", top)
@@ -161,17 +184,13 @@ class TextLayoutEngine(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun preprocessText(text: String, promise: Promise) {
         try {
-            var result = text.replace(Regex("^(\\d+)\\."), "$1​.")
+            var result = text.replace(Regex("^(\\d+)\\.", RegexOption.MULTILINE), "$1​.")
             result = result.replace("*", "")
             result = result.split("\n").filter { it.trim().isNotEmpty() }.joinToString("\n")
             promise.resolve(result)
         } catch (e: Exception) {
             promise.reject("PREPROCESS_ERROR", e.message, e)
         }
-    }
-
-    private fun isCJK(c: Char): Boolean {
-        return c in '一'..'鿿' || c in '　'..'〿' || c in '＀'..'￯'
     }
 
     private fun parseOccupiedRanges(array: ReadableArray?): List<Pair<Int, Int>> {

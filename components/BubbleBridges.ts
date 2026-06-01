@@ -1,3 +1,5 @@
+
+
 import { NativeModules, NativeEventEmitter } from 'react-native';
 
 const { FloatingBubble } = NativeModules;
@@ -15,6 +17,12 @@ const FloatingBubbleBridge = {
   show(statusText: string, mode?: string): void {
     try { FloatingBubble?.show(statusText, mode ?? ''); } catch (e) {
       console.warn('[FloatingBubbleBridge]: show failed:', e);
+    }
+  },
+
+  showAt(statusText: string, pageX: number, pageY: number, mode?: string): void {
+    try { FloatingBubble?.showAt(statusText, Math.round(pageX), Math.round(pageY)); } catch (e) {
+      console.warn('[FloatingBubbleBridge]: showAt failed:', e);
     }
   },
 
@@ -36,6 +44,14 @@ const FloatingBubbleBridge = {
 
   setScreenHeight(height: number): void {
     try { FloatingBubble?.setScreenHeight(height); } catch (_) {}
+  },
+
+  setPageWidth(width: number): void {
+    try { FloatingBubble?.setPageWidth(width); } catch (_) {}
+  },
+
+  setScreenWidth(width: number): void {
+    try { FloatingBubble?.setScreenWidth(width); } catch (_) {}
   },
 
   setPositionY(pageY: number): void {
@@ -70,11 +86,56 @@ const FloatingBubbleBridge = {
     return em.addListener('onBubbleTap', () => callback());
   },
 
-  onDragEnd(callback: (data: { screenY: number; pageY: number }) => void): { remove(): void } {
+  onDragEnd(callback: (data: {
+    screenY: number; pageY: number;
+    screenX: number; pageX: number;
+    screenBottomY: number; pageBottomY: number;
+    bubbleHeight: number;
+  }) => void): { remove(): void } {
     const em = getBubbleEmitter();
     if (!em) return { remove() {} };
     return em.addListener('onBubbleDragEnd', (event) => {
-      callback({ screenY: event.screenY, pageY: event.pageY });
+      console.log('[BubbleBridge]: onBubbleDragEnd raw keys=', Object.keys(event), 'pageBottomY=', event.pageBottomY, 'bubbleHeight=', event.bubbleHeight);
+      const screenH = event.screenBottomY ?? event.screenY;
+      const bh = event.bubbleHeight ?? 0;
+
+      const pbY = (typeof event.pageBottomY === 'number' && event.pageBottomY > event.pageY)
+        ? event.pageBottomY
+        : event.pageY + bh;
+      callback({
+        screenY: event.screenY,
+        pageY: event.pageY,
+        screenX: event.screenX ?? 0,
+        pageX: event.pageX ?? 0,
+        screenBottomY: screenH,
+        pageBottomY: pbY,
+        bubbleHeight: bh,
+      });
+    });
+  },
+
+  onLayout(callback: (data: {
+    screenY: number; pageY: number;
+    screenX: number; pageX: number;
+    screenBottomY: number; pageBottomY: number;
+    bubbleHeight: number;
+  }) => void): { remove(): void } {
+    const em = getBubbleEmitter();
+    if (!em) return { remove() {} };
+    return em.addListener('onBubbleLayout', (event) => {
+      const bh = event.bubbleHeight ?? 0;
+      const pbY = (typeof event.pageBottomY === 'number' && event.pageBottomY > event.pageY)
+        ? event.pageBottomY
+        : event.pageY + bh;
+      callback({
+        screenY: event.screenY,
+        pageY: event.pageY,
+        screenX: event.screenX ?? 0,
+        pageX: event.pageX ?? 0,
+        screenBottomY: event.screenBottomY ?? event.screenY,
+        pageBottomY: pbY,
+        bubbleHeight: bh,
+      });
     });
   },
 

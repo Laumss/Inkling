@@ -1,37 +1,30 @@
 package com.supernote_quicktoolbar.ui_common
 
 import android.graphics.Color
-import android.graphics.Typeface
 import android.view.Gravity
 import android.view.View
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.TextView
 import com.facebook.react.bridge.ReactApplicationContext
 import kotlin.math.roundToInt
 
- }
- *   tabs.setSelection(0)
- *   root.addView(tabs.createView())
- */
 class PanelTabBar(
     private val ctx: ReactApplicationContext,
     private val tabs: List<Tab>,
-    private val sideMarginDp: Int = 26,
+    private val sideMarginDp: Int = 44,
     private val onSelect: (index: Int) -> Unit
 ) {
     sealed class Tab {
         data class Icon(val assetPath: String, val contentDesc: String) : Tab()
-        data class Text(val label: String) : Tab()
     }
 
     private val density = ctx.resources.displayMetrics.density
-    private fun dp(v: Int) = (v * density).roundToInt()
+    private val scale = ScreenScale.factor(ctx)
+    private fun dp(v: Int) = (v * density * scale).roundToInt()
 
     private var selected: Int = 0
     private val iconViews = mutableListOf<ImageView?>()
-    private val textViews = mutableListOf<TextView?>()
     private val indicators = mutableListOf<View>()
 
     fun setSelection(i: Int) {
@@ -43,8 +36,8 @@ class PanelTabBar(
 
     fun createView(): View {
         val wrapper = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
-        val barHeight = dp(76)
-        val iconSize = dp(34)
+        val barHeight = dp(60)
+        val iconSize = dp(32)
         val sideMargin = dp(sideMarginDp)
 
         val bar = LinearLayout(ctx).apply {
@@ -57,13 +50,13 @@ class PanelTabBar(
             }
         }
 
-        iconViews.clear(); textViews.clear(); indicators.clear()
+        iconViews.clear(); indicators.clear()
 
         for ((idx, tab) in tabs.withIndex()) {
             if (idx > 0) {
                 bar.addView(View(ctx).apply {
                     layoutParams = LinearLayout.LayoutParams(1, LinearLayout.LayoutParams.MATCH_PARENT).apply {
-                        topMargin = dp(31); bottomMargin = dp(31)
+                        topMargin = dp(18); bottomMargin = dp(18)
                     }
                     setBackgroundColor(Color.BLACK)
                 })
@@ -80,43 +73,24 @@ class PanelTabBar(
                 }
             }
 
-            var icon: ImageView? = null
-            var text: TextView? = null
-            when (tab) {
-                is Tab.Icon -> {
-                    icon = ImageView(ctx).apply {
-                        val d = UiUtils.loadAssetIcon(ctx, tab.assetPath, iconSize, Color.BLACK)
-                        if (d != null) setImageDrawable(d)
-                        contentDescription = tab.contentDesc
-                        layoutParams = FrameLayout.LayoutParams(iconSize, iconSize, Gravity.CENTER)
-                    }
-                    frame.addView(icon)
-                }
-                is Tab.Text -> {
-                    text = TextView(ctx).apply {
-                        this.text = tab.label
-                        textSize = 14f
-                        typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-                        gravity = Gravity.CENTER
-                        layoutParams = FrameLayout.LayoutParams(
-                            FrameLayout.LayoutParams.WRAP_CONTENT,
-                            FrameLayout.LayoutParams.WRAP_CONTENT,
-                            Gravity.CENTER
-                        )
-                    }
-                    frame.addView(text)
+            val icon = when (tab) {
+                is Tab.Icon -> ImageView(ctx).apply {
+                    val d = UiUtils.loadAssetIcon(ctx, tab.assetPath, iconSize, Color.BLACK)
+                    if (d != null) setImageDrawable(d)
+                    contentDescription = tab.contentDesc
+                    layoutParams = FrameLayout.LayoutParams(iconSize, iconSize, Gravity.CENTER)
                 }
             }
+            frame.addView(icon)
 
             val indicator = View(ctx).apply {
-                layoutParams = FrameLayout.LayoutParams(
+                layoutParams = (FrameLayout.LayoutParams(
                     FrameLayout.LayoutParams.MATCH_PARENT, dp(3), Gravity.BOTTOM
-                )
+                )).also { it.bottomMargin = 1 }
             }
             frame.addView(indicator)
 
             iconViews.add(icon)
-            textViews.add(text)
             indicators.add(indicator)
             bar.addView(frame)
         }
@@ -139,9 +113,6 @@ class PanelTabBar(
         for (i in tabs.indices) {
             val active = i == selected
             iconViews.getOrNull(i)?.alpha = if (active) 1f else 0.4f
-            textViews.getOrNull(i)?.setTextColor(
-                if (active) Color.BLACK else Color.parseColor("#AAAAAA")
-            )
             indicators.getOrNull(i)?.setBackgroundColor(
                 if (active) Color.BLACK else Color.TRANSPARENT
             )

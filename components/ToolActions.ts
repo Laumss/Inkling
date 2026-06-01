@@ -1,5 +1,5 @@
-import { PluginCommAPI, PluginFileAPI, PluginNoteAPI, PluginManager } from 'sn-plugin-lib';
-import { NativeModules, EmitterSubscription } from 'react-native';
+import { PluginCommAPI, PluginFileAPI, PluginNoteAPI, PluginManager, NativeUIUtils } from 'sn-plugin-lib';
+import { NativeModules, EmitterSubscription, Dimensions } from 'react-native';
 import RNFS from 'react-native-fs';
 import { loadClips, saveClips } from './ToolPresets';
 import { toggleMode, handleAiSend, getLastMode, stopAiMode, ensureLocalSendReady } from './BackgroundService';
@@ -52,7 +52,9 @@ async function _insertDocLinkDirect(docPath: string): Promise<void> {
   const dotIdx = rawName.lastIndexOf('.');
   const linkName = dotIdx > 0 ? rawName.substring(0, dotIdx) : rawName;
 
-  let pageW = 1404, pageH = 1872;
+  const screen = Dimensions.get('window');
+  let pageW = screen.width > screen.height ? 1872 : 1404;
+  let pageH = screen.width > screen.height ? 1404 : 1872;
   try {
     const fpRes: any = await PluginCommAPI.getCurrentFilePath();
     const pgRes: any = await PluginCommAPI.getCurrentPageNum();
@@ -87,6 +89,24 @@ async function _insertDocLinkDirect(docPath: string): Promise<void> {
     isItalic: 0,
   };
   await (PluginNoteAPI as any).insertTextLink(textLink);
+
+  try {
+    await new Promise(r => setTimeout(r, 500));
+
+    const pad = 5;
+    const lassoRect = {
+      left: textLink.rect.left - pad,
+      top: textLink.rect.top - pad,
+      right: textLink.rect.right + pad,
+      bottom: textLink.rect.bottom + pad,
+    };
+    const lr: any = await PluginCommAPI.lassoElements(lassoRect);
+    if (lr?.success && lr.result !== false) {
+      await (PluginCommAPI as any).setLassoBoxState?.(0);
+    }
+  } catch (e) {
+    console.warn('[ToolActions] lassoElements after insertTextLink failed:', e);
+  }
 }
 
 export async function executeAction(action: string): Promise<string> {
@@ -107,7 +127,7 @@ export async function executeAction(action: string): Promise<string> {
     return mode === 'paragraph' ? 'Text receive: paragraph ON' : 'Text receive OFF';
   }
 
-  if (action === 'send_ai') {
+  if (action === 'send_ai' || action === 'voice_transcribe') {
     const { startAiReceiveMode } = require('./BackgroundService');
     await startAiReceiveMode();
     return 'AI receive: ON';
@@ -116,6 +136,16 @@ export async function executeAction(action: string): Promise<string> {
   if (action === 'lasso_ai') {
     handleAiSend().catch(e => console.error('[ToolActions]: lasso_ai error:', e));
     return 'Sending to AI...';
+  }
+
+  if (action === 'lasso_smart_send') {
+    if (await hasLassoSelection()) {
+      FloatingToolbarBridge.showSendPanelFromBubble();
+      return 'Send panel opened';
+    }
+    const { handleScreenshotSend } = require('./BackgroundService');
+    await handleScreenshotSend();
+    return 'Screenshot send: delegated to native';
   }
 
   if (action === 'lasso_send') {
@@ -189,13 +219,13 @@ export async function executeAction(action: string): Promise<string> {
 
   try {
     if (action === 'layer_prev') {
-      if (isRecognitionNote()) return '';
+      if (isRecognitionNote()) { NativeUIUtils.showErrorTipDialog('实时识别笔记不支持图层操作'); return ''; }
       if (await hasLassoSelection()) return moveLassoElementsLayer('up');
       await PluginNoteAPI.saveCurrentNote();
       return await layerPrev();
     }
     if (action === 'layer_next') {
-      if (isRecognitionNote()) return '';
+      if (isRecognitionNote()) { NativeUIUtils.showErrorTipDialog('实时识别笔记不支持图层操作'); return ''; }
       if (await hasLassoSelection()) return moveLassoElementsLayer('down');
       await PluginNoteAPI.saveCurrentNote();
       return await layerNext();
@@ -234,6 +264,17 @@ async function hasLassoSelection(): Promise<boolean> {
 async function moveLassoElementsLayer(direction: 'up' | 'down'): Promise<string> {
   if (!_filePath || _pageNum === null) return 'No context';
 
+  try {
+    const cntRes = await (PluginCommAPI as any).getLassoElementTypeCounts?.();
+    const c = cntRes?.result;
+    const hasTitle = (c?.titleNum ?? 0) > 0;
+    const hasLink = ((c?.textLinkNum ?? 0) + (c?.trailLinkNum ?? 0) + (c?.todoLinkNum ?? 0)) > 0;
+    if (hasTitle || hasLink) {
+      NativeUIUtils.showErrorTipDialog('标题、链接或文本不可粘贴在非主图层');
+      return 'Title/link must stay on main layer';
+    }
+  } catch (_) {}
+
   const lr = await PluginFileAPI.getLayers(_filePath, _pageNum) as any;
   if (!lr?.success || !lr.result) return 'Get layers failed';
   let userLayerIds = (lr.result as any[])
@@ -247,20 +288,55 @@ async function moveLassoElementsLayer(direction: 'up' | 'down'): Promise<string>
 
   const lassoElements = elemRes.result as any[];
   const movable = lassoElements.filter((e: any) => LAYER_MOVABLE_TYPES.has(e.type));
-  if (movable.length === 0) return 'No movable elements (title/link must stay on main layer)';
+  if (movable.length === 0) {
+    NativeUIUtils.showErrorTipDialog('标题、链接或文本不可粘贴在非主图层');
+    return 'No movable elements (title/link must stay on main layer)';
+  }
 
   if (direction === 'up') {
     const maxLayer = Math.max(...movable.map((e: any) => e.layerNum ?? 0));
     const maxIdx = userLayerIds.indexOf(maxLayer);
     if (maxIdx === userLayerIds.length - 1) {
       const maxUserId = Math.max(...userLayerIds);
-      if (maxUserId >= 3) return 'Max 4 user layers';
+      if (maxUserId >= 3) { NativeUIUtils.showErrorTipDialog('已达到最大图层数'); return 'Max 4 user layers'; }
+
+      await ensureStickerDir();
+      const tmpName = `_layer_move_${Date.now()}.sticker`;
+      const tmpPath = `${STICKER_DIR}/${tmpName}`;
+
+      const saveRes = await PluginCommAPI.saveStickerByLasso(tmpPath);
+      if (!saveRes.success) return 'Save sticker for layer move failed';
+
+      await PluginCommAPI.deleteLassoElements();
+      await PluginNoteAPI.saveCurrentNote();
+
       const newId = maxUserId + 1;
       const ir = await PluginFileAPI.insertLayer(_filePath, _pageNum, {
         layerId: newId, name: `Layer ${newId + 1}`, isVisible: true, isCurrentLayer: false,
       } as any) as any;
-      if (!ir?.success) return 'Create layer failed';
-      userLayerIds.push(newId);
+      if (!ir?.success) {
+
+        try { await PluginCommAPI.insertSticker(tmpPath); } catch (_) {}
+        try { await RNFS.unlink(tmpPath); } catch (_) {}
+        return 'Create layer failed';
+      }
+
+      const allLayers = (await PluginFileAPI.getLayers(_filePath, _pageNum) as any)?.result ?? [];
+      const updated = (allLayers as any[])
+        .filter((l: any) => (l.layerId ?? l.layerNum) >= 0)
+        .map((l: any) => ({
+          layerId: l.layerId ?? l.layerNum,
+          name: l.name,
+          isVisible: l.isVisible,
+          isCurrentLayer: (l.layerId ?? l.layerNum) === newId,
+        }));
+      await PluginFileAPI.modifyLayers(_filePath, _pageNum, updated);
+      await PluginCommAPI.reloadFile();
+
+      await PluginCommAPI.insertSticker(tmpPath);
+      try { await RNFS.unlink(tmpPath); } catch (_) {}
+
+      return `Moved element(s) to new layer ${newId + 1}`;
     }
   }
 
@@ -272,7 +348,11 @@ async function moveLassoElementsLayer(direction: 'up' | 'down'): Promise<string>
     if (targetIdx < 0 || targetIdx >= userLayerIds.length) continue;
     targetLayerMap.set(el.numInPage, userLayerIds[targetIdx]);
   }
-  if (targetLayerMap.size === 0) return direction === 'up' ? 'Already at top layer' : 'Already at bottom layer';
+  if (targetLayerMap.size === 0) {
+    const msg = direction === 'up' ? '已在最顶层' : '已在最底层';
+    NativeUIUtils.showErrorTipDialog(msg);
+    return direction === 'up' ? 'Already at top layer' : 'Already at bottom layer';
+  }
 
   const fullRes = await PluginFileAPI.getElements(_pageNum, _filePath) as any;
   if (!fullRes?.success || !fullRes.result) return 'Get page elements failed';
@@ -321,7 +401,7 @@ async function layerPrev(): Promise<string> {
 
   const userLayers = allLayers.filter((l: any) => l.id >= 0);
   const maxUserId = userLayers.length > 0 ? Math.max(...userLayers.map((l: any) => l.id)) : -1;
-  if (maxUserId >= 3) return 'Max 4 user layers';
+  if (maxUserId >= 3) { NativeUIUtils.showErrorTipDialog('已达到最大图层数'); return 'Max 4 user layers'; }
 
   const newId = maxUserId + 1;
   const ir = await PluginFileAPI.insertLayer(_filePath, _pageNum, {
@@ -351,8 +431,8 @@ async function layerNext(): Promise<string> {
   const current = allLayers.find((l: any) => l.isCurrentLayer) || allLayers[allLayers.length - 1];
   const currentId = current.id;
 
-  const below = allLayers.filter((l: any) => l.id < currentId).sort((a: any, b: any) => b.id - a.id);
-  if (below.length === 0) return 'Already at bottom layer';
+  const below = allLayers.filter((l: any) => l.id >= 0 && l.id < currentId).sort((a: any, b: any) => b.id - a.id);
+  if (below.length === 0) { NativeUIUtils.showErrorTipDialog('已在主图层，无法继续向下移动'); return 'Already at bottom layer'; }
 
   const target = below[0];
   const updated = allLayers
@@ -385,12 +465,25 @@ async function clipSave(slot: string): Promise<string> {
   try {
     const cntRes = await (PluginCommAPI as any).getLassoElementTypeCounts?.();
     const c = cntRes?.result;
+
+    if ((c?.titleNum ?? 0) > 0) {
+      NativeUIUtils.showErrorTipDialog('标题暂不支持剪贴板保存');
+      return 'Title clip not supported';
+    }
+
+    const linkCount = (c?.textLinkNum ?? 0) + (c?.trailLinkNum ?? 0) + (c?.todoLinkNum ?? 0);
+    if (linkCount > 0) {
+      NativeUIUtils.showErrorTipDialog('链接暂不支持剪贴板保存');
+      return 'Link clip not supported';
+    }
+
     const tbCount =
       (c?.normalTextBoxNum ?? 0) +
       (c?.digestTextBoxNum ?? 0) +
       (c?.digestTextBoxEditableNum ?? 0);
     if (tbCount > 0) {
-      return await clipSaveTextBox(slot);
+      NativeUIUtils.showErrorTipDialog('文本框暂不支持剪贴板保存');
+      return 'TextBox clip not supported';
     }
   } catch (e) {
     console.warn('[ToolActions]: getLassoElementTypeCounts failed, fall through to sticker:', e);
@@ -487,50 +580,6 @@ async function clipSave(slot: string): Promise<string> {
   return `Saved to clip ${slot}`;
 }
 
-async function clipSaveTextBox(slot: string): Promise<string> {
-  const name = `quickbar_clip_${slot}_${Date.now()}.textclip.json`;
-  const path = `${STICKER_DIR}/${name}`;
-
-  console.log('[ToolActions]: clipSaveTextBox slot=', slot, 'path=', path);
-
-  const res: any = await (PluginNoteAPI as any).getLassoText?.();
-  if (!res?.success || !Array.isArray(res.result) || res.result.length === 0) {
-    console.warn('[ToolActions]: getLassoText failed or empty:', res);
-    return `Save clip ${slot} failed (no textbox)`;
-  }
-
-  const payload = {
-    version: 1 as const,
-    kind: 'textbox' as const,
-    items: (res.result as any[]).map(tb => ({
-      textContentFull: tb.textContentFull ?? '',
-      textRect: tb.textRect,
-      fontSize: tb.fontSize,
-      fontPath: tb.fontPath,
-      textAlign: tb.textAlign,
-      textBold: tb.textBold,
-      textItalics: tb.textItalics,
-      textFrameWidthType: tb.textFrameWidthType,
-      textFrameStyle: tb.textFrameStyle,
-      textEditable: tb.textEditable,
-    })),
-  };
-
-  try {
-    await RNFS.writeFile(path, JSON.stringify(payload), 'utf8');
-  } catch (e) {
-    console.warn('[ToolActions]: writeFile textclip failed:', e);
-    return `Save clip ${slot} failed (write)`;
-  }
-
-  try { await PluginCommAPI.setLassoBoxState(2); } catch (_) {}
-
-  const clips = await loadClips();
-  clips[slot] = path;
-  await saveClips(clips);
-  return `Saved to clip ${slot}`;
-}
-
 async function clipPasteSticker(slot: string): Promise<string> {
   const clips = await loadClips();
   const stored = clips[slot];
@@ -556,13 +605,40 @@ async function clipPasteSticker(slot: string): Promise<string> {
           return `Paste clip ${slot} failed (empty textclip)`;
         }
         let okAll = true;
+        let unionRect = { left: Infinity, top: Infinity, right: -Infinity, bottom: -Infinity };
         for (const tb of items) {
+          console.log('[ToolActions] insertText input textRect:', JSON.stringify(tb.textRect));
           const r: any = await (PluginNoteAPI as any).insertText?.(tb);
+          console.log('[ToolActions] insertText result:', JSON.stringify(r));
           if (!r?.success) {
             okAll = false;
             console.warn('[ToolActions]: insertText failed:', r);
+          } else if (tb.textRect) {
+            unionRect.left = Math.min(unionRect.left, tb.textRect.left);
+            unionRect.top = Math.min(unionRect.top, tb.textRect.top);
+            unionRect.right = Math.max(unionRect.right, tb.textRect.right);
+            unionRect.bottom = Math.max(unionRect.bottom, tb.textRect.bottom);
           }
         }
+
+        if (unionRect.left < Infinity) {
+          try {
+            await new Promise(r => setTimeout(r, 500));
+
+            await PluginCommAPI.lassoElements({ left: 0, top: 0, right: 1, bottom: 1 });
+            await new Promise(r => setTimeout(r, 200));
+            const pad = 5;
+            const lassoTarget = {
+              left: unionRect.left - pad, top: unionRect.top - pad,
+              right: unionRect.right + pad, bottom: unionRect.bottom + pad,
+            };
+            console.log('[ToolActions] lassoElements target rect:', JSON.stringify(lassoTarget));
+            const lr: any = await PluginCommAPI.lassoElements(lassoTarget);
+            console.log('[ToolActions] lassoElements result:', JSON.stringify(lr));
+            await (PluginCommAPI as any).setLassoBoxState?.(0);
+          } catch (e) { console.warn('[ToolActions] lassoElements after textclip paste:', e); }
+        }
+
         return okAll ? `Pasted clip ${slot}` : `Paste clip ${slot} partial`;
       } catch (e) {
         console.warn('[ToolActions]: textclip paste error:', e);
@@ -629,6 +705,7 @@ export function attachModeListeners(): void {
         FloatingBubbleBridge.hide();
         break;
       case 'send_ai':
+      case 'voice_transcribe':
         stopAiMode();
         break;
     }
@@ -639,3 +716,4 @@ export function detachModeListeners(): void {
   modeExitSub?.remove();
   modeExitSub = null;
 }
+

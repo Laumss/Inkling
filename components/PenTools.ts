@@ -1,88 +1,9 @@
+
+
 import { PluginCommAPI, PluginFileAPI } from 'sn-plugin-lib';
 import { FileLogger } from './FileLogger';
 import FloatingToolbarBridge from './FloatingToolbarBridge';
 import { LassoExtractor } from './LassoExtractor';
-
-const PG_TAG = '[PenGuard]';
-
-let snapshotNums: Set<number> | null = null;
-let snapshotPath: string | null = null;
-let snapshotPage: number | null = null;
-
-export const PenGuard = {
-  async begin(): Promise<void> {
-    try {
-      const [fpRes, pgRes]: any[] = await Promise.all([
-        PluginCommAPI.getCurrentFilePath(),
-        PluginCommAPI.getCurrentPageNum(),
-      ]);
-      if (!fpRes?.success || !fpRes.result) { PenGuard.reset(); return; }
-      if (!pgRes?.success || typeof pgRes.result !== 'number') { PenGuard.reset(); return; }
-
-      snapshotPath = fpRes.result;
-      snapshotPage = pgRes.result;
-
-      const numListRes: any = await PluginFileAPI.getElementNumList(snapshotPath, snapshotPage);
-      if (!numListRes?.success || !Array.isArray(numListRes.result)) { PenGuard.reset(); return; }
-
-      snapshotNums = new Set(numListRes.result as number[]);
-      console.log(PG_TAG, `begin: path=${snapshotPath} page=${snapshotPage} elements=${snapshotNums.size}`);
-    } catch (e) {
-      console.error(PG_TAG, 'begin error:', e);
-      PenGuard.reset();
-    }
-  },
-
-  async end(): Promise<void> {
-    if (snapshotNums === null || !snapshotPath || snapshotPage === null) return;
-
-    const prevNums = snapshotNums;
-    const path = snapshotPath;
-    const page = snapshotPage;
-    PenGuard.reset();
-
-    try {
-      const numListRes: any = await PluginFileAPI.getElementNumList(path, page);
-      if (!numListRes?.success || !Array.isArray(numListRes.result)) return;
-
-      const currentNums = numListRes.result as number[];
-      const newNums = currentNums.filter(n => !prevNums.has(n));
-      if (newNums.length === 0) return;
-
-      const toDelete: number[] = [];
-      for (const num of newNums) {
-        try {
-          const elRes: any = await PluginFileAPI.getElement(path, page, num);
-          if (!elRes?.success) continue;
-          const el = elRes.result;
-          if (el.type === 0) {
-            toDelete.push(num);
-            try { await el.recycle?.(); } catch (_) {}
-          }
-        } catch (_) {}
-      }
-
-      if (toDelete.length === 0) return;
-      console.log(PG_TAG, `end: deleting ${toDelete.length} leaked stroke(s):`, toDelete);
-      const delRes: any = await PluginFileAPI.deleteElements(path, page, toDelete);
-      if (delRes?.success) {
-        await PluginCommAPI.reloadFile();
-      }
-    } catch (e) {
-      console.error(PG_TAG, 'end error:', e);
-    }
-  },
-
-  reset(): void {
-    snapshotNums = null;
-    snapshotPath = null;
-    snapshotPage = null;
-  },
-
-  isActive(): boolean {
-    return snapshotNums !== null;
-  },
-};
 
 const PL_TAG = '[PenLasso]';
 const BBOX_PADDING_PX = 100;
@@ -100,10 +21,6 @@ export const PenLasso = {
     wasAlreadyLocked = FloatingToolbarBridge.isPenLockedSync();
     if (!wasAlreadyLocked) FloatingToolbarBridge.engagePenLock();
 
-    try { await PenGuard.begin(); } catch (e) {
-      console.warn(PL_TAG, 'PenGuard.begin failed:', e);
-    }
-
     bboxSub = FloatingToolbarBridge.onPenLassoBbox(async (event) => {
       if (!armed) return;
       armed = false;
@@ -115,7 +32,6 @@ export const PenLasso = {
       if (!armed) return;
       armed = false;
       PenLasso.disarm();
-      PenGuard.end().catch(() => {});
       if (!wasAlreadyLocked) {
         FloatingToolbarBridge.releasePenLock();
         FloatingToolbarBridge.disablePenBlock();
@@ -138,7 +54,6 @@ export const PenLasso = {
 
 async function handleBbox(bbox: { left: number; top: number; right: number; bottom: number }): Promise<void> {
   try {
-    await PenGuard.end();
     if (!wasAlreadyLocked) {
       FloatingToolbarBridge.releasePenLock();
       FloatingToolbarBridge.disablePenBlock();

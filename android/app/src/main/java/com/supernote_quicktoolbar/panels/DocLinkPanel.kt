@@ -11,6 +11,7 @@ import android.widget.*
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.ReactApplicationContext
 import com.supernote_quicktoolbar.ui_common.PanelBase
+import com.supernote_quicktoolbar.ui_common.PanelCheckbox
 import com.supernote_quicktoolbar.ui_common.PanelChips
 import com.supernote_quicktoolbar.ui_common.PanelHeader
 import com.supernote_quicktoolbar.ui_common.PanelScrollHost
@@ -36,7 +37,7 @@ class DocLinkPanel(
             return inst
         }
 
-        private val DOC_EXTS = setOf("epub", "pdf", "cbz", "doc", "docx", "txt", "djvu", "mobi", "fb2")
+        val DOC_EXTS = setOf("epub", "pdf", "cbz", "doc", "docx", "txt", "djvu", "mobi", "fb2")
         private val ALLOWED_ROOT_FOLDERS = setOf(
             "Document", "EXPORT", "INBOX", "LocalSend", "Export", "MyStyle", "Note", "SCREENSHOT", "Books", "Download"
         )
@@ -60,10 +61,7 @@ class DocLinkPanel(
     private var insertBtn: SelectionButton? = null
     private var chips: PanelChips? = null
 
-    private var multiSelectContainer: LinearLayout? = null
-    private var checkboxBg: View? = null
-    private var checkboxMark: TextView? = null
-    private var checkboxLabel: TextView? = null
+    private var multiCheckbox: PanelCheckbox? = null
 
     fun show() {
         currentInstance = this
@@ -73,6 +71,14 @@ class DocLinkPanel(
         currentBrowsePath = "/sdcard/Document"
         showPanel()
         handler.post { refreshContent() }
+    }
+
+    fun onFileReceived() {
+        handler.post {
+            if (rootView != null) {
+                rebuildList()
+            }
+        }
     }
 
     override fun buildContent(root: LinearLayout) {
@@ -92,44 +98,11 @@ class DocLinkPanel(
         val insertTv = makeFilledBtn(NativeLocale.t("doc_insert_link")) { doInsertLink() }
         insertBtn = SelectionButton(insertTv)
 
-        val cbContainer = LinearLayout(reactContext).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-            alpha = 0.4f
-        }
-        val checkSize = dp(24)
-        val cbFrame = FrameLayout(reactContext).apply {
-            layoutParams = LinearLayout.LayoutParams(checkSize, checkSize).apply { rightMargin = dp(8) }
-        }
-        checkboxBg = View(reactContext).apply {
-            layoutParams = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
-            background = GradientDrawable().apply {
-                setColor(Color.WHITE)
-                setStroke(dp(2), Color.parseColor("#999999"))
-                cornerRadius = dp(3).toFloat()
-            }
-        }
-        cbFrame.addView(checkboxBg)
-        checkboxMark = TextView(reactContext).apply {
-            text = "✓"; textSize = 15f; setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER; visibility = View.GONE
-            layoutParams = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
-        }
-        cbFrame.addView(checkboxMark)
-        cbContainer.addView(cbFrame)
-        checkboxLabel = TextView(reactContext).apply {
-            text = NativeLocale.t("multi_select"); textSize = 15f
-            setTextColor(Color.parseColor("#999999"))
-        }
-        cbContainer.addView(checkboxLabel)
-        cbContainer.setOnClickListener { toggleMultiSelect() }
-        multiSelectContainer = cbContainer
+        val checkbox = PanelCheckbox(reactContext, NativeLocale.t("multi_select")) { toggleMultiSelect() }
+        multiCheckbox = checkbox
 
         root.addView(makeBottomBar(
-            leftFlex = cbContainer,
+            leftFlex = checkbox.view,
             rightButtons = listOf(
                 makeOutlinedBtn(NativeLocale.t("cancel")) { closeAndRestore() },
                 insertTv
@@ -140,7 +113,7 @@ class DocLinkPanel(
     override fun onHide() {
         contentGrid = null; scrollHost = null
         insertBtn = null; chips = null
-        multiSelectContainer = null; checkboxBg = null; checkboxMark = null; checkboxLabel = null
+        multiCheckbox = null
         currentInstance = null
     }
 
@@ -209,6 +182,8 @@ class DocLinkPanel(
                 setOnClickListener {
                     if (item.isDir) {
                         currentBrowsePath = item.path
+                        chips?.setSelection(null)
+                        chips?.rebuildChips()
                         refreshContent()
                     } else if (multiSelectMode) {
                         if (item.path in multiSelectedDocPaths) multiSelectedDocPaths.remove(item.path)
@@ -226,7 +201,7 @@ class DocLinkPanel(
 
             row.addView(TextView(reactContext).apply {
                 text = if (item.isDir) "[DIR]" else getDocIcon(item.name)
-                textSize = if (item.isDir) 12f else 14f
+                textSize = sp(if (item.isDir) 12f else 14f)
                 setTextColor(if (item.isDir) Color.parseColor("#666666") else Color.BLACK)
                 typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
                 gravity = Gravity.CENTER
@@ -242,13 +217,13 @@ class DocLinkPanel(
                 layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
             }
             infoCol.addView(TextView(reactContext).apply {
-                text = item.name; textSize = 13f; setTextColor(Color.BLACK)
+                text = item.name; textSize = sp(13f); setTextColor(Color.BLACK)
                 typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
                 setSingleLine(true); ellipsize = android.text.TextUtils.TruncateAt.END
             })
             if (!item.isDir) {
                 infoCol.addView(TextView(reactContext).apply {
-                    text = formatSize(item.size); textSize = 10f
+                    text = formatSize(item.size); textSize = sp(10f)
                     setTextColor(Color.parseColor("#999999"))
                 })
             }
@@ -256,7 +231,7 @@ class DocLinkPanel(
 
             if (isSelected) {
                 row.addView(TextView(reactContext).apply {
-                    text = "✓"; textSize = 16f; setTextColor(Color.BLACK)
+                    text = "✓"; textSize = sp(16f); setTextColor(Color.BLACK)
                     typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
                     gravity = Gravity.CENTER
                     layoutParams = LinearLayout.LayoutParams(dp(28), dp(28))
@@ -326,30 +301,20 @@ class DocLinkPanel(
     private fun updateMultiSelectUI() {
         if (multiSelectMode) {
             val count = multiSelectedDocPaths.size
-            checkboxBg?.background = GradientDrawable().apply {
-                setColor(Color.BLACK); cornerRadius = dp(3).toFloat()
-            }
-            checkboxMark?.visibility = View.VISIBLE
-            checkboxLabel?.text = "${NativeLocale.t("multi_select")} ($count)"
-            checkboxLabel?.setTextColor(Color.BLACK)
-            multiSelectContainer?.alpha = 1f
+            multiCheckbox?.setChecked(true)
+            multiCheckbox?.setLabel("${NativeLocale.t("multi_select")} ($count)")
+            multiCheckbox?.setActive(true)
             insertBtn?.update(count > 0)
         } else {
-            checkboxBg?.background = GradientDrawable().apply {
-                setColor(Color.WHITE)
-                setStroke(dp(2), Color.parseColor("#999999"))
-                cornerRadius = dp(3).toFloat()
-            }
-            checkboxMark?.visibility = View.GONE
-            checkboxLabel?.text = NativeLocale.t("multi_select")
-            checkboxLabel?.setTextColor(Color.parseColor("#999999"))
+            multiCheckbox?.setChecked(false)
+            multiCheckbox?.setLabel(NativeLocale.t("multi_select"))
             updateCheckboxEnabled()
         }
     }
 
     private fun updateCheckboxEnabled() {
         val enabled = multiSelectMode || selectedDocPath != null
-        multiSelectContainer?.alpha = if (enabled) 1f else 0.4f
+        multiCheckbox?.setActive(enabled)
     }
 
     private fun getDocIcon(name: String): String = when (name.substringAfterLast('.').lowercase()) {

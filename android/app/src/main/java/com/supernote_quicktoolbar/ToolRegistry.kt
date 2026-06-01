@@ -40,6 +40,12 @@ object ToolRegistry {
         AiBubbleModule.hideStatic()
     }
 
+    fun handleRotation(): Boolean {
+        var restoreToolbar = false
+        for (panel in activePanels) if (panel.onRotation()) restoreToolbar = true
+        return restoreToolbar
+    }
+
     fun suspendAll() {
         ImagePanel.currentInstance?.suspendVisibility()
         DocLinkPanel.currentInstance?.suspendVisibility()

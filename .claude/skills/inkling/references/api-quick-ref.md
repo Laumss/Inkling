@@ -373,6 +373,39 @@ import { PointUtils } from 'sn-plugin-lib';
 
 ---
 
+## §6b NativeUIUtils (Native Dialogs)
+
+```ts
+import { NativeUIUtils } from 'sn-plugin-lib';
+```
+
+Calls through to the PluginHost's `HostUIAPI`, which renders **Supernote's native RattaDialog** — style is identical to the system file manager dialogs.
+
+| Method | Signature | Notes |
+|--------|-----------|-------|
+| `showErrorTipDialog` | `(tag: string) → void` | Show a simple tip/error dialog. Fire-and-forget, no return value. |
+| `showRattaDialog` | `(tip: string, leftBtnTxt: string, rightBtnTxt: string, isSuccess: boolean) → Promise<boolean>` | Two-button confirm dialog. Returns `true` if right button (confirm) pressed, `false` if left (cancel). `isSuccess` controls icon style (true=success, false=warning). |
+
+**Usage examples:**
+
+```ts
+// Simple error/info tip
+NativeUIUtils.showErrorTipDialog('链接暂不支持剪贴板保存');
+
+// Confirm dialog with user choice
+const confirmed = await NativeUIUtils.showRattaDialog(
+  '确定要删除这3项吗？删除后将不可恢复',
+  '取消',    // left button
+  '确定',    // right button
+  false      // warning style
+);
+if (confirmed) { /* proceed */ }
+```
+
+**Prefer native dialogs over custom overlays** — they match the system visual style and the PluginHost handles lifecycle/cleanup automatically.
+
+---
+
 ## §7 EventType & Touch Types (added in 0.1.43)
 
 ```ts
