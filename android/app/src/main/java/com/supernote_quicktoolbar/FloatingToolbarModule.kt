@@ -1165,7 +1165,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     LinearLayout.LayoutParams.WRAP_CONTENT,
                     LinearLayout.LayoutParams.WRAP_CONTENT
                 )
-                val p = dpToPx(PANEL_PAD_DP)
+                val p = dpToPx(BORDER_WIDTH + PANEL_PAD_DP) - borderPx
                 setPadding(p, p, dpToPx(2), p)
             }
             bodyRow.addView(toolContainer)
@@ -1322,7 +1322,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 layoutParams = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
                 )
-                val p = dpToPx(PANEL_PAD_DP); setPadding(p, p, p, p)
+                val p = dpToPx(BORDER_WIDTH + PANEL_PAD_DP) - borderPx; setPadding(p, p, p, p)
             }
             expandedRoot!!.addView(toolContainer)
             rebuildButtons()
@@ -1481,7 +1481,8 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
         val ctx = reactApplicationContext
         val btnSz = dpToPx(if (orientation == "vertical") 48 else BTN_SIZE_DP)
-        val gap   = dpToPx(if (orientation == "vertical") 3 else BTN_GAP_DP)
+        val stride = dpToPx(if (orientation == "vertical") 48 + 3 else BTN_SIZE_DP + BTN_GAP_DP)
+        val gap    = stride - btnSz
 
         val n = tools.size
 
@@ -1522,7 +1523,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             }
 
             view.layoutParams = LinearLayout.LayoutParams(btnSz, btnSz).apply {
-                marginStart = gap / 2; marginEnd = gap / 2
+                marginStart = gap / 2; marginEnd = gap - gap / 2
             }
             view.setOnClickListener { handleToolTap(tool, view) }
             view.setOnLongClickListener {

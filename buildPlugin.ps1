@@ -1305,4 +1305,3 @@ function Resolve-ClassesDir {
 
 # Execute main function
 Main
-adb push "Y:\Inkling\build\outputs\Inkling.snplg" "/storage/emulated/0/MyStyle/plugin_inkling.snplg" 2>&1 
