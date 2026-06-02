@@ -236,9 +236,8 @@ class LassoScreenshotPanel(
                 handler.post {
                     if (croppedPath != null) {
                         toolbarModule.onAppendPageCaptured(croppedPath, cx, cy, cw, ch, bmpW, bmpH)
-                    } else {
-                        emitCloseAndRestore()
                     }
+                    emitCloseAndRestore()
                 }
             } else {
                 val bbox = stageAndBroadcast(srcPath, imgPoints)
@@ -337,13 +336,13 @@ class LassoScreenshotPanel(
                     }
                 })
         } catch (_: Exception) {}
-        if (cameFromBubble) {
-            handler.postDelayed({
-                toolbarModule.restoreToolbar()
+        handler.postDelayed({
+            toolbarModule.restoreToolbar()
+            if (cameFromBubble) {
                 FloatingBubbleModule.reshowLast(reactContext)
                 AiBubbleModule.reshowLast(reactContext)
-            }, 350)
-        }
+            }
+        }, 350)
     }
 }
 

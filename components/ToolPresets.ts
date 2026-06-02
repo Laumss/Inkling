@@ -194,7 +194,7 @@ export async function warmupCache(): Promise<void> {
   _clipCache = clips;
 }
 
-const DEFAULT_EXCLUDED_TOOL_IDS = new Set(['send_ai', 'voice_transcribe']);
+const DEFAULT_EXCLUDED_TOOL_IDS = new Set(['voice_transcribe']);
 
 export async function loadConfig(): Promise<ConfigData> {
   try {
