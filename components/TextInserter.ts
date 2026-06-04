@@ -90,6 +90,8 @@ export class TextInserter {
   private pageNextLeft = new Map<number, number>();
 
   private _bubbleAnchorTop: number = -1;
+  private _lassoAnchorTop: number = -1;
+  private _lassoAnchorLeft: number = -1;
 
   private timerRef: ReturnType<typeof setTimeout> | null = null;
   private activeMode: InsertMode | null = null;
@@ -248,6 +250,12 @@ export class TextInserter {
     console.log('[TextInserter]: forceSetNextLeft page=', this.targetPage, 'left=', left);
   }
 
+  setLassoAnchor(top: number, left: number) {
+    this._lassoAnchorTop = top;
+    this._lassoAnchorLeft = left;
+    console.log('[TextInserter]: setLassoAnchor top=', top, 'left=', left);
+  }
+
   getTargetPage(): number { return this.targetPage; }
 
   relocateTo(page: number): void {
@@ -258,6 +266,10 @@ export class TextInserter {
 
   getNextTop(): number {
     return this.pageNextTop.get(this.targetPage) ?? this._topMargin();
+  }
+
+  getNextLeft(): number | undefined {
+    return this.pageNextLeft.get(this.targetPage);
   }
 
   getPageSize(): { width: number; height: number } | null {
@@ -550,7 +562,23 @@ export class TextInserter {
     const emptyLineCount = rawLines.filter(l => l.trim().length === 0).length;
     text = text.replace(/^(\d+)\./gm, '$1\u200B.');
     text = text.replace(/\*/g, '');
-    text = text.split('\n').filter(line => line.trim().length > 0).join('\n');
+    text = text.replace(/`/g, '');
+    text = text.split('\n').map(line => {
+      const t = line.trim();
+      if (t.startsWith('|') && t.endsWith('|')) {
+        const inner = t.slice(1, -1);
+        if (/^[-\s|]+$/.test(inner)) return null;
+        return inner.split('|').map(c => c.trim()).filter(c => c.length > 0).join('  ');
+      }
+      return line;
+    }).filter(line => {
+      if (line === null) return false;
+      const t = line.trim();
+      if (t.length === 0) return false;
+      if (/^-{2,}$/.test(t)) return false;
+      if (/^#{1,3}\s*(Human|Assistant)\s*:?/i.test(t)) return false;
+      return true;
+    }).join('\n');
     const cleanedLineCount = text.split('\n').length;
     FileLogger.logEvent('TextPreprocess',
       `rawLines=${rawLineCount} emptyLines=${emptyLineCount} cleanedLines=${cleanedLineCount} textLen=${text.length}`);
@@ -588,7 +616,13 @@ export class TextInserter {
             this.targetPage, '→', this.currentPage);
           FileLogger.logEvent('PageAutoRelocate',
             `target=${this.targetPage} → current=${this.currentPage}`);
+          const prevLeft = this.pageNextLeft.get(this.targetPage);
           this.relocateTo(this.currentPage);
+          const relocTop = this._bubbleAnchorTop > 0 ? this._bubbleAnchorTop : this._topMargin();
+          this.pageNextTop.set(this.currentPage, relocTop);
+          if (prevLeft !== undefined) this.pageNextLeft.set(this.currentPage, prevLeft);
+          console.log('[TextInserter]: relocate set top=', relocTop, 'bubbleAnchor=', this._bubbleAnchorTop);
+          this.onPositionChanged?.(this.currentPage, relocTop, itemSource, true);
         }
       }
     } catch (e) {
@@ -678,7 +712,7 @@ export class TextInserter {
 
         if (splitFitting && splitFitting.trim().length > 0) {
           const fitTop = top;
-          const fitBottom = Math.min(ps.height, fitTop + splitHeight);
+          const fitBottom = Math.min(ps.height, fitTop + splitHeight + 9);
           try {
             const fitRes = await sdkCall(
               PluginNoteAPI.insertText({
@@ -830,7 +864,7 @@ export class TextInserter {
         const effectiveBottom = (actualBottom !== null
           && actualBottom > top
           && actualBottom <= maxReasonableBottom)
-          ? actualBottom
+          ? Math.max(actualBottom, bottom)
           : bottom;
         const newNextTop = effectiveBottom + layout.boxGap;
         const currentNextTop = this.pageNextTop.get(this.targetPage) ?? 0;

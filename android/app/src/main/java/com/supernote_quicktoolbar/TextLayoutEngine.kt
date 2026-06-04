@@ -25,6 +25,7 @@ class TextLayoutEngine(reactContext: ReactApplicationContext) :
         private const val WIDTH_ADJUSTMENT = 30
 
         private const val HEIGHT_SAFETY_FACTOR = 1.15
+        private const val BOTTOM_PAD = 50
     }
 
     private data class ModeConfig(
@@ -87,7 +88,7 @@ class TextLayoutEngine(reactContext: ReactApplicationContext) :
             val gapCount = if (cfg.newlineGapLines > 0 && segments.size > 1) segments.size - 1 else 0
             val extraGap = ceil(gapCount * cfg.newlineGapLines * FONT_SIZE * cfg.lineHeightRatio).toInt()
 
-            val boxH = ceil((nativeHeight + extraGap) * HEIGHT_SAFETY_FACTOR).toInt()
+            val boxH = ceil((nativeHeight + extraGap) * HEIGHT_SAFETY_FACTOR).toInt() + BOTTOM_PAD
 
             val occupied = parseOccupiedRanges(occupiedArray)
             val top = skipOccupiedArea(nextTop, boxH, max(cfg.boxGap, 10), occupied)
@@ -151,7 +152,7 @@ class TextLayoutEngine(reactContext: ReactApplicationContext) :
                 val segments = text.split("\n").filter { it.trim().isNotEmpty() }
                 val gapCount = if (cfg.newlineGapLines > 0 && segments.size > 1) segments.size - 1 else 0
                 val extraGap = ceil(gapCount * cfg.newlineGapLines * FONT_SIZE * cfg.lineHeightRatio).toInt()
-                val boxH = ceil((nativeHeight + extraGap) * HEIGHT_SAFETY_FACTOR).toInt()
+                val boxH = ceil((nativeHeight + extraGap) * HEIGHT_SAFETY_FACTOR).toInt() + BOTTOM_PAD
 
                 val top = skipOccupiedArea(nextTop, boxH, max(cfg.boxGap, 10), occupied)
                 val bottom = min(top + boxH, pageHeight - topMargin)
