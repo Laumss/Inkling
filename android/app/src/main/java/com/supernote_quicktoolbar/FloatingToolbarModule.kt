@@ -974,7 +974,75 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         val titleH   = dpToPx(TITLE_ROW_H_DP)
         val titleSep = dpToPx(TITLE_SEP_DP)
 
-        expandedRoot = LinearLayout(ctx).apply {
+        expandedRoot = object : LinearLayout(ctx) {
+            override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
+                when (ev.action) {
+                    MotionEvent.ACTION_DOWN -> {
+                        val lp = layoutParams as? WindowManager.LayoutParams ?: return false
+                        startX = lp.x; startY = lp.y
+                        startRawX = ev.rawX; startRawY = ev.rawY
+                        isDragging = false
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        if (!isDragging && (abs(ev.rawX - startRawX) > 10 || abs(ev.rawY - startRawY) > 10)) {
+                            isDragging = true
+                            return true
+                        }
+                    }
+                }
+                return false
+            }
+
+            override fun onTouchEvent(ev: MotionEvent): Boolean {
+                when (ev.action) {
+                    MotionEvent.ACTION_DOWN -> {
+                        val lp = layoutParams as? WindowManager.LayoutParams ?: return true
+                        startX = lp.x; startY = lp.y
+                        startRawX = ev.rawX; startRawY = ev.rawY
+                        isDragging = false
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        val lp = layoutParams as? WindowManager.LayoutParams ?: return true
+                        val dx = ev.rawX - startRawX; val dy = ev.rawY - startRawY
+                        if (!isDragging && (abs(dx) > 10 || abs(dy) > 10)) {
+                            isDragging = true
+                        }
+                        if (isDragging) {
+                            lp.x = startX + dx.toInt()
+                            lp.y = startY + dy.toInt()
+                            try { windowManager?.updateViewLayout(rootView, lp) } catch (_: Exception) {}
+                        }
+                    }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        if (isDragging) {
+                            refreshScreenDimensions()
+                            val lp = layoutParams as? WindowManager.LayoutParams ?: return true
+                            val vw = expandedRoot?.measuredWidth ?: 0
+                            if (lp.x <= EDGE_COLLAPSE_THRESHOLD) {
+                                dockSide = "left"
+                                savePositionToPrefs(lp.x, lp.y)
+                                switchToCollapsed()
+                            } else if (screenWidth - (lp.x + vw) <= EDGE_COLLAPSE_THRESHOLD) {
+                                dockSide = "right"
+                                savePositionToPrefs(lp.x, lp.y)
+                                switchToCollapsed()
+                            } else {
+                                snapToEdge()
+                                val snapLp = layoutParams as? WindowManager.LayoutParams
+                                savePositionToPrefs(snapLp!!.x, snapLp.y)
+                                resetAutoCollapse()
+                                emitEvent("onToolbarDragEnd", Arguments.createMap().apply {
+                                    val endLp = layoutParams as? WindowManager.LayoutParams
+                                    putInt("x", endLp!!.x)
+                                    putInt("y", endLp.y)
+                                })
+                            }
+                        }
+                    }
+                }
+                return true
+            }
+        }.apply {
             orientation = LinearLayout.VERTICAL
             background = GradientDrawable().apply {
                 setColor(Color.WHITE)
@@ -1343,56 +1411,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             x = if (stickyX >= 0) stickyX else dpToPx(24)
             y = if (stickyY >= 0) stickyY else screenHeight / 2 - dpToPx(80)
         }
-
-        val dragTouchListener = View.OnTouchListener { _, event ->
-            when (event.action) {
-                MotionEvent.ACTION_DOWN -> {
-                    val lp = layoutParams ?: return@OnTouchListener false
-                    startX = lp.x; startY = lp.y
-                    startRawX = event.rawX; startRawY = event.rawY
-                    isDragging = false
-                    true
-                }
-                MotionEvent.ACTION_MOVE -> {
-                    val lp = layoutParams ?: return@OnTouchListener false
-                    val dx = event.rawX - startRawX; val dy = event.rawY - startRawY
-                    if (!isDragging && (abs(dx) > 10 || abs(dy) > 10)) {
-                        isDragging = true
-                    }
-                    if (isDragging) {
-                        lp.x = startX + dx.toInt()
-                        lp.y = startY + dy.toInt()
-                        try { windowManager?.updateViewLayout(rootView, lp) } catch (_: Exception) {}
-                    }; true
-                }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    if (isDragging) {
-                        refreshScreenDimensions()
-                        val lp = layoutParams ?: return@OnTouchListener true
-                        val vw = expandedRoot?.measuredWidth ?: 0
-                        if (lp.x <= EDGE_COLLAPSE_THRESHOLD) {
-                            dockSide = "left"
-                            savePositionToPrefs(lp.x, lp.y)
-                            switchToCollapsed()
-                        } else if (screenWidth - (lp.x + vw) <= EDGE_COLLAPSE_THRESHOLD) {
-                            dockSide = "right"
-                            savePositionToPrefs(lp.x, lp.y)
-                            switchToCollapsed()
-                        } else {
-                            snapToEdge()
-                            savePositionToPrefs(layoutParams!!.x, layoutParams!!.y)
-                            resetAutoCollapse()
-                            emitEvent("onToolbarDragEnd", Arguments.createMap().apply {
-                                putInt("x", layoutParams!!.x); putInt("y", layoutParams!!.y)
-                            })
-                        }
-                    }; true
-                }
-                else -> false
-            }
-        }
-
-        expandedRoot!!.setOnTouchListener(dragTouchListener)
 
         rootView = expandedRoot
         try {

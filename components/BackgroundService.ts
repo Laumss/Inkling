@@ -227,8 +227,13 @@ export function ensureInit(): void {
         if (isPageChange) {
           const ps = _textInserter?.getPageSize();
           if (ps) { FloatingBubbleBridge.setPageHeight(ps.height); FloatingBubbleBridge.setPageWidth(ps.width); }
+          const left = _textInserter?.getNextLeft() ?? 0;
+          _aiPositionLocked = true;
+          FloatingBubbleBridge.showAt(_getBubbleStatusText(), left, nextTop);
+          console.log('[BackgroundService]: pageChange showAt left=', left, 'top=', nextTop);
+        } else {
+          FloatingBubbleBridge.updateText(_getBubbleStatusText());
         }
-        FloatingBubbleBridge.updateText(_getBubbleStatusText());
       }
 
     },
@@ -633,7 +638,12 @@ export async function handleAiSend(): Promise<void> {
       console.warn('[BackgroundService]: setLassoBoxState failed (non-fatal):', e);
     }
 
+    const anchorRect = extracted.lassoRect ?? extracted.lastTextBoxRect;
+
     if (_textInserter) {
+      if (anchorRect) {
+        _textInserter.setLassoAnchor(anchorRect.bottom + AI_REPLY_GAP_PX, anchorRect.left);
+      }
 
       if (_textInserter.isPaused()) {
         _textInserter.resume();
@@ -652,7 +662,6 @@ export async function handleAiSend(): Promise<void> {
             const ps = _textInserter.getPageSize();
             if (ps) { FloatingBubbleBridge.setPageHeight(ps.height); FloatingBubbleBridge.setPageWidth(ps.width); }
 
-            const anchorRect = extracted.lassoRect ?? extracted.lastTextBoxRect;
             if (anchorRect) {
               console.log('[BackgroundService]: showAt lasso anchor left=', anchorRect.left, 'bottom=', anchorRect.bottom);
               FloatingBubbleBridge.showAt(
@@ -664,6 +673,21 @@ export async function handleAiSend(): Promise<void> {
               FloatingBubbleBridge.show(_getBubbleStatusText());
             }
             syncBubbleActionsToNative();
+          }
+        }
+      } else {
+        if (anchorRect) {
+          _textInserter.forceSetNextTop(anchorRect.bottom + AI_REPLY_GAP_PX);
+          _textInserter.forceSetNextLeft(anchorRect.left);
+          console.log('[BackgroundService]: relocate running inserter to lasso anchor left=', anchorRect.left, 'top=', anchorRect.bottom + AI_REPLY_GAP_PX);
+
+          if (FloatingBubbleBridge.isAvailable) {
+            _aiPositionLocked = false;
+            FloatingBubbleBridge.showAt(
+              _getBubbleStatusText(),
+              anchorRect.left,
+              anchorRect.bottom,
+            );
           }
         }
       }
