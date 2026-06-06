@@ -258,7 +258,7 @@ function App(): React.JSX.Element {
       const result = await executeAction(toolAction);
       console.log('[App]: tool result:', result);
 
-      if (toolAction === 'send_ai' && result === 'AI receive: ON') {
+      if (toolAction === 'voice_transcribe' && result === 'AI receive: ON') {
         if (hasPermissionRef.current) {
           FloatingToolbarBridge.show(injectClipStatus(toolsRef.current, clipsRef.current, getActiveMode()));
         }
@@ -275,7 +275,7 @@ function App(): React.JSX.Element {
 
     const toolModeExitSub = FloatingToolbarBridge.onToolModeExit(async ({ toolAction }) => {
       console.log('[App]: onToolModeExit:', toolAction);
-      if (toolAction === 'send_ai') return;
+      if (toolAction === 'voice_transcribe') return;
       await executeAction(toolAction);
     });
 
@@ -491,15 +491,16 @@ function App(): React.JSX.Element {
     const nativeInsertSub = DeviceEventEmitter.addListener('nativeInsertImage', async (evt: {
       path: string;
       fromQueue?: boolean;
+      fromInsertNext?: boolean;
       cacheBaseName?: string;
       replaceNotePath?: string;
       replacePageNum?: number;
       replaceNumInPage?: number;
     }) => {
-      const { path, fromQueue, cacheBaseName, replaceNotePath, replacePageNum, replaceNumInPage } = evt;
+      const { path, fromQueue, fromInsertNext, cacheBaseName, replaceNotePath, replacePageNum, replaceNumInPage } = evt;
       const now = Date.now();
       const elapsed = now - lastInsertTime;
-      console.log('[INSERT-DBG/App] nativeInsertImage event, path=', path, 'elapsed=', elapsed, 'fromQueue=', fromQueue);
+      console.log('[INSERT-DBG/App] nativeInsertImage event, path=', path, 'elapsed=', elapsed, 'fromInsertNext=', fromInsertNext);
       if (!fromQueue && elapsed < INSERT_DEDUP_MS) {
         console.log('[INSERT-DBG/App] skipped (dedup, elapsed=' + elapsed + 'ms)');
         return;
@@ -509,21 +510,20 @@ function App(): React.JSX.Element {
       if (PluginNoteAPI) {
         console.log('[INSERT-DBG/App] calling PluginNoteAPI.insertImage');
         try {
+          try { await (PluginCommAPI as any).setLassoBoxState?.(2); } catch (_le) { /* 首张无套索，忽略 */ }
           const result = PluginNoteAPI.insertImage(path);
           console.log('[INSERT-DBG/App] insertImage returned:', result);
           if (result && typeof result.then === 'function') {
             result.then(async (r: any) => {
               console.log('[INSERT-DBG/App] insertImage promise resolved:', r);
-              const isQueuePath = typeof path === 'string' && path.includes('/.plugin_staging/queue/');
-              if (r && r.success && isQueuePath) {
-                console.log('[INSERT-DBG/App] insert succeeded → deleting queue file');
+              if (r && r.success && fromInsertNext) {
+                console.log('[INSERT-DBG/App] insertNext succeeded → deleting file');
                 FloatingToolbarBridge.deleteQueueFile(path).then(d =>
                   console.log('[INSERT-DBG/App] queue file delete result:', d)
                 );
               } else if (!r || !r.success) {
-                console.warn('[INSERT-DBG/App] insert FAILED, keeping queue file:', r?.error);
+                console.warn('[INSERT-DBG/App] insert FAILED, keeping file:', r?.error);
               }
-
             }).catch((e: unknown) => console.error('[INSERT-DBG/App] insertImage promise rejected:', e));
           }
         } catch (e) {
@@ -909,11 +909,9 @@ function App(): React.JSX.Element {
 
             <View style={st.bottomBar}>
               <Pressable onPress={() => {
-                const next = toolbarOrientation === 'vertical' ? 'horizontal' : 'vertical';
-                (FloatingToolbarBridge as any).setOrientation?.(next);
-                setToolbarOrientation(next);
+                FloatingToolbarBridge.dockToEdge();
               }} style={st.btnGhost}>
-                <Text style={st.btnGhostT}>{toolbarOrientation === 'vertical' ? t('orient_v') : t('orient_h')}</Text>
+                <Text style={st.btnGhostT}>{t('dock_to_edge')}</Text>
               </Pressable>
               <Pressable onPress={collapseAll} style={st.btnLine}><Text style={st.btnLineT}>{t('collapse')}</Text></Pressable>
               <Pressable onPress={destroyAll} style={st.btnFill}><Text style={st.btnFillT}>{t('save')}</Text></Pressable>

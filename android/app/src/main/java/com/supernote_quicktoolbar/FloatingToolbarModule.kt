@@ -133,12 +133,17 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
         @Volatile @JvmStatic private var stickyX: Int = -1
         @Volatile @JvmStatic private var stickyY: Int = -1
+        @Volatile @JvmStatic private var preDockX: Int = -1
+        @Volatile @JvmStatic private var preDockY: Int = -1
         @Volatile @JvmStatic private var positionLoaded: Boolean = false
         private const val POSITION_STORE_KEY_X = "toolbar_pos_x"
         private const val POSITION_STORE_KEY_Y = "toolbar_pos_y"
 
         @Volatile @JvmStatic
         private var wasBubbleVisible = false
+
+        @Volatile @JvmStatic
+        private var insertNextChainActive = false
 
         @Volatile @JvmStatic
         private var penLassoOverlay: PenLassoOverlay? = null
@@ -254,6 +259,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             try {
                 loadOrientationFromPrefs()
                 parseTools(toolsJson)
+                isPenLocked = false
                 collapsed = false
                 removeAll()
                 createExpandedToolbar()
@@ -290,10 +296,10 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     }
 
     private fun loadOrientationFromPrefs() {
+        orientation = "vertical"
         try {
             val prefs = reactApplicationContext.getSharedPreferences("quicktoolbar_presets", 0)
-            val v = prefs.getString(ORIENTATION_STORE_KEY, null)
-            if (v == "vertical" || v == "horizontal") orientation = v
+            prefs.edit().putString(ORIENTATION_STORE_KEY, "vertical").apply()
         } catch (_: Exception) {}
     }
 
@@ -333,6 +339,11 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun collapse() {
         handler.post { switchToCollapsed() }
+    }
+
+    @ReactMethod
+    fun dockToEdge() {
+        handler.post { dockToNearestEdge() }
     }
 
     @ReactMethod
@@ -505,19 +516,23 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun deleteQueueFile(path: String, promise: Promise) {
-        try {
-            val f = java.io.File(path)
-            if (f.exists()) {
-                val deleted = f.delete()
-                Log.i(TAG, "[INSERT-DBG/Kt] deleteQueueFile: $path → deleted=$deleted")
-                promise.resolve(deleted)
-            } else {
-                Log.i(TAG, "[INSERT-DBG/Kt] deleteQueueFile: $path already gone")
-                promise.resolve(false)
+        kotlin.concurrent.thread(isDaemon = true) {
+            try {
+                val f = java.io.File(path)
+                val fileName = f.name
+                DocScreenshotService.unmarkInsertNext(fileName)
+                if (f.exists()) {
+                    val deleted = f.delete()
+                    Log.i(TAG, "[INSERT-DBG/Kt] deleteQueueFile: $path → deleted=$deleted")
+                    promise.resolve(deleted)
+                } else {
+                    Log.i(TAG, "[INSERT-DBG/Kt] deleteQueueFile: $path already gone")
+                    promise.resolve(false)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "[INSERT-DBG/Kt] deleteQueueFile error: ${e.message}")
+                promise.reject("DELETE_ERROR", e.message, e)
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "[INSERT-DBG/Kt] deleteQueueFile error: ${e.message}")
-            promise.reject("DELETE_ERROR", e.message, e)
         }
     }
 
@@ -804,6 +819,10 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
     private fun switchToExpanded() {
         if (!collapsed && expandedRoot != null) return
+        if (preDockX >= 0) {
+            savePositionToPrefs(preDockX, preDockY)
+            preDockX = -1; preDockY = -1
+        }
         collapsed = false
         removeAll()
         createExpandedToolbar()
@@ -1020,11 +1039,11 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                             val vw = expandedRoot?.measuredWidth ?: 0
                             if (lp.x <= EDGE_COLLAPSE_THRESHOLD) {
                                 dockSide = "left"
-                                savePositionToPrefs(lp.x, lp.y)
+                                savePositionToPrefs(0, lp.y)
                                 switchToCollapsed()
                             } else if (screenWidth - (lp.x + vw) <= EDGE_COLLAPSE_THRESHOLD) {
                                 dockSide = "right"
-                                savePositionToPrefs(lp.x, lp.y)
+                                savePositionToPrefs(screenWidth - vw, lp.y)
                                 switchToCollapsed()
                             } else {
                                 snapToEdge()
@@ -1206,9 +1225,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             view.background = null
             view.layoutParams = LinearLayout.LayoutParams(sz, sz)
             view.setOnClickListener {
-                resetAutoCollapse()
-                val next = if (orientation == "vertical") "horizontal" else "vertical"
-                setOrientation(next)
+                dockToNearestEdge()
             }
             return view
         }
@@ -1619,6 +1636,19 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         try { windowManager?.updateViewLayout(rootView, lp) } catch (_: Exception) {}
     }
 
+    private fun dockToNearestEdge() {
+        refreshScreenDimensions()
+        val lp = layoutParams ?: return
+        val vw = expandedRoot?.measuredWidth?.takeIf { it > 0 }
+            ?: expandedRoot?.width?.takeIf { it > 0 } ?: 0
+        val cx = lp.x + vw / 2
+        dockSide = if (cx <= screenWidth / 2) "left" else "right"
+        preDockX = lp.x; preDockY = lp.y
+        val snapX = if (dockSide == "left") 0 else screenWidth - vw
+        savePositionToPrefs(snapX, lp.y)
+        switchToCollapsed()
+    }
+
     private fun handleToolTap(tool: ToolItem, view: View) {
         resetAutoCollapse()
         if (tool.latches) {
@@ -1841,12 +1871,13 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     Log.i(TAG, "[INSERT-DBG/Kt] emit nativeInsertImage (delay=${delay}ms)")
                     emitEvent("nativeInsertImage", Arguments.createMap().apply {
                         putString("path", path)
-
+                        if (insertNextChainActive) putBoolean("fromInsertNext", true)
                     })
                 }, delay)
             }
             handler.postDelayed({
                 Log.i(TAG, "[INSERT-DBG/Kt] safety-net: restoreToolbar (tools=${tools.size})")
+                insertNextChainActive = false
                 restoreToolbar()
 
                 callPluginAppShowPluginView(0, "insertImage-safetyNet")
@@ -1860,6 +1891,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         handler.post {
             Log.i(TAG, "[INSERT-DBG/Kt] restoreToolbar: tools=${tools.size} currentInstance=${currentInstance === this} rootView=${rootView != null}")
             if (tools.isNotEmpty()) {
+                isPenLocked = false
                 collapsed = false
                 removeAll()
                 try {
@@ -2008,9 +2040,9 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 path = screenshotPath,
                 hasStitchSession = hasStitch,
                 onConfirm = { crop, stayOpen ->
-                    Log.i(TAG, "[CROP-DBG/Kt] crop confirm: ${crop.width}x${crop.height} multi=$stayOpen")
+                    Log.i(TAG, "[CROP-DBG/Kt] crop confirm (insertNext): ${crop.width}x${crop.height} multi=$stayOpen")
                     kotlin.concurrent.thread(isDaemon = true) {
-                        DocScreenshotService.stageToQueue(screenshotPath, crop)
+                        DocScreenshotService.stageToQueue(screenshotPath, crop, insertNext = true)
                         if (fromStitch) DocScreenshotService.clearSession()
                     }
                     if (!stayOpen) restoreAfterCropFlow()
@@ -2041,10 +2073,11 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     if (!stayOpen) restoreAfterCropFlow()
                 },
                 onScreenshotToNote = { crop ->
-                    Log.i(TAG, "[CROP-DBG/Kt] screenshot→note: ${crop.width}x${crop.height}")
+                    Log.i(TAG, "[CROP-DBG/Kt] screenshot→note: ${crop.width}x${crop.height} path=$screenshotPath")
 
                     kotlin.concurrent.thread(isDaemon = true) {
-                        DocScreenshotService.stageToQueue(screenshotPath, crop)
+                        val result = DocScreenshotService.stageToQueue(screenshotPath, crop)
+                        Log.i(TAG, "[CROP-DBG/Kt] screenshot→note stageToQueue result=$result")
                         if (fromStitch) DocScreenshotService.clearSession()
                     }
                     CropPanel.currentInstance?.hide()
@@ -2293,27 +2326,28 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     fun handleDocScreenshot() {
         handler.post {
             removeAll()
-            val queueDir = java.io.File("/sdcard/SCREENSHOT/.plugin_staging/queue")
-            val queueFiles = (queueDir.listFiles() ?: emptyArray())
-                .filter { it.name.endsWith(".png") }
-                .sortedBy { it.name.removeSuffix(".png").toLongOrNull() ?: 0L }
-            Log.i(TAG, "[INSERT-DBG/Kt] handleDocScreenshot: queueDir=${queueDir.absolutePath} exists=${queueDir.exists()} queueFiles=${queueFiles.size}")
-            for (f in queueFiles) Log.i(TAG, "[INSERT-DBG/Kt]   queue item: ${f.name} size=${f.length()}")
-            if (queueFiles.isNotEmpty()) {
-                val nextPath = queueFiles.first().absolutePath
-                Log.i(TAG, "[INSERT-DBG/Kt] direct insert from queue: $nextPath (queue has ${queueFiles.size} files)")
-
-                kotlin.concurrent.thread(isDaemon = true) {
-                    ImagePanel.saveToInsertCacheStatic(nextPath, lastNotePath, lastPageNum)
+            kotlin.concurrent.thread(isDaemon = true) {
+                val nextFile = DocScreenshotService.firstInsertNextFile()
+                handler.post {
+                    if (nextFile != null) {
+                        val path = nextFile.absolutePath
+                        Log.i(TAG, "[INSERT-DBG/Kt] handleDocScreenshot: insertNext=$path")
+                        insertNextChainActive = true
+                        kotlin.concurrent.thread(isDaemon = true) {
+                            ImagePanel.saveToInsertCacheStatic(path, lastNotePath, lastPageNum)
+                        }
+                        handler.postDelayed({
+                            try { requestInsertImage(path) }
+                            catch (e: Exception) { Log.e(TAG, "requestInsertImage failed: ${e.message}"); insertNextChainActive = false; restoreToolbar() }
+                        }, 500)
+                    } else {
+                        insertNextChainActive = false
+                        Log.i(TAG, "[INSERT-DBG/Kt] handleDocScreenshot: no insertNext, opening panel")
+                        callClosePluginView()
+                        emitEvent("onNativePanelOpen", Arguments.createMap().apply { putString("panel", "screenshot") })
+                        DocScreenshotPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show("queue")
+                    }
                 }
-                handler.postDelayed({
-                    try { requestInsertImage(nextPath) }
-                    catch (e: Exception) { Log.e(TAG, "requestInsertImage failed: ${e.message}"); restoreToolbar() }
-                }, 500)
-            } else {
-                callClosePluginView()
-                emitEvent("onNativePanelOpen", Arguments.createMap().apply { putString("panel", "screenshot") })
-                DocScreenshotPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show()
             }
         }
     }

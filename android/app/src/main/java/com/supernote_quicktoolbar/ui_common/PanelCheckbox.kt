@@ -36,9 +36,9 @@ class PanelCheckbox(
             setOnClickListener { onClick() }
         }
 
-        val checkSize = dp(24)
+        val checkSize = dp(28)
         val frame = FrameLayout(ctx).apply {
-            layoutParams = LinearLayout.LayoutParams(checkSize, checkSize).apply { rightMargin = dp(8) }
+            layoutParams = LinearLayout.LayoutParams(checkSize, checkSize).apply { rightMargin = dp(10) }
         }
         box = View(ctx).apply {
             layoutParams = FrameLayout.LayoutParams(
@@ -46,7 +46,7 @@ class PanelCheckbox(
         }
         frame.addView(box)
         mark = TextView(ctx).apply {
-            text = "✓"; textSize = sp(15f); setTextColor(Color.WHITE)
+            text = "✓"; textSize = sp(17f); setTextColor(Color.WHITE)
             gravity = Gravity.CENTER; visibility = View.GONE
             layoutParams = FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
@@ -55,7 +55,7 @@ class PanelCheckbox(
         view.addView(frame)
 
         labelView = TextView(ctx).apply {
-            text = label; textSize = sp(15f); setTextColor(gray)
+            text = label; textSize = sp(17f); setTextColor(gray)
         }
         view.addView(labelView)
 

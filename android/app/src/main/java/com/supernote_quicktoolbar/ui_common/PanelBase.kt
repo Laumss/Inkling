@@ -237,10 +237,10 @@ abstract class PanelBase(
     protected fun makeOutlinedBtn(label: String, onClick: () -> Unit): android.widget.TextView {
         return android.widget.TextView(reactContext).apply {
             text = label; textSize = sp(17f); setTextColor(Color.BLACK)
-            typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
+            typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.NORMAL)
             gravity = Gravity.CENTER
-            minWidth = dp(106); minHeight = dp(48)
-            setPadding(dp(16), dp(14), dp(16), dp(14))
+            minWidth = dp(106); minHeight = dp(44)
+            setPadding(dp(16), 0, dp(16), 0)
             background = GradientDrawable().apply {
                 setColor(Color.WHITE); setStroke(dp(1), Color.BLACK)
                 cornerRadius = dp(2).toFloat()
@@ -248,7 +248,7 @@ abstract class PanelBase(
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { rightMargin = dp(28) }
+            ).apply { rightMargin = dp(32) }
             setOnClickListener { onClick() }
         }
     }
@@ -256,10 +256,10 @@ abstract class PanelBase(
     protected fun makeFilledBtn(label: String, onClick: () -> Unit): android.widget.TextView {
         return android.widget.TextView(reactContext).apply {
             text = label; textSize = sp(17f); setTextColor(Color.WHITE)
-            typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
+            typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.NORMAL)
             gravity = Gravity.CENTER
-            minWidth = dp(106); minHeight = dp(48)
-            setPadding(dp(16), dp(14), dp(16), dp(14))
+            minWidth = dp(106); minHeight = dp(44)
+            setPadding(dp(16), 0, dp(16), 0)
             background = GradientDrawable().apply {
                 setColor(Color.BLACK)
                 cornerRadius = dp(2).toFloat()

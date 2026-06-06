@@ -2,10 +2,9 @@ package com.supernote_quicktoolbar.ui_common
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.Canvas
+import android.graphics.BitmapFactory
 import android.graphics.Color
-import android.graphics.Paint
-import android.graphics.Path
+import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.GradientDrawable
 import android.view.Gravity
 import android.widget.FrameLayout
@@ -15,15 +14,6 @@ import android.widget.LinearLayout
 class FolderCoverView(context: Context) : FrameLayout(context) {
 
     private val strokePx: Float = (context.resources.displayMetrics.density * 1.0f).coerceAtLeast(1.5f)
-
-    private val outlinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        strokeWidth = strokePx
-        color = Color.BLACK
-    }
-    private val outlinePath = Path()
-    private val labelPath = Path()
-    private val tabSeamPath = Path()
 
     private val gridRoot: LinearLayout = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
@@ -41,8 +31,16 @@ class FolderCoverView(context: Context) : FrameLayout(context) {
     val child4: ImageView = makeChildSlot()
 
     init {
-        setWillNotDraw(false)
-        setBackgroundColor(Color.WHITE)
+        try {
+            val stream = context.assets.open("images/folder_cover.png")
+            val bmp = BitmapFactory.decodeStream(stream)
+            stream.close()
+            background = BitmapDrawable(context.resources, bmp)
+        } catch (_: Exception) {
+            setBackgroundColor(Color.WHITE)
+        }
+        minimumWidth = 0
+        minimumHeight = 0
 
         row1.addView(child1); row1.addView(child2)
         row2.addView(child3); row2.addView(child4)
@@ -98,47 +96,5 @@ class FolderCoverView(context: Context) : FrameLayout(context) {
             v.setImageBitmap(bmp)
             v.visibility = VISIBLE
         }
-    }
-
-    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
-        super.onSizeChanged(w, h, oldw, oldh)
-        rebuildOutline(w.toFloat(), h.toFloat())
-    }
-
-    private fun rebuildOutline(w: Float, h: Float) {
-        val inset = strokePx / 2f
-        val left = inset
-        val right = w - inset
-        val top = inset
-        val bottom = h - inset
-        val tabBaseY = top + h * 0.045f
-        val cutStart = left + w * 0.55f
-        val cutEnd = left + w * 0.66f
-
-        outlinePath.reset()
-        outlinePath.moveTo(left, tabBaseY)
-        outlinePath.lineTo(cutStart, tabBaseY)
-        outlinePath.lineTo(cutEnd, top)
-        outlinePath.lineTo(right, top)
-        outlinePath.lineTo(right, bottom)
-        outlinePath.lineTo(left, bottom)
-        outlinePath.close()
-
-        labelPath.reset()
-        val labelY = tabBaseY - h * 0.018f
-        labelPath.moveTo(left + w * 0.06f, labelY)
-        labelPath.lineTo(left + w * 0.30f, labelY)
-
-        tabSeamPath.reset()
-        val seamY = tabBaseY + h * 0.018f
-        tabSeamPath.moveTo(cutStart + w * 0.02f, seamY)
-        tabSeamPath.lineTo(right - w * 0.01f, seamY)
-    }
-
-    override fun onDraw(canvas: Canvas) {
-        super.onDraw(canvas)
-        canvas.drawPath(outlinePath, outlinePaint)
-        canvas.drawPath(labelPath, outlinePaint)
-        canvas.drawPath(tabSeamPath, outlinePaint)
     }
 }

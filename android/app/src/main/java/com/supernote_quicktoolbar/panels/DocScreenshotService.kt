@@ -14,6 +14,7 @@ object DocScreenshotService {
 
     private const val STAGING_DIR       = "/sdcard/SCREENSHOT/.plugin_staging"
     private const val QUEUE_DIR         = "$STAGING_DIR/queue"
+    private const val QUEUE_META_FILE   = "$QUEUE_DIR/queue_meta.json"
     private const val HISTORY_DIR       = "/sdcard/SCREENSHOT/.plugin_history"
     private const val SESSION_FILE      = "$STAGING_DIR/stitch_session.json"
     private const val STITCH_IMAGES_DIR = "$STAGING_DIR/stitch_images"
@@ -41,11 +42,13 @@ object DocScreenshotService {
         }
     }
 
-    fun stageToQueue(srcPath: String, crop: CropPanel.CropResult): String? {
+    fun stageToQueue(srcPath: String, crop: CropPanel.CropResult, insertNext: Boolean = false): String? {
         ensureDirs()
         val ts = System.currentTimeMillis()
         val dest = "$QUEUE_DIR/$ts.png"
-        return if (cropAndSave(srcPath, crop, dest)) dest else null
+        if (!cropAndSave(srcPath, crop, dest)) return null
+        if (insertNext) markInsertNext("$ts.png")
+        return dest
     }
 
     fun saveToHistory(srcPath: String, crop: CropPanel.CropResult): String? {
@@ -55,6 +58,48 @@ object DocScreenshotService {
         val ok = cropAndSave(srcPath, crop, dest)
         if (ok) pruneHistory()
         return if (ok) dest else null
+    }
+
+    private fun loadQueueMeta(): MutableSet<String> {
+        return try {
+            val f = File(QUEUE_META_FILE)
+            if (!f.exists()) return mutableSetOf()
+            val arr = JSONObject(f.readText()).optJSONArray("insertNext") ?: return mutableSetOf()
+            val set = mutableSetOf<String>()
+            for (i in 0 until arr.length()) set.add(arr.getString(i))
+            set
+        } catch (_: Exception) { mutableSetOf() }
+    }
+
+    private fun saveQueueMeta(set: Set<String>) {
+        ensureDirs()
+        val json = JSONObject().apply {
+            put("insertNext", JSONArray().apply { for (name in set) put(name) })
+        }
+        File(QUEUE_META_FILE).writeText(json.toString())
+    }
+
+    private fun markInsertNext(fileName: String) {
+        val set = loadQueueMeta()
+        set.add(fileName)
+        saveQueueMeta(set)
+    }
+
+    fun unmarkInsertNext(fileName: String) {
+        val set = loadQueueMeta()
+        if (set.remove(fileName)) saveQueueMeta(set)
+    }
+
+    fun isInsertNext(fileName: String): Boolean = loadQueueMeta().contains(fileName)
+
+    fun firstInsertNextFile(): File? {
+        val set = loadQueueMeta()
+        if (set.isEmpty()) return null
+        val dir = File(QUEUE_DIR)
+        if (!dir.exists()) return null
+        return (dir.listFiles() ?: emptyArray())
+            .filter { it.name.endsWith(".png") && set.contains(it.name) }
+            .minByOrNull { it.name.removeSuffix(".png").toLongOrNull() ?: Long.MAX_VALUE }
     }
 
     private fun pruneHistory() {

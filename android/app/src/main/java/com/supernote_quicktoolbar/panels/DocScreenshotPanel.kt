@@ -84,7 +84,7 @@ class DocScreenshotPanel(
         tabBar = PanelTabBar(reactContext, listOf(
             PanelTabBar.Tab.Icon("icons/ic_tab_queue.xml", "queue"),
             PanelTabBar.Tab.Icon("icons/ic_tab_history.xml", "history")
-        )) { idx -> switchTab(if (idx == 0) "queue" else "history") }
+        ), leftMarginDp = 30, rightMarginDp = 36) { idx -> switchTab(if (idx == 0) "queue" else "history") }
         tabBar!!.setSelection(if (activeTab == "queue") 0 else 1)
         root.addView(tabBar!!.createView())
 
@@ -238,7 +238,9 @@ class DocScreenshotPanel(
 
     private fun doDelete() {
         val path = selectedPath ?: return
+        val fileName = File(path).name
         try { File(path).delete() } catch (_: Exception) {}
+        kotlin.concurrent.thread(isDaemon = true) { DocScreenshotService.unmarkInsertNext(fileName) }
         selectedPath = null
         updateButtons()
         refreshContent()
