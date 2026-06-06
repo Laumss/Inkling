@@ -130,7 +130,7 @@ class ImagePanel(
         tabBar = PanelTabBar(reactContext, listOf(
             PanelTabBar.Tab.Icon("icons/ic_tab_received.xml", "received"),
             PanelTabBar.Tab.Icon("icons/ic_tab_browse.xml", "browse")
-        )) { idx -> switchTab(if (idx == 0) "received" else "browse") }
+        ), leftMarginDp = 30, rightMarginDp = 28) { idx -> switchTab(if (idx == 0) "received" else "browse") }
         tabBar!!.setSelection(0)
         root.addView(tabBar!!.createView())
 
@@ -269,13 +269,16 @@ class ImagePanel(
 
     private fun buildImageGrid(items: List<GridItem>) {
         val host = scrollHost ?: return
+        val density = reactContext.resources.displayMetrics.density
+        Log.i("ImagePanel", "[GRID-DBG] screenW=$screenW winW=$winW density=$density scrollLane=${host.scrollBarLaneWidthPx} contentPadL=${host.content.paddingLeft} contentPadR=${host.content.paddingRight} availW=${host.availableContentWidth(winW)}")
         PanelGrid.build(reactContext, host, screenW, winW, items) { item, colW ->
+            Log.i("ImagePanel", "[GRID-DBG] colW=$colW")
             createGridCell(item, colW)
         }
     }
 
     private fun createGridCell(item: GridItem, width: Int): LinearLayout {
-        val thumbH = (width * 1.1f).toInt()
+        val thumbH = (width * 1.22f).toInt()
         val isSelected = if (multiSelectMode) {
             !item.isDir && item.path in multiSelectedPaths
         } else {
@@ -327,6 +330,7 @@ class ImagePanel(
         }
         if (item.isDir) {
 
+            thumbFrame.clipToOutline = false
             thumbFrame.background = null
             thumbFrame.setBackgroundColor(Color.WHITE)
             val cover = FolderCoverView(reactContext).apply {

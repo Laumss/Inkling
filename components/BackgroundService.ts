@@ -419,6 +419,10 @@ export function isAiWaiting(): boolean {
   return _aiWaiting;
 }
 
+export function isAiActive(): boolean {
+  return _aiActive;
+}
+
 export async function toggleMode(target: InsertMode): Promise<InsertMode | null> {
   ensureInit();
   if (!_textInserter) return null;

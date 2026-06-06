@@ -76,6 +76,14 @@ const FloatingToolbarBridge = {
     }
   },
 
+  dockToEdge(): void {
+    try {
+      FloatingToolbar?.dockToEdge();
+    } catch (e) {
+      console.warn('[FloatingToolbarBridge]: dockToEdge failed:', e);
+    }
+  },
+
   expand(): void {
     try {
       FloatingToolbar?.expand();

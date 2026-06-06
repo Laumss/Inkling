@@ -2,6 +2,7 @@ import { PluginCommAPI, PluginFileAPI, PluginNoteAPI, PluginManager, NativeUIUti
 import { NativeModules, EmitterSubscription, Dimensions } from 'react-native';
 import RNFS from 'react-native-fs';
 import { loadClips, saveClips } from './ToolPresets';
+import { t } from './i18n';
 import { toggleMode, handleAiSend, getLastMode, stopAiMode, ensureLocalSendReady } from './BackgroundService';
 import FloatingToolbarBridge from './FloatingToolbarBridge';
 import FloatingBubbleBridge from './BubbleBridges';
@@ -127,8 +128,12 @@ export async function executeAction(action: string): Promise<string> {
     return mode === 'paragraph' ? 'Text receive: paragraph ON' : 'Text receive OFF';
   }
 
-  if (action === 'send_ai' || action === 'voice_transcribe') {
-    const { startAiReceiveMode } = require('./BackgroundService');
+  if (action === 'voice_transcribe') {
+    const { startAiReceiveMode, stopAiMode, isAiActive } = require('./BackgroundService');
+    if (isAiActive()) {
+      stopAiMode();
+      return 'AI receive: OFF';
+    }
     await startAiReceiveMode();
     return 'AI receive: ON';
   }
@@ -200,7 +205,13 @@ export async function executeAction(action: string): Promise<string> {
     if (_imageQueue.length > 0) {
       const imgPath = _imageQueue.shift()!;
       console.log('[QUEUE-DBG/TS] image queue pop:', imgPath, 'remaining:', _imageQueue.length);
-      try { await (PluginNoteAPI as any).insertImage(imgPath); } catch (_) {}
+      try {
+        // 插入新图前，先固化上一张：清掉上一张插入后残留的套索选中态（等价于手动点空白处）。
+        // 插入后保留套索态以便调整；最后一张由用户手动点空白固化。
+        // 第一张时无套索，调用失败无害。禁止用 saveCurrentNote 固化（见 CLAUDE.md）。
+        try { await (PluginCommAPI as any).setLassoBoxState?.(2); } catch (_) {}
+        await (PluginNoteAPI as any).insertImage(imgPath);
+      } catch (_) {}
       return 'Image inserted from queue';
     }
     ensureLocalSendReady().catch(() => {});
@@ -219,13 +230,13 @@ export async function executeAction(action: string): Promise<string> {
 
   try {
     if (action === 'layer_prev') {
-      if (isRecognitionNote()) { NativeUIUtils.showErrorTipDialog('实时识别笔记不支持图层操作'); return ''; }
+      if (isRecognitionNote()) { NativeUIUtils.showErrorTipDialog(t('layer_err_recognition')); return ''; }
       if (await hasLassoSelection()) return moveLassoElementsLayer('up');
       await PluginNoteAPI.saveCurrentNote();
       return await layerPrev();
     }
     if (action === 'layer_next') {
-      if (isRecognitionNote()) { NativeUIUtils.showErrorTipDialog('实时识别笔记不支持图层操作'); return ''; }
+      if (isRecognitionNote()) { NativeUIUtils.showErrorTipDialog(t('layer_err_recognition')); return ''; }
       if (await hasLassoSelection()) return moveLassoElementsLayer('down');
       await PluginNoteAPI.saveCurrentNote();
       return await layerNext();
@@ -269,9 +280,11 @@ async function moveLassoElementsLayer(direction: 'up' | 'down'): Promise<string>
     const c = cntRes?.result;
     const hasTitle = (c?.titleNum ?? 0) > 0;
     const hasLink = ((c?.textLinkNum ?? 0) + (c?.trailLinkNum ?? 0) + (c?.todoLinkNum ?? 0)) > 0;
-    if (hasTitle || hasLink) {
-      NativeUIUtils.showErrorTipDialog('标题、链接或文本不可粘贴在非主图层');
-      return 'Title/link must stay on main layer';
+    const hasTextBox = ((c?.normalTextBoxNum ?? 0) + (c?.digestTextBoxNum ?? 0) + (c?.digestTextBoxEditableNum ?? 0)) > 0;
+    const hasImage = (c?.bitmapNum ?? 0) > 0;
+    if (hasTitle || hasLink || hasTextBox || hasImage) {
+      NativeUIUtils.showErrorTipDialog(t('layer_err_unmovable'));
+      return 'Unmovable element in selection';
     }
   } catch (_) {}
 
@@ -289,54 +302,16 @@ async function moveLassoElementsLayer(direction: 'up' | 'down'): Promise<string>
   const lassoElements = elemRes.result as any[];
   const movable = lassoElements.filter((e: any) => LAYER_MOVABLE_TYPES.has(e.type));
   if (movable.length === 0) {
-    NativeUIUtils.showErrorTipDialog('标题、链接或文本不可粘贴在非主图层');
-    return 'No movable elements (title/link must stay on main layer)';
+    NativeUIUtils.showErrorTipDialog(t('layer_err_unmovable'));
+    return 'No movable elements in selection';
   }
 
   if (direction === 'up') {
     const maxLayer = Math.max(...movable.map((e: any) => e.layerNum ?? 0));
     const maxIdx = userLayerIds.indexOf(maxLayer);
     if (maxIdx === userLayerIds.length - 1) {
-      const maxUserId = Math.max(...userLayerIds);
-      if (maxUserId >= 3) { NativeUIUtils.showErrorTipDialog('已达到最大图层数'); return 'Max 4 user layers'; }
-
-      await ensureStickerDir();
-      const tmpName = `_layer_move_${Date.now()}.sticker`;
-      const tmpPath = `${STICKER_DIR}/${tmpName}`;
-
-      const saveRes = await PluginCommAPI.saveStickerByLasso(tmpPath);
-      if (!saveRes.success) return 'Save sticker for layer move failed';
-
-      await PluginCommAPI.deleteLassoElements();
-      await PluginNoteAPI.saveCurrentNote();
-
-      const newId = maxUserId + 1;
-      const ir = await PluginFileAPI.insertLayer(_filePath, _pageNum, {
-        layerId: newId, name: `Layer ${newId + 1}`, isVisible: true, isCurrentLayer: false,
-      } as any) as any;
-      if (!ir?.success) {
-
-        try { await PluginCommAPI.insertSticker(tmpPath); } catch (_) {}
-        try { await RNFS.unlink(tmpPath); } catch (_) {}
-        return 'Create layer failed';
-      }
-
-      const allLayers = (await PluginFileAPI.getLayers(_filePath, _pageNum) as any)?.result ?? [];
-      const updated = (allLayers as any[])
-        .filter((l: any) => (l.layerId ?? l.layerNum) >= 0)
-        .map((l: any) => ({
-          layerId: l.layerId ?? l.layerNum,
-          name: l.name,
-          isVisible: l.isVisible,
-          isCurrentLayer: (l.layerId ?? l.layerNum) === newId,
-        }));
-      await PluginFileAPI.modifyLayers(_filePath, _pageNum, updated);
-      await PluginCommAPI.reloadFile();
-
-      await PluginCommAPI.insertSticker(tmpPath);
-      try { await RNFS.unlink(tmpPath); } catch (_) {}
-
-      return `Moved element(s) to new layer ${newId + 1}`;
+      NativeUIUtils.showErrorTipDialog(t('layer_err_need_new'));
+      return 'Need more layers to move up';
     }
   }
 
@@ -349,7 +324,7 @@ async function moveLassoElementsLayer(direction: 'up' | 'down'): Promise<string>
     targetLayerMap.set(el.numInPage, userLayerIds[targetIdx]);
   }
   if (targetLayerMap.size === 0) {
-    const msg = direction === 'up' ? '已在最顶层' : '已在最底层';
+    const msg = direction === 'up' ? t('layer_err_at_top') : t('layer_err_at_bottom');
     NativeUIUtils.showErrorTipDialog(msg);
     return direction === 'up' ? 'Already at top layer' : 'Already at bottom layer';
   }
@@ -357,10 +332,21 @@ async function moveLassoElementsLayer(direction: 'up' | 'down'): Promise<string>
   const fullRes = await PluginFileAPI.getElements(_pageNum, _filePath) as any;
   if (!fullRes?.success || !fullRes.result) return 'Get page elements failed';
 
-  const toModify = (fullRes.result as any[]).filter((e: any) => targetLayerMap.has(e.numInPage));
-  for (const el of toModify) {
-    el.layerNum = targetLayerMap.get(el.numInPage);
-  }
+  const toModify = (fullRes.result as any[])
+    .filter((e: any) => targetLayerMap.has(e.numInPage))
+    .map((e: any) => ({
+      uuid: e.uuid,
+      type: e.type,
+      pageNum: e.pageNum,
+      numInPage: e.numInPage,
+      layerNum: targetLayerMap.get(e.numInPage),
+      status: e.status,
+      thickness: e.thickness,
+      maxX: e.maxX,
+      maxY: e.maxY,
+      recognizeResult: e.recognizeResult,
+      userData: e.userData,
+    }));
 
   await PluginNoteAPI.saveCurrentNote();
   const modRes = await PluginFileAPI.modifyElements(_filePath, _pageNum, toModify) as any;
@@ -401,7 +387,7 @@ async function layerPrev(): Promise<string> {
 
   const userLayers = allLayers.filter((l: any) => l.id >= 0);
   const maxUserId = userLayers.length > 0 ? Math.max(...userLayers.map((l: any) => l.id)) : -1;
-  if (maxUserId >= 3) { NativeUIUtils.showErrorTipDialog('已达到最大图层数'); return 'Max 4 user layers'; }
+  if (maxUserId >= 3) { NativeUIUtils.showErrorTipDialog(t('layer_err_max')); return 'Max 4 user layers'; }
 
   const newId = maxUserId + 1;
   const ir = await PluginFileAPI.insertLayer(_filePath, _pageNum, {
@@ -432,7 +418,7 @@ async function layerNext(): Promise<string> {
   const currentId = current.id;
 
   const below = allLayers.filter((l: any) => l.id >= 0 && l.id < currentId).sort((a: any, b: any) => b.id - a.id);
-  if (below.length === 0) { NativeUIUtils.showErrorTipDialog('已在主图层，无法继续向下移动'); return 'Already at bottom layer'; }
+  if (below.length === 0) { NativeUIUtils.showErrorTipDialog(t('layer_err_at_main')); return 'Already at bottom layer'; }
 
   const target = below[0];
   const updated = allLayers
@@ -467,13 +453,13 @@ async function clipSave(slot: string): Promise<string> {
     const c = cntRes?.result;
 
     if ((c?.titleNum ?? 0) > 0) {
-      NativeUIUtils.showErrorTipDialog('标题暂不支持剪贴板保存');
+      NativeUIUtils.showErrorTipDialog(t('clip_err_title'));
       return 'Title clip not supported';
     }
 
     const linkCount = (c?.textLinkNum ?? 0) + (c?.trailLinkNum ?? 0) + (c?.todoLinkNum ?? 0);
     if (linkCount > 0) {
-      NativeUIUtils.showErrorTipDialog('链接暂不支持剪贴板保存');
+      NativeUIUtils.showErrorTipDialog(t('clip_err_link'));
       return 'Link clip not supported';
     }
 
@@ -482,8 +468,13 @@ async function clipSave(slot: string): Promise<string> {
       (c?.digestTextBoxNum ?? 0) +
       (c?.digestTextBoxEditableNum ?? 0);
     if (tbCount > 0) {
-      NativeUIUtils.showErrorTipDialog('文本框暂不支持剪贴板保存');
+      NativeUIUtils.showErrorTipDialog(t('clip_err_textbox'));
       return 'TextBox clip not supported';
+    }
+
+    if ((c?.bitmapNum ?? 0) > 0) {
+      NativeUIUtils.showErrorTipDialog(t('clip_err_image'));
+      return 'Image clip not supported';
     }
   } catch (e) {
     console.warn('[ToolActions]: getLassoElementTypeCounts failed, fall through to sticker:', e);
@@ -704,7 +695,6 @@ export function attachModeListeners(): void {
       case 'text_recv_paragraph':
         FloatingBubbleBridge.hide();
         break;
-      case 'send_ai':
       case 'voice_transcribe':
         stopAiMode();
         break;

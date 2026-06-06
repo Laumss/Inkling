@@ -216,7 +216,8 @@ class AiBubbleModule(reactContext: ReactApplicationContext) :
         statusRow.addView(dotView)
         statusText = TextView(context).apply {
             this.text = text; textSize = 14f; setTextColor(CLR_TEXT)
-            typeface = Typeface.DEFAULT_BOLD; maxLines = 1
+            typeface = Typeface.DEFAULT_BOLD; maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END
         }
         statusRow.addView(statusText)
         bubbleView!!.addView(statusRow)
@@ -233,8 +234,10 @@ class AiBubbleModule(reactContext: ReactApplicationContext) :
 
         @Suppress("DEPRECATION")
         val wmType = WindowManager.LayoutParams.TYPE_PHONE
+        val BUBBLE_WIDTH_DP = 204
+        val bubbleW = (BUBBLE_WIDTH_DP * d).toInt()
         layoutParams = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
+            bubbleW, WindowManager.LayoutParams.WRAP_CONTENT,
             wmType,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
             PixelFormat.TRANSLUCENT

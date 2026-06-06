@@ -1,5 +1,6 @@
 package com.supernote_quicktoolbar.ui_common
 
+import android.util.Log
 import android.view.View
 import android.widget.LinearLayout
 import com.facebook.react.bridge.ReactApplicationContext
@@ -34,6 +35,7 @@ object PanelGrid {
         val innerW = host.availableContentWidth(panelWidthPx)
         val cols = if (screenWidthPx >= THREE_COL_MIN_PX) 3 else 2
         val colW = (innerW - sideLeft - sideRight - midGap * (cols - 1)) / cols
+        Log.i("PanelGrid", "panelW=$panelWidthPx screenW=$screenWidthPx density=$density scale=$scale innerW=$innerW cols=$cols colW=$colW sideL=$sideLeft sideR=$sideRight midGap=$midGap padL=${grid.paddingLeft} padR=${grid.paddingRight} scrollbarLane=${host.scrollBarLaneWidthPx}")
 
         var row: LinearLayout? = null
         for ((idx, item) in items.withIndex()) {

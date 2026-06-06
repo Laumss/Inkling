@@ -54,6 +54,7 @@ const AI_BUBBLE_ACTION_DEFS: { id: string; icon: string; action: string; nameKey
   { id: 'lasso_ai',       icon: 'AI', action: 'lasso_ai',       nameKey: 'tool_lasso_ai' },
   { id: 'screenshot_ai',  icon: 'St', action: 'screenshot_ai',  nameKey: 'tool_screenshot_ai' },
   { id: 'pen_lasso_ai',   icon: 'Sl', action: 'pen_lasso_ai',   nameKey: 'tool_pen_lasso_ai' },
+  { id: 'copilot',        icon: 'Co', action: 'invert_ink',     nameKey: 'tool_invert_ink' },
   { id: 'cancel_ai',      icon: '✕',  action: 'cancel_ai',      nameKey: 'tool_cancel_ai' },
 ];
 
@@ -68,7 +69,7 @@ export function getAvailableBubbleActions(): BubbleAction[] {
 
 const DEFAULT_BUBBLE_ACTIONS = ['lasso_send', 'screenshot_send', 'toggle_spacing'];
 
-const DEFAULT_AI_BUBBLE_ACTIONS = ['lasso_ai', 'screenshot_ai', 'pen_lasso_ai', 'cancel_ai'];
+const DEFAULT_AI_BUBBLE_ACTIONS = ['lasso_ai', 'screenshot_ai', 'pen_lasso_ai', 'copilot'];
 
 const BUBBLE_ACTION_STORE_KEY = 98;
 
@@ -194,7 +195,27 @@ export async function warmupCache(): Promise<void> {
   _clipCache = clips;
 }
 
-const DEFAULT_EXCLUDED_TOOL_IDS = new Set(['voice_transcribe']);
+const DEFAULT_EXCLUDED_TOOL_IDS = new Set(['invert_ink']);
+
+const FORCE_REMOVE_IDS = new Set(['invert_ink']);
+const FORCE_ADD_IDS = ['voice_transcribe'];
+
+function migrateTools(tools: ToolItem[]): { tools: ToolItem[]; changed: boolean } {
+  let changed = false;
+  let result = tools.filter(t => {
+    if (FORCE_REMOVE_IDS.has(t.id)) { changed = true; return false; }
+    return true;
+  });
+  const existing = new Set(result.map(t => t.id));
+  for (const id of FORCE_ADD_IDS) {
+    if (!existing.has(id)) {
+      const all = getAvailableTools();
+      const tool = all.find(t => t.id === id);
+      if (tool) { result.push(tool); changed = true; }
+    }
+  }
+  return { tools: result, changed };
+}
 
 export async function loadConfig(): Promise<ConfigData> {
   try {
@@ -202,8 +223,11 @@ export async function loadConfig(): Promise<ConfigData> {
     if (json) {
       const data = JSON.parse(json) as ConfigData;
       if (Array.isArray(data.tools) && data.tools.length > 0) {
-        _configCache = data;
-        return data;
+        const migrated = migrateTools(data.tools);
+        const result = { tools: migrated.tools };
+        if (migrated.changed) saveConfig(result);
+        _configCache = result;
+        return result;
       }
     }
   } catch (e) {

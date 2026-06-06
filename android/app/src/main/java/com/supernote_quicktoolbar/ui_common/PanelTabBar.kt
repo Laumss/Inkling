@@ -12,7 +12,8 @@ import kotlin.math.roundToInt
 class PanelTabBar(
     private val ctx: ReactApplicationContext,
     private val tabs: List<Tab>,
-    private val sideMarginDp: Int = 44,
+    private val leftMarginDp: Int = 44,
+    private val rightMarginDp: Int = 44,
     private val onSelect: (index: Int) -> Unit
 ) {
     sealed class Tab {
@@ -38,15 +39,16 @@ class PanelTabBar(
         val wrapper = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
         val barHeight = dp(60)
         val iconSize = dp(32)
-        val sideMargin = dp(sideMarginDp)
+        val leftMargin = dp(leftMarginDp)
+        val rightMargin = dp(rightMarginDp)
 
         val bar = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, barHeight
             ).apply {
-                leftMargin = sideMargin
-                rightMargin = sideMargin
+                this.leftMargin = leftMargin
+                this.rightMargin = rightMargin
             }
         }
 
@@ -86,7 +88,7 @@ class PanelTabBar(
             val indicator = View(ctx).apply {
                 layoutParams = (FrameLayout.LayoutParams(
                     FrameLayout.LayoutParams.MATCH_PARENT, dp(3), Gravity.BOTTOM
-                )).also { it.bottomMargin = 1 }
+                )).also { it.bottomMargin = dp(0) }
             }
             frame.addView(indicator)
 
@@ -100,8 +102,8 @@ class PanelTabBar(
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 1
             ).apply {
-                leftMargin = sideMargin
-                rightMargin = sideMargin
+                this.leftMargin = leftMargin
+                this.rightMargin = rightMargin
             }
             setBackgroundColor(Color.BLACK)
         })

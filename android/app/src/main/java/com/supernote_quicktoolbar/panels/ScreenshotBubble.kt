@@ -149,6 +149,8 @@ object ScreenshotBubble {
             try {
                 wm?.addView(container, lp)
                 Log.i(TAG, "shown")
+                toolbarModule.hide()
+                toolbarModule.disablePenBlock()
             } catch (e: Exception) {
                 Log.e(TAG, "addView failed: ${e.message}")
             }
