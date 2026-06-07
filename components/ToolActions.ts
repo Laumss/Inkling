@@ -14,6 +14,7 @@ let _pageNum: number | null = null;
 
 let _imageQueue: string[] = [];
 let _docLinkQueue: string[] = [];
+let _clipBusy = false;
 
 const STICKER_DIR = '/sdcard/MyStyle/Sticker';
 
@@ -49,6 +50,9 @@ function isRecognitionNote(): boolean {
 }
 
 async function _insertDocLinkDirect(docPath: string): Promise<void> {
+  // 插入文档链接前，先固化上一次的套索选中态
+  try { await (PluginCommAPI as any).setLassoBoxState?.(2); } catch (_) {}
+
   const rawName = docPath.split('/').pop() ?? 'link';
   const dotIdx = rawName.lastIndexOf('.');
   const linkName = dotIdx > 0 ? rawName.substring(0, dotIdx) : rawName;
@@ -56,11 +60,15 @@ async function _insertDocLinkDirect(docPath: string): Promise<void> {
   const screen = Dimensions.get('window');
   let pageW = screen.width > screen.height ? 1872 : 1404;
   let pageH = screen.width > screen.height ? 1404 : 1872;
+  let notePath = '';
+  let pageNum = 0;
   try {
     const fpRes: any = await PluginCommAPI.getCurrentFilePath();
     const pgRes: any = await PluginCommAPI.getCurrentPageNum();
-    if (fpRes?.success && fpRes.result && pgRes?.success && pgRes.result !== undefined) {
-      const psRes: any = await PluginFileAPI.getPageSize(fpRes.result, pgRes.result);
+    if (fpRes?.success && fpRes.result) notePath = fpRes.result;
+    if (pgRes?.success && pgRes.result !== undefined) pageNum = pgRes.result;
+    if (notePath && pageNum !== undefined) {
+      const psRes: any = await PluginFileAPI.getPageSize(notePath, pageNum);
       if (psRes?.success && psRes.result) {
         pageW = psRes.result.width;
         pageH = psRes.result.height;
@@ -70,9 +78,63 @@ async function _insertDocLinkDirect(docPath: string): Promise<void> {
 
   const linkW = Math.min(linkName.length * 30 + 40, pageW * 0.6);
   const left = Math.round((pageW - linkW) / 2);
-  const top = Math.round(pageH * 0.15);
+  let top = Math.round(pageH * 0.15);
   const fontSize = 49;
   const lineH = fontSize + 10;
+
+  // 检测页面上已有的文本框/链接，避免重叠插入
+  try {
+    if (notePath) {
+      const elRes: any = await PluginFileAPI.getElements(pageNum, notePath);
+      if (elRes?.success && Array.isArray(elRes.result)) {
+        const occupied: { top: number; bottom: number }[] = [];
+        for (const el of elRes.result) {
+          try {
+            const elType = el.type;
+            // type 500-502: 文本框 / 文本摘要
+            if (typeof elType === 'number' && elType >= 500 && elType <= 502) {
+              const rect = el.textBox?.textRect;
+              if (rect && typeof rect.top === 'number' && typeof rect.bottom === 'number') {
+                occupied.push({ top: rect.top, bottom: rect.bottom });
+              }
+            }
+            // type 600: 链接元素
+            if (typeof elType === 'number' && elType === 600) {
+              const lk = el.link;
+              if (lk && typeof lk.Y === 'number' && typeof lk.height === 'number') {
+                occupied.push({ top: lk.Y, bottom: lk.Y + lk.height });
+              }
+            }
+          } finally {
+            try { el.recycle?.(); } catch (_) {}
+          }
+        }
+        occupied.sort((a, b) => a.top - b.top);
+        // 逐个检查碰撞并下移
+        const GAP = 10;
+        for (let iter = 0; iter < 50; iter++) {
+          let collision = false;
+          for (const range of occupied) {
+            if (top < range.bottom && (top + lineH) > range.top) {
+              console.log('[ToolActions] docLink collision at top=', top,
+                'with existing [', range.top, ',', range.bottom, '] → skip to', range.bottom + GAP);
+              top = range.bottom + GAP;
+              collision = true;
+              break;
+            }
+          }
+          if (!collision) break;
+        }
+        // 确保不超出页面底部
+        if (top + lineH > pageH - 50) {
+          console.warn('[ToolActions] docLink: no room on page, using original position');
+          top = Math.round(pageH * 0.15);
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('[ToolActions] docLink collision scan failed (non-fatal):', e);
+  }
 
   const ext = docPath.split('.').pop()?.toLowerCase() || '';
   const isDocFile = ['epub', 'pdf', 'cbz', 'doc', 'docx', 'djvu', 'mobi', 'fb2'].includes(ext);
@@ -329,31 +391,42 @@ async function moveLassoElementsLayer(direction: 'up' | 'down'): Promise<string>
     return direction === 'up' ? 'Already at top layer' : 'Already at bottom layer';
   }
 
+  // Get full element data (including stroke binary data) for the elements to move
   const fullRes = await PluginFileAPI.getElements(_pageNum, _filePath) as any;
   if (!fullRes?.success || !fullRes.result) return 'Get page elements failed';
 
-  const toModify = (fullRes.result as any[])
-    .filter((e: any) => targetLayerMap.has(e.numInPage))
-    .map((e: any) => ({
-      uuid: e.uuid,
-      type: e.type,
-      pageNum: e.pageNum,
-      numInPage: e.numInPage,
-      layerNum: targetLayerMap.get(e.numInPage),
-      status: e.status,
-      thickness: e.thickness,
-      maxX: e.maxX,
-      maxY: e.maxY,
-      recognizeResult: e.recognizeResult,
-      userData: e.userData,
-    }));
+  const toMove = (fullRes.result as any[])
+    .filter((e: any) => targetLayerMap.has(e.numInPage));
+  const toInsert = toMove.map((e: any) => ({
+    ...e,
+    layerNum: targetLayerMap.get(e.numInPage),
+  }));
+  const numsToDelete = toMove.map((e: any) => e.numInPage as number);
 
+  console.log('[ToolActions] moveLayer: deleting', numsToDelete.length,
+    'elements, inserting to target layers');
+
+  // modifyElements doesn't change layerNum in native — use delete + insert instead
   await PluginNoteAPI.saveCurrentNote();
-  const modRes = await PluginFileAPI.modifyElements(_filePath, _pageNum, toModify) as any;
-  console.log('[ToolActions] modifyElements result:', modRes?.success, modRes?.error);
-  if (!modRes?.success) return `Modify failed: ${modRes?.error?.message ?? 'unknown'}`;
+
+  // Step 1: Delete elements from source layer
+  const delRes = await PluginFileAPI.deleteElements(_filePath, _pageNum, numsToDelete) as any;
+  console.log('[ToolActions] deleteElements result:', delRes?.success, delRes?.error);
+  if (!delRes?.success) {
+    await PluginCommAPI.reloadFile();
+    return `Delete failed: ${delRes?.error?.message ?? 'unknown'}`;
+  }
+
+  // Step 2: Insert elements into target layer
+  const insRes = await PluginFileAPI.insertElements(_filePath, _pageNum, toInsert) as any;
+  console.log('[ToolActions] insertElements result:', insRes?.success, insRes?.error);
+  if (!insRes?.success) {
+    await PluginCommAPI.reloadFile();
+    return `Insert failed: ${insRes?.error?.message ?? 'unknown'}`;
+  }
+
   await PluginCommAPI.reloadFile();
-  return `Moved ${toModify.length} element(s) ${direction}`;
+  return `Moved ${toMove.length} element(s) ${direction}`;
 }
 
 async function layerPrev(): Promise<string> {
@@ -435,18 +508,40 @@ async function layerNext(): Promise<string> {
 }
 
 async function clipSmartAction(slot: string): Promise<string> {
+  if (_clipBusy) return 'Clip busy';
+  _clipBusy = true;
   try {
-    const lassoRes = await PluginCommAPI.getLassoRect();
-    const hasLasso = lassoRes.success && lassoRes.result != null;
+    let hasLasso = false;
+    try {
+      const lassoRes = await PluginCommAPI.getLassoRect();
+      hasLasso = lassoRes.success && lassoRes.result != null;
+    } catch {}
+
     if (hasLasso) {
       return await clipSave(slot);
+    } else {
+      // 只有在确定要粘贴时，才在粘贴前固化清除套索状态
+      try { await (PluginCommAPI as any).setLassoBoxState?.(2); } catch (_) {}
+      return await clipPasteSticker(slot);
     }
-  } catch {}
-  return await clipPasteSticker(slot);
+  } finally {
+    _clipBusy = false;
+  }
 }
 
 async function clipSave(slot: string): Promise<string> {
   await ensureStickerDir();
+
+  // 如果剪贴板已有内容，弹出确认覆盖对话框
+  const existingClips = await loadClips();
+  if (existingClips[slot]) {
+    try {
+      const confirmed = await NativeUIUtils.showRattaDialog(
+        t('clip_overwrite'), t('btn_cancel'), t('btn_confirm'), true
+      );
+      if (!confirmed) return 'Clip save cancelled';
+    } catch (_) {}
+  }
 
   try {
     const cntRes = await (PluginCommAPI as any).getLassoElementTypeCounts?.();

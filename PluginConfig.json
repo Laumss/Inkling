@@ -4,8 +4,8 @@
     "iconPath": "./assets/toolbar_icon.png",
     "desc": "Floating quick toolbar for Supernote NOTE app.\n\nDraggable overlay with customizable tool buttons, edge snapping, auto horizontal/vertical layout, minimize/expand, and 10 preset slots.\n\nTools: layer switching, visibility toggle, insert images, insert text, and more.",
     "name": "Inkling",
-    "versionCode": "2",
-    "versionName": "0.1.1",
+    "versionCode": "3",
+    "versionName": "0.1.2",
     "jsMainPath": "index",
     "author": "Laumss"
 }

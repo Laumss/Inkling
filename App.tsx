@@ -545,12 +545,18 @@ function App(): React.JSX.Element {
       console.log('[App] nativeInsertDocLink: path=', path, 'linkName=', linkName);
       if (PluginNoteAPI) {
         try {
+          // 插入文档链接前，先固化上一次的套索选中态
+          try { await (PluginCommAPI as any).setLassoBoxState?.(2); } catch (_le) {}
 
           const fpRes = await PluginCommAPI.getCurrentFilePath();
           const pgRes = await PluginCommAPI.getCurrentPageNum();
           let pageW = 1404, pageH = 1872;
-          if (fpRes?.success && fpRes.result && pgRes?.success && pgRes.result !== undefined) {
-            const psRes: any = await PluginFileAPI.getPageSize(fpRes.result, pgRes.result);
+          let notePath = '';
+          let pageNum = 0;
+          if (fpRes?.success && fpRes.result) notePath = fpRes.result;
+          if (pgRes?.success && pgRes.result !== undefined) pageNum = pgRes.result;
+          if (notePath && pageNum !== undefined) {
+            const psRes: any = await PluginFileAPI.getPageSize(notePath, pageNum);
             if (psRes?.success && psRes.result) {
               pageW = psRes.result.width;
               pageH = psRes.result.height;
@@ -559,9 +565,61 @@ function App(): React.JSX.Element {
 
           const linkW = Math.min(linkName.length * 30 + 40, pageW * 0.6);
           const left = Math.round((pageW - linkW) / 2);
-          const top = Math.round(pageH * 0.15);
+          let top = Math.round(pageH * 0.15);
           const fontSize = 49;
           const lineH = fontSize + 10;
+
+          // 检测页面上已有的文本框/链接，避免重叠插入
+          try {
+            if (notePath) {
+              const elRes: any = await PluginFileAPI.getElements(pageNum, notePath);
+              if (elRes?.success && Array.isArray(elRes.result)) {
+                const occupied: { top: number; bottom: number }[] = [];
+                for (const el of elRes.result) {
+                  try {
+                    const elType = el.type;
+                    // type 500-502: 文本框 / 文本摘要
+                    if (typeof elType === 'number' && elType >= 500 && elType <= 502) {
+                      const rect = el.textBox?.textRect;
+                      if (rect && typeof rect.top === 'number' && typeof rect.bottom === 'number') {
+                        occupied.push({ top: rect.top, bottom: rect.bottom });
+                      }
+                    }
+                    // type 600: 链接元素
+                    if (typeof elType === 'number' && elType === 600) {
+                      const lk = el.link;
+                      if (lk && typeof lk.Y === 'number' && typeof lk.height === 'number') {
+                        occupied.push({ top: lk.Y, bottom: lk.Y + lk.height });
+                      }
+                    }
+                  } finally {
+                    try { el.recycle?.(); } catch (_) {}
+                  }
+                }
+                occupied.sort((a, b) => a.top - b.top);
+                const GAP = 10;
+                for (let iter = 0; iter < 50; iter++) {
+                  let collision = false;
+                  for (const range of occupied) {
+                    if (top < range.bottom && (top + lineH) > range.top) {
+                      console.log('[App] docLink collision at top=', top,
+                        'with existing [', range.top, ',', range.bottom, '] → skip to', range.bottom + GAP);
+                      top = range.bottom + GAP;
+                      collision = true;
+                      break;
+                    }
+                  }
+                  if (!collision) break;
+                }
+                if (top + lineH > pageH - 50) {
+                  console.warn('[App] docLink: no room on page, using original position');
+                  top = Math.round(pageH * 0.15);
+                }
+              }
+            }
+          } catch (ce) {
+            console.warn('[App] docLink collision scan failed (non-fatal):', ce);
+          }
 
           const ext = path.split('.').pop()?.toLowerCase() || '';
           const isDocFile = ['epub', 'pdf', 'cbz', 'doc', 'docx', 'djvu', 'mobi', 'fb2'].includes(ext);

@@ -80,6 +80,9 @@ const STRINGS = {
   clip_err_link:          { zh: '链接暂不支持剪贴板保存', en: 'Links cannot be saved to clipboard' },
   clip_err_textbox:       { zh: '文本框暂不支持剪贴板保存', en: 'Text boxes cannot be saved to clipboard' },
   clip_err_image:         { zh: '图片暂不支持剪贴板保存', en: 'Images cannot be saved to clipboard' },
+  clip_overwrite:         { zh: '剪贴板已有内容，是否覆盖？', en: 'Clipboard slot is not empty. Overwrite?' },
+  btn_cancel:             { zh: '取消', en: 'Cancel' },
+  btn_confirm:            { zh: '确定', en: 'OK' },
 
 };
 
