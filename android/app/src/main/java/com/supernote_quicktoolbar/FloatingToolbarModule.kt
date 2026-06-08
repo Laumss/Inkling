@@ -426,6 +426,19 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         handler.post {
             Log.i(TAG, "[LASSO-DBG/Kt] openPanel screen=$screen (prev pendingScreen=$pendingScreen)")
             hideAllNativePanels()
+
+            if (screen == "nativeSendClipboard") {
+                pendingScreen = "nativeSendHelper"
+                removeAll()
+                emitEvent("onNativePanelOpen", Arguments.createMap().apply { putString("panel", "send") })
+                SendPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show(syncClipboard = true)
+                handler.postDelayed({
+                    callShowPluginView()
+                    emitOpenMainWithRetries("nativeSendHelper")
+                }, 150)
+                return@post
+            }
+
             pendingScreen = screen ?: ""
             removeAll()
 
@@ -2074,18 +2087,18 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 },
                 onScreenshotToNote = { crop ->
                     Log.i(TAG, "[CROP-DBG/Kt] screenshot→note: ${crop.width}x${crop.height} path=$screenshotPath")
-
+                    CropPanel.currentInstance?.hide()
                     kotlin.concurrent.thread(isDaemon = true) {
-                        val result = DocScreenshotService.stageToQueue(screenshotPath, crop)
+                        val result = DocScreenshotService.stageToQueue(screenshotPath, crop, insertNext = true)
                         Log.i(TAG, "[CROP-DBG/Kt] screenshot→note stageToQueue result=$result")
                         if (fromStitch) DocScreenshotService.clearSession()
+                        handler.post {
+                            ScreenshotBubble.reshowIfPending()
+                            isInNoteApp = true
+                            if (tools.isNotEmpty() && rootView == null) restoreToolbar()
+                            returnToNoteApp()
+                        }
                     }
-                    CropPanel.currentInstance?.hide()
-                    ScreenshotBubble.reshowIfPending()
-
-                    isInNoteApp = true
-                    if (tools.isNotEmpty() && rootView == null) restoreToolbar()
-                    returnToNoteApp()
                 },
                 onCancel = {
                     Log.i(TAG, "[CROP-DBG/Kt] crop cancel")
@@ -2120,6 +2133,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                                 put("overlap", finalSession.params.overlap)
                                 put("topLayerIndex", finalSession.params.topLayerIndex)
                                 put("cols", finalSession.params.cols)
+                                put("gridOrder", finalSession.params.gridOrder)
                                 put("images", org.json.JSONArray().apply {
                                     for (img in finalSession.images) {
                                         put(org.json.JSONObject().apply {
@@ -2191,7 +2205,8 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         val cols = json.optInt("cols", 0)
         if (cols > 0 && imgs.size > 2) {
             val overlap = json.optInt("overlap", 0)
-            return compositeGrid(imagesArr, cols, overlap)
+            val gridOrder = json.optString("gridOrder", "row")
+            return compositeGrid(imagesArr, cols, overlap, gridOrder)
         }
 
         val direction = json.getString("direction")
@@ -2238,7 +2253,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         return outPath
     }
 
-    private fun compositeGrid(imagesArr: org.json.JSONArray, cols: Int, overlap: Int): String? {
+    private fun compositeGrid(imagesArr: org.json.JSONArray, cols: Int, overlap: Int, gridOrder: String = "row"): String? {
         val n = imagesArr.length()
         val rowCount = (n + cols - 1) / cols
 
@@ -2258,22 +2273,23 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             )
         }
 
-        val cellW = cells.maxOf { ((1f - it.cropLeft - it.cropRight) * it.width).toInt() }
-        val cellH = cells.maxOf { ((1f - it.cropTop - it.cropBottom) * it.height).toInt() }
+        val effWs = cells.map { ((1f - it.cropLeft - it.cropRight) * it.width).roundToInt() }
+        val effHs = cells.map { ((1f - it.cropTop - it.cropBottom) * it.height).roundToInt() }
 
         val isVerticalStrip = cols == 1
         val isHorizontalStrip = cols >= n
-        val ovl = if (isVerticalStrip || isHorizontalStrip) overlap else 0
 
         val canvasW: Int
         val canvasH: Int
         if (isVerticalStrip) {
-            canvasW = cellW
-            canvasH = cellH * rowCount - ovl * (rowCount - 1)
+            canvasW = effWs.max()
+            canvasH = effHs.sum() - overlap * (n - 1)
         } else if (isHorizontalStrip) {
-            canvasW = cellW * cols - ovl * (cols - 1)
-            canvasH = cellH
+            canvasW = effWs.sum() - overlap * (n - 1)
+            canvasH = effHs.max()
         } else {
+            val cellW = effWs.max()
+            val cellH = effHs.max()
             canvasW = cellW * cols
             canvasH = cellH * rowCount
         }
@@ -2283,37 +2299,50 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         val canvas = android.graphics.Canvas(result)
         val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG or android.graphics.Paint.FILTER_BITMAP_FLAG)
 
-        for ((i, cell) in cells.withIndex()) {
-            val col = i % cols
-            val row = i / cols
-            val bmp = android.graphics.BitmapFactory.decodeFile(cell.path) ?: continue
-            val srcRect = android.graphics.Rect(
-                (cell.width * cell.cropLeft).toInt(),
-                (cell.height * cell.cropTop).toInt(),
-                (cell.width * (1f - cell.cropRight)).toInt(),
-                (cell.height * (1f - cell.cropBottom)).toInt()
-            )
-            val effW = srcRect.width().toFloat()
-            val effH = srcRect.height().toFloat()
-            val scaleToFit = kotlin.math.min(cellW / effW, cellH / effH)
-            val drawW = effW * scaleToFit
-            val drawH = effH * scaleToFit
+        fun decodeSrcRect(cell: CellInfo) = android.graphics.Rect(
+            (cell.width * cell.cropLeft).toInt(),
+            (cell.height * cell.cropTop).toInt(),
+            (cell.width * (1f - cell.cropRight)).toInt(),
+            (cell.height * (1f - cell.cropBottom)).toInt()
+        )
 
-            val ox: Float
-            val oy: Float
-            if (isVerticalStrip) {
-                ox = (cellW - drawW) / 2f
-                oy = row * (cellH - ovl) + (cellH - drawH) / 2f
-            } else if (isHorizontalStrip) {
-                ox = col * (cellW - ovl) + (cellW - drawW) / 2f
-                oy = (cellH - drawH) / 2f
-            } else {
-                ox = col * cellW + (cellW - drawW) / 2f
-                oy = row * cellH + (cellH - drawH) / 2f
+        if (isVerticalStrip) {
+            var yOff = 0f
+            for ((i, cell) in cells.withIndex()) {
+                val bmp = android.graphics.BitmapFactory.decodeFile(cell.path) ?: continue
+                val ox = (canvasW - effWs[i]) / 2f
+                canvas.drawBitmap(bmp, decodeSrcRect(cell),
+                    android.graphics.RectF(ox, yOff, ox + effWs[i], yOff + effHs[i]), paint)
+                bmp.recycle()
+                yOff += effHs[i] - overlap
             }
-
-            canvas.drawBitmap(bmp, srcRect, android.graphics.RectF(ox, oy, ox + drawW, oy + drawH), paint)
-            bmp.recycle()
+        } else if (isHorizontalStrip) {
+            var xOff = 0f
+            for ((i, cell) in cells.withIndex()) {
+                val bmp = android.graphics.BitmapFactory.decodeFile(cell.path) ?: continue
+                val oy = (canvasH - effHs[i]) / 2f
+                canvas.drawBitmap(bmp, decodeSrcRect(cell),
+                    android.graphics.RectF(xOff, oy, xOff + effWs[i], oy + effHs[i]), paint)
+                bmp.recycle()
+                xOff += effWs[i] - overlap
+            }
+        } else {
+            val cellW = effWs.max()
+            val cellH = effHs.max()
+            val isColOrder = gridOrder == "col"
+            for ((i, cell) in cells.withIndex()) {
+                val col = if (isColOrder) i / rowCount else i % cols
+                val row = if (isColOrder) i % rowCount else i / cols
+                val bmp = android.graphics.BitmapFactory.decodeFile(cell.path) ?: continue
+                val scaleToFit = kotlin.math.min(cellW.toFloat() / effWs[i], cellH.toFloat() / effHs[i])
+                val drawW = effWs[i] * scaleToFit
+                val drawH = effHs[i] * scaleToFit
+                val ox = col * cellW + (cellW - drawW) / 2f
+                val oy = row * cellH + (cellH - drawH) / 2f
+                canvas.drawBitmap(bmp, decodeSrcRect(cell),
+                    android.graphics.RectF(ox, oy, ox + drawW, oy + drawH), paint)
+                bmp.recycle()
+            }
         }
 
         val outPath = "${reactApplicationContext.cacheDir.absolutePath}/stitch_grid_${System.currentTimeMillis()}.png"

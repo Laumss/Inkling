@@ -81,8 +81,16 @@ const STRINGS = {
   clip_err_textbox:       { zh: '文本框暂不支持剪贴板保存', en: 'Text boxes cannot be saved to clipboard' },
   clip_err_image:         { zh: '图片暂不支持剪贴板保存', en: 'Images cannot be saved to clipboard' },
   clip_overwrite:         { zh: '剪贴板已有内容，是否覆盖？', en: 'Clipboard slot is not empty. Overwrite?' },
+  clip_empty_hint:        { zh: '剪贴板为空，请先用套索选中内容保存', en: 'Clipboard is empty. Select content with lasso first.' },
   btn_cancel:             { zh: '取消', en: 'Cancel' },
   btn_confirm:            { zh: '确定', en: 'OK' },
+
+  no_wifi:                { zh: '未连接 WiFi', en: 'WiFi is not connected' },
+  localsend_ask_enable:   { zh: 'LocalSend 未开启，是否立即开启？', en: 'LocalSend is not running. Start it now?' },
+  localsend_started:      { zh: 'LocalSend 已开启', en: 'LocalSend started' },
+  localsend_stopped:      { zh: 'LocalSend 已关闭', en: 'LocalSend stopped' },
+  localsend_btn_on:       { zh: 'LocalSend ●', en: 'LocalSend ●' },
+  localsend_btn_off:      { zh: 'LocalSend ○', en: 'LocalSend ○' },
 
 };
 

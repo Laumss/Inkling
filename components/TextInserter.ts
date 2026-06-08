@@ -616,11 +616,9 @@ export class TextInserter {
             this.targetPage, '→', this.currentPage);
           FileLogger.logEvent('PageAutoRelocate',
             `target=${this.targetPage} → current=${this.currentPage}`);
-          const prevLeft = this.pageNextLeft.get(this.targetPage);
           this.relocateTo(this.currentPage);
           const relocTop = this._bubbleAnchorTop > 0 ? this._bubbleAnchorTop : this._topMargin();
           this.pageNextTop.set(this.currentPage, relocTop);
-          if (prevLeft !== undefined) this.pageNextLeft.set(this.currentPage, prevLeft);
           console.log('[TextInserter]: relocate set top=', relocTop, 'bubbleAnchor=', this._bubbleAnchorTop);
           this.onPositionChanged?.(this.currentPage, relocTop, itemSource, true);
         }
@@ -792,12 +790,10 @@ export class TextInserter {
 
           if (npRes?.success) {
             console.log('[TextInserter]: page created with template=', templateName);
-            const prevLeft = this.pageNextLeft.get(this.targetPage);
             this.targetPage = newPageIndex;
 
             const newPageTop = this._bubbleAnchorTop > 0 ? this._bubbleAnchorTop : tm;
             this.pageNextTop.set(newPageIndex, newPageTop);
-            if (prevLeft !== undefined) this.pageNextLeft.set(newPageIndex, prevLeft);
             console.log('[TextInserter]: new page top=', newPageTop,
               'bubbleAnchor=', this._bubbleAnchorTop, 'topMargin=', tm);
             this._occupiedRanges = [];

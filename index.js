@@ -3,13 +3,14 @@
 import { AppRegistry, Image, DeviceEventEmitter } from 'react-native';
 import App from './App';
 import { name as appName } from './app.json';
-import { PluginManager } from 'sn-plugin-lib';
-import { ensureInit, stopAllModes } from './components/BackgroundService';
+import { PluginManager, NativeUIUtils } from 'sn-plugin-lib';
+import { ensureInit, stopAllModes, startLocalSend, stopLocalSend, isLocalSendRunning } from './components/BackgroundService';
 import { setPendingButton, isAppMounted } from './pendingButton';
 import { warmupCache, getCachedConfig, getCachedClips, injectClipStatus, loadClips } from './components/ToolPresets';
 import FloatingToolbarBridge from './components/FloatingToolbarBridge';
+import LocalSendBridge from './components/LocalSendBridge';
 import { executeAction } from './components/ToolActions';
-import { setLocale } from './components/i18n';
+import { setLocale, t } from './components/i18n';
 import { PenLasso } from './components/PenTools';
 
 AppRegistry.registerComponent(appName, () => App);
@@ -24,6 +25,24 @@ PluginManager.registerLangListener({
     const locale = lang.toLowerCase().startsWith('zh') ? 'zh' : 'en';
     setLocale(locale);
   },
+});
+
+const localSendButtonIcon = Image.resolveAssetSource(require('./assets/toolbar_icon.png')).uri;
+
+function registerLocalSendButton() {
+  const running = isLocalSendRunning();
+  const name = running ? t('localsend_btn_on') : t('localsend_btn_off');
+  PluginManager.registerButton(1, ['NOTE'], {
+    id: 200,
+    name: JSON.stringify({ en: name, zh_CN: name }),
+    icon: localSendButtonIcon,
+    showType: 0,
+  });
+}
+
+DeviceEventEmitter.addListener('localSendStateChanged', ({ running }) => {
+  console.log('[index]: localSendStateChanged running=', running);
+  registerLocalSendButton();
 });
 
 FloatingToolbarBridge.onTitlePenLassoAction(() => {
@@ -81,6 +100,26 @@ FloatingToolbarBridge.onToolLongPress(async ({ toolId }) => {
       FloatingToolbarBridge.updateTools(injectClipStatus(config.tools, newClips, null));
     }
   }
+
+  if (toolId === 'send_ai') {
+    try {
+      const wifi = await LocalSendBridge.isWifiConnected();
+      if (!wifi) {
+        NativeUIUtils.showErrorTipDialog(t('no_wifi'));
+        return;
+      }
+      if (!isLocalSendRunning()) {
+        const confirmed = await NativeUIUtils.showRattaDialog(
+          t('localsend_ask_enable'), t('btn_cancel'), t('btn_confirm'), false
+        );
+        if (!confirmed) return;
+        await startLocalSend();
+      }
+      FloatingToolbarBridge.openPanel('nativeSendClipboard');
+    } catch (e) {
+      console.error('[index]: send_ai longPress error:', e);
+    }
+  }
 });
 
 let lastCaptureTime = 0;
@@ -95,6 +134,28 @@ PluginManager.registerButtonListener({
       if (now - lastCaptureTime < CAPTURE_DEBOUNCE) return;
       lastCaptureTime = now;
       FloatingToolbarBridge.handleDocScreenshotCrop();
+      return;
+    }
+
+    if (event.id === 200) {
+      (async () => {
+        try {
+          if (isLocalSendRunning()) {
+            await stopLocalSend();
+            NativeUIUtils.showErrorTipDialog(t('localsend_stopped'));
+          } else {
+            const wifi = await LocalSendBridge.isWifiConnected();
+            if (!wifi) {
+              NativeUIUtils.showErrorTipDialog(t('no_wifi'));
+              return;
+            }
+            const ok = await startLocalSend();
+            if (ok) NativeUIUtils.showErrorTipDialog(t('localsend_started'));
+          }
+        } catch (e) {
+          console.error('[index]: LocalSend toggle error:', e);
+        }
+      })();
       return;
     }
 
@@ -139,6 +200,8 @@ PluginManager.registerButton(1, ['NOTE'], {
   icon: Image.resolveAssetSource(require('./assets/toolbar_icon.png')).uri,
   showType: 0,
 });
+
+registerLocalSendButton();
 
 PluginManager.registerButton(1, ['DOC'], {
   id: 300,

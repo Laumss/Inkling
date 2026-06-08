@@ -58,6 +58,7 @@ class DocScreenshotPanel(
 
     private var contentGrid: LinearLayout? = null
     private var scrollHost: PanelScrollHost? = null
+    private val cellFrameMap = mutableMapOf<String, FrameLayout>()
     private var tabBar: PanelTabBar? = null
     private var insertBtn: SelectionButton? = null
     private var deleteBtn: SelectionButton? = null
@@ -68,6 +69,11 @@ class DocScreenshotPanel(
         currentInstance = this
         selectedPath = null
         activeTab = initialTab
+        if (activeTab == "queue") {
+            val queueDir = java.io.File(QUEUE_DIR)
+            val hasFiles = queueDir.exists() && queueDir.listFiles()?.any { it.name.endsWith(".png") } == true
+            if (!hasFiles) activeTab = "history"
+        }
         showPanel()
         handler.post { refreshContent() }
     }
@@ -75,6 +81,7 @@ class DocScreenshotPanel(
     override fun onHide() {
         contentGrid = null; scrollHost = null; tabBar = null
         insertBtn = null; deleteBtn = null
+        cellFrameMap.clear()
         currentInstance = null
     }
 
@@ -125,6 +132,7 @@ class DocScreenshotPanel(
     private fun refreshContent(clearSelection: Boolean) {
         val grid = contentGrid ?: return
         if (clearSelection) scrollHost?.prepareForContentChange()
+        cellFrameMap.clear()
         grid.removeAllViews()
         if (clearSelection) { selectedPath = null; updateButtons() }
 
@@ -168,9 +176,11 @@ class DocScreenshotPanel(
             orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(width, LinearLayout.LayoutParams.WRAP_CONTENT)
             setOnClickListener {
+                val oldPath = selectedPath
                 selectedPath = if (selectedPath == file.absolutePath) null else file.absolutePath
                 updateButtons()
-                refreshContent(clearSelection = false)
+                applyCellSelection(oldPath, false)
+                applyCellSelection(selectedPath, true)
             }
         }
 
@@ -198,6 +208,7 @@ class DocScreenshotPanel(
         }
         thumbFrame.addView(imageView)
         loadThumbnail(file.absolutePath, width, thumbH, imageView)
+        cellFrameMap[file.absolutePath] = thumbFrame
         cell.addView(thumbFrame)
 
         val textContainer = LinearLayout(reactContext).apply {
@@ -219,6 +230,17 @@ class DocScreenshotPanel(
         })
         cell.addView(textContainer)
         return cell
+    }
+
+    private fun applyCellSelection(path: String?, selected: Boolean) {
+        if (path == null) return
+        val frame = cellFrameMap[path] ?: return
+        frame.background = GradientDrawable().apply {
+            setColor(Color.WHITE)
+            setStroke(if (selected) dp(2) else dp(1),
+                if (selected) Color.BLACK else Color.parseColor("#CCCCCC"))
+            cornerRadius = dp(4).toFloat()
+        }
     }
 
     private fun doInsert() {

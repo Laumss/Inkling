@@ -66,6 +66,12 @@ class StitchPanel(
     private var isCompositing = false
     private var configCallback: ComponentCallbacks2? = null
     private var lastBuiltLandscape: Boolean? = null
+    private var colBtnList = mutableListOf<Pair<Int, TextView>>()
+    private var gridOrderRow: LinearLayout? = null
+    private var gridOrderBtn: TextView? = null
+    private var preCompositeBitmap: Bitmap? = null
+    private var preCompositePath: String? = null
+    private var stripVirtualSession: StitchSessionData? = null
 
     private val isGridMode: Boolean get() = (session?.images?.size ?: 0) > 2
 
@@ -104,11 +110,10 @@ class StitchPanel(
 
     private fun applyDefaultDirection(session: StitchSessionData) {
         toolbarModule.refreshScreenDimensions()
-        val wantHorizontal = !isLandscape
         if (session.images.size > 2) {
-
-            session.params.cols = if (wantHorizontal) session.images.size else 1
+            session.params.cols = if (session.params.direction == "vertical") 1 else session.images.size
         } else {
+            val wantHorizontal = !isLandscape
             session.params.direction = if (wantHorizontal) "horizontal" else "vertical"
         }
     }
@@ -123,6 +128,14 @@ class StitchPanel(
         stitchView = null
         gridView = null
         lastBuiltLandscape = null
+        colBtnList.clear()
+        gridOrderRow = null
+        gridOrderBtn = null
+        preCompositeBitmap?.recycle()
+        preCompositeBitmap = null
+        preCompositePath?.let { try { java.io.File(it).delete() } catch (_: Exception) {} }
+        preCompositePath = null
+        stripVirtualSession = null
         currentInstance = null
     }
 
@@ -143,6 +156,66 @@ class StitchPanel(
         val cb = configCallback ?: return
         try { reactContext.applicationContext.unregisterComponentCallbacks(cb) } catch (_: Exception) {}
         configCallback = null
+    }
+
+    private fun rebuildContent() {
+        val root = rootView as? FrameLayout ?: return
+        stitchView = null
+        gridView = null
+        root.removeAllViews()
+        populateContent(root)
+    }
+
+    private fun preCompositeStrip(sess: StitchSessionData): Bitmap? {
+        val imgs = sess.images.subList(0, sess.images.size - 1)
+        if (imgs.isEmpty()) return null
+        if (imgs.size == 1) return BitmapFactory.decodeFile(imgs[0].path)
+
+        val isVert = sess.params.direction == "vertical"
+        val effWs = imgs.map { ((1f - it.cropLeft - it.cropRight) * it.width).roundToInt() }
+        val effHs = imgs.map { ((1f - it.cropTop - it.cropBottom) * it.height).roundToInt() }
+        val ovl = sess.params.overlap
+
+        val canvasW: Int; val canvasH: Int
+        if (isVert) {
+            canvasW = effWs.max(); canvasH = effHs.sum() - ovl * (imgs.size - 1)
+        } else {
+            canvasW = effWs.sum() - ovl * (imgs.size - 1); canvasH = effHs.max()
+        }
+        if (canvasW <= 0 || canvasH <= 0) return null
+
+        val result = Bitmap.createBitmap(canvasW, canvasH, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(result)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+
+        if (isVert) {
+            var yOff = 0f
+            for ((i, img) in imgs.withIndex()) {
+                val bmp = BitmapFactory.decodeFile(img.path) ?: continue
+                val src = Rect(
+                    (img.width * img.cropLeft).toInt(), (img.height * img.cropTop).toInt(),
+                    (img.width * (1f - img.cropRight)).toInt(), (img.height * (1f - img.cropBottom)).toInt()
+                )
+                val ox = (canvasW - effWs[i]) / 2f
+                canvas.drawBitmap(bmp, src, RectF(ox, yOff, ox + effWs[i], yOff + effHs[i]), paint)
+                bmp.recycle()
+                yOff += effHs[i] - ovl
+            }
+        } else {
+            var xOff = 0f
+            for ((i, img) in imgs.withIndex()) {
+                val bmp = BitmapFactory.decodeFile(img.path) ?: continue
+                val src = Rect(
+                    (img.width * img.cropLeft).toInt(), (img.height * img.cropTop).toInt(),
+                    (img.width * (1f - img.cropRight)).toInt(), (img.height * (1f - img.cropBottom)).toInt()
+                )
+                val oy = (canvasH - effHs[i]) / 2f
+                canvas.drawBitmap(bmp, src, RectF(xOff, oy, xOff + effWs[i], oy + effHs[i]), paint)
+                bmp.recycle()
+                xOff += effWs[i] - ovl
+            }
+        }
+        return result
     }
 
     private fun rebuildIfOrientationChanged() {
@@ -193,7 +266,50 @@ class StitchPanel(
         ).apply { gravity = Gravity.TOP }
         root.addView(bar.view)
 
-        if (isGridMode) {
+        if (isGridMode && isLinearMode(sess)) {
+            val preComp = preCompositeStrip(sess)
+            val lastBmp = bitmaps.lastOrNull()
+            if (preComp != null && lastBmp != null) {
+                preCompositeBitmap?.recycle()
+                preCompositeBitmap = preComp
+                val tmpPath = "${reactContext.cacheDir.absolutePath}/pre_composite_${System.currentTimeMillis()}.png"
+                java.io.FileOutputStream(tmpPath).use { preComp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                preCompositePath?.let { try { java.io.File(it).delete() } catch (_: Exception) {} }
+                preCompositePath = tmpPath
+
+                val lastImg = sess.images.last()
+                val vSess = StitchSessionData(
+                    images = mutableListOf(
+                        StitchImage(tmpPath, preComp.width, preComp.height),
+                        StitchImage(lastImg.path, lastImg.width, lastImg.height,
+                            lastImg.cropTop, lastImg.cropBottom, lastImg.cropLeft, lastImg.cropRight)
+                    ),
+                    params = StitchParams(
+                        direction = sess.params.direction,
+                        overlap = 0,
+                        topLayerIndex = 1,
+                        cols = 0
+                    ),
+                    createdAt = sess.createdAt
+                )
+                stripVirtualSession = vSess
+
+                val sv = StitchView(reactContext, vSess, preComp, lastBmp, headerH, ctrlH)
+                sv.layoutParams = FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT
+                ).apply { topMargin = headerH; bottomMargin = ctrlH }
+                root.addView(sv)
+                stitchView = sv
+
+                val ctrl = buildStripModeControlPanel(vSess, ctrlH)
+                ctrl.layoutParams = FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT, ctrlH
+                ).apply { gravity = Gravity.BOTTOM }
+                root.addView(ctrl)
+            }
+        } else if (isGridMode) {
+            stripVirtualSession = null
 
             val gv = GridStitchView(reactContext, sess, bitmaps, headerH, ctrlH)
             gv.layoutParams = FrameLayout.LayoutParams(
@@ -209,6 +325,7 @@ class StitchPanel(
             ).apply { gravity = Gravity.BOTTOM }
             root.addView(ctrl)
         } else if (bitmaps.size >= 2 && bitmaps[0] != null && bitmaps[1] != null) {
+            stripVirtualSession = null
 
             val sv = StitchView(reactContext, sess, bitmaps[0]!!, bitmaps[1]!!, headerH, ctrlH)
             sv.layoutParams = FrameLayout.LayoutParams(
@@ -251,6 +368,80 @@ class StitchPanel(
         }
     }
 
+    private fun buildStripModeControlPanel(vSess: StitchSessionData, ctrlH: Int): LinearLayout {
+        val ctrl = LinearLayout(reactContext).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            if (isLandscape) setPadding(dp(12), dp(14), dp(12), dp(22))
+            else setPadding(dp(12), dp(8), dp(12), dp(8))
+        }
+        ctrl.addView(View(reactContext).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(1)
+            )
+            setBackgroundColor(Color.parseColor("#CCCCCC"))
+        })
+
+        val modeRow = LinearLayout(reactContext).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(6); bottomMargin = dp(6) }
+        }
+        val dirLabel = if (session?.params?.direction == "vertical") "↕ Strip" else "↔ Strip"
+        val stripBtn = makeCtrlBtn(dirLabel) {}
+        stripBtn.background = GradientDrawable().apply { setColor(Color.BLACK); setStroke(dp(1), Color.BLACK) }
+        stripBtn.setTextColor(Color.WHITE)
+        modeRow.addView(stripBtn)
+        modeRow.addView(makeCtrlBtn("⊞ Grid") {
+            val s = session ?: return@makeCtrlBtn
+            s.params.cols = 2
+            applyOrientation(desiredOrientation())
+            rebuildContent()
+        })
+        ctrl.addView(modeRow)
+
+        val row2 = LinearLayout(reactContext).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(4) }
+        }
+        row2.addView(makeSmallBtn("⇅ Swap") {
+            stitchView?.swapBitmaps()
+            val tmp = vSess.images[0]
+            vSess.images[0] = vSess.images[1]
+            vSess.images[1] = tmp
+            rebuildStitchView()
+        })
+        row2.addView(makeSmallBtn("☰ Top: ${vSess.params.topLayerIndex + 1}") {
+            vSess.params.topLayerIndex = if (vSess.params.topLayerIndex == 0) 1 else 0
+            rebuildStitchView()
+        })
+        ctrl.addView(row2)
+
+        val row3 = LinearLayout(reactContext).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        }
+        overlapLabel = TextView(reactContext).apply {
+            text = "Overlap: ${vSess.params.overlap}px"
+            textSize = sp(15f); setTextColor(Color.BLACK)
+            setPadding(0, 0, dp(8), 0)
+        }
+        row3.addView(overlapLabel)
+        for (delta in listOf(-50, -10, 10, 50)) {
+            row3.addView(makeSmallBtn(if (delta > 0) "+$delta" else "$delta") {
+                adjustOverlap(delta)
+            })
+        }
+        ctrl.addView(row3)
+        return ctrl
+    }
+
     private var colsLabel: TextView? = null
     private var gridCtrlContainer: LinearLayout? = null
     private var gridOverlapRow: LinearLayout? = null
@@ -286,32 +477,56 @@ class StitchPanel(
             ).apply { topMargin = dp(6); bottomMargin = dp(6) }
         }
 
+        val dirLabel = if (sess.params.direction == "vertical") "↕ Strip" else "↔ Strip"
+        row1.addView(makeCtrlBtn(dirLabel) {
+            val s = session ?: return@makeCtrlBtn
+            s.params.cols = if (s.params.direction == "vertical") 1 else s.images.size
+            applyOrientation(desiredOrientation())
+            rebuildContent()
+        })
+
         colsLabel = TextView(reactContext).apply {
-            text = "${sess.images.size} images"
+            text = "⊞ Grid"
             textSize = sp(15f); setTextColor(Color.BLACK)
             setPadding(0, 0, dp(12), 0)
         }
         row1.addView(colsLabel)
 
+        colBtnList.clear()
         for (c in 1..minOf(4, sess.images.size)) {
             val label = if (c == 1) "1 col" else "$c cols"
             val btn = makeCtrlBtn(label) {
                 val s = session ?: return@makeCtrlBtn
                 s.params.cols = c
+                updateColHighlights(c)
                 updateOverlapRowVisibility(s)
+                updateGridOrderVisibility(s)
                 applyOrientation(desiredOrientation())
                 gridView?.updateSession(s)
             }
-            if (c == sess.params.cols) {
-                btn.background = GradientDrawable().apply {
-                    setColor(Color.BLACK)
-                    setStroke(dp(1), Color.BLACK)
-                }
-                btn.setTextColor(Color.WHITE)
-            }
+            colBtnList.add(c to btn)
             row1.addView(btn)
         }
+        updateColHighlights(sess.params.cols)
         ctrl.addView(row1)
+
+        gridOrderRow = LinearLayout(reactContext).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(4) }
+            visibility = if (!isLinearMode(sess)) View.VISIBLE else View.GONE
+        }
+        gridOrderBtn = makeSmallBtn(gridOrderLabel(sess)) {
+            val s = session ?: return@makeSmallBtn
+            s.params.gridOrder = if (s.params.gridOrder == "row") "col" else "row"
+            gridOrderBtn?.text = gridOrderLabel(s)
+            gridView?.updateSession(s)
+        }
+        gridOrderRow!!.addView(gridOrderBtn)
+        ctrl.addView(gridOrderRow!!)
 
         gridOverlapRow = LinearLayout(reactContext).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -388,8 +603,32 @@ class StitchPanel(
         gridView?.updateSession(s)
     }
 
+    private fun updateColHighlights(activeCols: Int) {
+        for ((c, btn) in colBtnList) {
+            if (c == activeCols) {
+                btn.background = GradientDrawable().apply {
+                    setColor(Color.BLACK); setStroke(dp(1), Color.BLACK)
+                }
+                btn.setTextColor(Color.WHITE)
+            } else {
+                btn.background = GradientDrawable().apply {
+                    setColor(Color.WHITE); setStroke(dp(1), Color.BLACK)
+                }
+                btn.setTextColor(Color.BLACK)
+            }
+        }
+    }
+
     private fun updateOverlapRowVisibility(sess: StitchSessionData) {
         gridOverlapRow?.visibility = if (isLinearMode(sess)) View.VISIBLE else View.GONE
+    }
+
+    private fun updateGridOrderVisibility(sess: StitchSessionData) {
+        gridOrderRow?.visibility = if (!isLinearMode(sess)) View.VISIBLE else View.GONE
+    }
+
+    private fun gridOrderLabel(sess: StitchSessionData): String {
+        return if (sess.params.gridOrder == "row") "⊞ 12|34" else "⊞ 13|24"
     }
 
     private fun buildControlPanel(sess: StitchSessionData, ctrlH: Int): LinearLayout {
@@ -475,7 +714,7 @@ class StitchPanel(
     private var overlapLabel: TextView? = null
 
     private fun adjustOverlap(delta: Int) {
-        val s = session ?: return
+        val s = stripVirtualSession ?: session ?: return
         val imgs = s.images
         if (imgs.size < 2) return
         val isVert = s.params.direction == "vertical"
@@ -490,7 +729,7 @@ class StitchPanel(
     }
 
     private fun rebuildStitchView() {
-        val s = session ?: return
+        val s = stripVirtualSession ?: session ?: return
         stitchView?.updateSession(s)
         overlapLabel?.text = "Overlap: ${s.params.overlap}px"
     }
@@ -498,7 +737,7 @@ class StitchPanel(
     private fun doConfirm() {
         if (isCompositing) return
         isCompositing = true
-        val s = session ?: return
+        val s = stripVirtualSession ?: session ?: return
         onConfirm?.invoke(s)
     }
 
@@ -581,8 +820,10 @@ class StitchPanel(
             val n = sess.images.size
             val rows = (n + cols - 1) / cols
 
-            val maxEffW = sess.images.maxOf { it.width * (1f - it.cropLeft - it.cropRight) }
-            val maxEffH = sess.images.maxOf { it.height * (1f - it.cropTop - it.cropBottom) }
+            val effWs = sess.images.map { it.width * (1f - it.cropLeft - it.cropRight) }
+            val effHs = sess.images.map { it.height * (1f - it.cropTop - it.cropBottom) }
+            val maxEffW = effWs.max()
+            val maxEffH = effHs.max()
 
             val isVertStrip = cols == 1
             val isHorizStrip = cols >= n
@@ -592,9 +833,9 @@ class StitchPanel(
             val totalH: Float
             if (isVertStrip) {
                 totalW = maxEffW
-                totalH = maxEffH * rows - ovl * (rows - 1)
+                totalH = effHs.sum() - ovl * (n - 1)
             } else if (isHorizStrip) {
-                totalW = maxEffW * cols - ovl * (cols - 1)
+                totalW = effWs.sum() - ovl * (n - 1)
                 totalH = maxEffH
             } else {
                 totalW = maxEffW * cols
@@ -604,30 +845,42 @@ class StitchPanel(
             val availW = viewW - pad * 2f
             val availH = viewH - pad * 2f
             val scale = min(availW / max(totalW, 1f), min(availH / max(totalH, 1f), 1f))
-            val cellW = maxEffW * scale
-            val cellH = maxEffH * scale
             val ovlScaled = ovl * scale
             val gridW = totalW * scale
             val gridH = totalH * scale
             val originX = (viewW - gridW) / 2f
             val originY = (viewH - gridH) / 2f
 
-            cellRects = (0 until n).map { i ->
-                val col = i % cols
-                val row = i / cols
-                val x: Float
-                val y: Float
-                if (isVertStrip) {
-                    x = originX
-                    y = originY + row * (cellH - ovlScaled)
-                } else if (isHorizStrip) {
-                    x = originX + col * (cellW - ovlScaled)
-                    y = originY
-                } else {
-                    x = originX + col * cellW
-                    y = originY + row * cellH
+            cellRects = if (isVertStrip) {
+                var yOff = originY
+                (0 until n).map { i ->
+                    val cw = effWs[i] * scale
+                    val ch = effHs[i] * scale
+                    val x = originX + (maxEffW * scale - cw) / 2f
+                    val rect = RectF(x, yOff, x + cw, yOff + ch)
+                    yOff += ch - ovlScaled
+                    rect
                 }
-                RectF(x, y, x + cellW, y + cellH)
+            } else if (isHorizStrip) {
+                var xOff = originX
+                (0 until n).map { i ->
+                    val cw = effWs[i] * scale
+                    val ch = effHs[i] * scale
+                    val y = originY + (maxEffH * scale - ch) / 2f
+                    val rect = RectF(xOff, y, xOff + cw, y + ch)
+                    xOff += cw - ovlScaled
+                    rect
+                }
+            } else {
+                val cellW = maxEffW * scale
+                val cellH = maxEffH * scale
+                val isColOrder = sess.params.gridOrder == "col"
+                (0 until n).map { i ->
+                    val col = if (isColOrder) i / rows else i % cols
+                    val row = if (isColOrder) i % rows else i / cols
+                    RectF(originX + col * cellW, originY + row * cellH,
+                          originX + col * cellW + cellW, originY + row * cellH + cellH)
+                }
             }
         }
 

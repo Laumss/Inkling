@@ -126,7 +126,8 @@ object DocScreenshotService {
         var direction: String = "vertical",
         var overlap: Int = 100,
         var topLayerIndex: Int = 1,
-        var cols: Int = 0
+        var cols: Int = 0,
+        var gridOrder: String = "row"
     )
 
     data class StitchSessionData(
@@ -165,6 +166,7 @@ object DocScreenshotService {
                 overlap = p.optInt("overlap", 100),
                 topLayerIndex = p.optInt("topLayerIndex", 1),
                 cols = p.optInt("cols", 0),
+                gridOrder = p.optString("gridOrder", "row"),
             )
             StitchSessionData(imageList, params, json.optLong("createdAt", 0))
         } catch (e: Exception) {
@@ -182,6 +184,7 @@ object DocScreenshotService {
                 put("overlap", session.params.overlap)
                 put("topLayerIndex", session.params.topLayerIndex)
                 put("cols", session.params.cols)
+                put("gridOrder", session.params.gridOrder)
             })
             put("images", JSONArray().apply {
                 for (img in session.images) {

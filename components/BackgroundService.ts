@@ -1,7 +1,7 @@
 
 
 import { NativeModules, NativeEventEmitter, DeviceEventEmitter } from 'react-native';
-import { PluginCommAPI } from 'sn-plugin-lib';
+import { PluginCommAPI, NativeUIUtils } from 'sn-plugin-lib';
 import { TextInserter, InsertMode, TextSource } from './TextInserter';
 import { FileLogger } from './FileLogger';
 import LocalSendBridge, { TextReceivedInfo } from './LocalSendBridge';
@@ -63,8 +63,6 @@ let _aiPositionLocked = false;
 let _switchVersion = 0;
 
 let _localSendStarted = false;
-
-let _localSendProbing = false;
 
 function clearAiTimeout(): void {
   if (_aiTimeoutRef !== null) {
@@ -227,10 +225,16 @@ export function ensureInit(): void {
         if (isPageChange) {
           const ps = _textInserter?.getPageSize();
           if (ps) { FloatingBubbleBridge.setPageHeight(ps.height); FloatingBubbleBridge.setPageWidth(ps.width); }
-          const left = _textInserter?.getNextLeft() ?? 0;
-          _aiPositionLocked = true;
-          FloatingBubbleBridge.showAt(_getBubbleStatusText(), left, nextTop);
-          console.log('[BackgroundService]: pageChange showAt left=', left, 'top=', nextTop);
+          const left = _textInserter?.getNextLeft();
+          if (left !== undefined) {
+            _aiPositionLocked = true;
+            FloatingBubbleBridge.showAt(_getBubbleStatusText(), left, nextTop);
+            console.log('[BackgroundService]: pageChange showAt left=', left, 'top=', nextTop);
+          } else {
+            _aiPositionLocked = false;
+            FloatingBubbleBridge.show(_getBubbleStatusText());
+            console.log('[BackgroundService]: pageChange show (bubble decides position)');
+          }
         } else {
           FloatingBubbleBridge.updateText(_getBubbleStatusText());
         }
@@ -293,7 +297,26 @@ export function ensureInit(): void {
   DeviceEventEmitter.addListener('onLocalSendStopped', () => {
     console.log('[BackgroundService]: WiFi lost – LocalSend server stopped');
     _localSendStarted = false;
-    _localSendProbing = false;
+    DeviceEventEmitter.emit('localSendStateChanged', { running: false });
+  });
+
+  LocalSendBridge.onClipboardSyncReceived(async (info) => {
+    console.log('[BackgroundService]: clipboard sync received from', info.senderAlias);
+    try {
+      const msg = t('sync_clipboard_ask').replace('%s', info.senderAlias);
+      const confirmed = await NativeUIUtils.showRattaDialog(msg, t('btn_cancel'), t('btn_confirm'), false);
+      if (!confirmed) {
+        try { const RNFS = require('react-native-fs').default; await RNFS.unlink(info.zipPath); } catch (_) {}
+        return;
+      }
+      const ok = await LocalSendBridge.importClipboardSync(info.zipPath);
+      if (ok) {
+        NativeUIUtils.showErrorTipDialog(t('sync_clipboard_ok'));
+        DeviceEventEmitter.emit('clipboardChanged');
+      }
+    } catch (e) {
+      console.warn('[BackgroundService]: clipboard sync import error:', e);
+    }
   });
 
   if (FloatingBubbleBridge.isAvailable) {
@@ -427,8 +450,6 @@ export async function toggleMode(target: InsertMode): Promise<InsertMode | null>
   ensureInit();
   if (!_textInserter) return null;
 
-  ensureLocalSendReady().catch(() => {});
-
   const cur = _activeMode;
 
   const isActuallyRunning = _textInserter.isRunning() || _textInserter.isPaused();
@@ -494,8 +515,6 @@ export function stopAllModes(): void {
 export async function switchToMode(mode: InsertMode): Promise<boolean> {
   ensureInit();
   if (!_textInserter) return false;
-
-  ensureLocalSendReady().catch(() => {});
 
   const myVersion = ++_switchVersion;
   const previousMode = _lastMode;
@@ -749,39 +768,38 @@ export async function restartServer(dest: string): Promise<void> {
   }
 }
 
-export async function ensureLocalSendReady(): Promise<void> {
-  if (_localSendStarted || _localSendProbing) return;
-  _localSendProbing = true;
+export async function startLocalSend(): Promise<boolean> {
+  if (_localSendStarted) return true;
   try {
-
     const status = await LocalSendBridge.getServerStatus();
     if (status?.running) {
-      console.log('[BackgroundService]: native server already running, adopting');
       _localSendStarted = true;
-      return;
+      DeviceEventEmitter.emit('localSendStateChanged', { running: true });
+      return true;
     }
-
-    console.log('[BackgroundService]: probing LAN for LocalSend peers...');
-    FileLogger.logEvent('LocalSendProbe', 'start');
-    await LocalSendBridge.scanForPeers();
-    const peers = await LocalSendBridge.getDiscoveredPeers();
-    if (peers.length > 0) {
-      console.log('[BackgroundService]: found', peers.length, 'peer(s), starting server');
-      FileLogger.logEvent('LocalSendProbe', `found ${peers.length} peer(s), starting server`);
-      await LocalSendBridge.startServer({
-        alias: 'Supernote', port: 53317,
-        dest: '/sdcard/INBOX', pin: '',
-      });
-      _localSendStarted = true;
-    } else {
-      console.log('[BackgroundService]: no peers found, server not started');
-      FileLogger.logEvent('LocalSendProbe', 'no peers');
-    }
+    await LocalSendBridge.startServer({
+      alias: 'Supernote', port: 53317,
+      dest: '/sdcard/INBOX', pin: '',
+    });
+    _localSendStarted = true;
+    console.log('[BackgroundService]: LocalSend server started');
+    DeviceEventEmitter.emit('localSendStateChanged', { running: true });
+    return true;
   } catch (e) {
-    console.warn('[BackgroundService]: ensureLocalSendReady error:', e);
-  } finally {
-    _localSendProbing = false;
+    console.warn('[BackgroundService]: startLocalSend error:', e);
+    return false;
   }
+}
+
+export async function stopLocalSend(): Promise<void> {
+  try { await LocalSendBridge.stopServer(); } catch (_) {}
+  _localSendStarted = false;
+  console.log('[BackgroundService]: LocalSend server stopped');
+  DeviceEventEmitter.emit('localSendStateChanged', { running: false });
+}
+
+export function isLocalSendRunning(): boolean {
+  return _localSendStarted;
 }
 
 export function pauseInsertion(): void {

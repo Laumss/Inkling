@@ -91,7 +91,7 @@ class DocLinkPanel(
         chips!!.setSelection("Document")
         root.addView(chips!!.createView())
 
-        scrollHost = PanelScrollHost(reactContext)
+        scrollHost = PanelScrollHost(reactContext, overlayScrollbar = true)
         contentGrid = scrollHost!!.content
         root.addView(scrollHost!!.view)
 

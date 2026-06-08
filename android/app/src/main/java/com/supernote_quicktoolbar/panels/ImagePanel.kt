@@ -86,6 +86,7 @@ class ImagePanel(
     private var insertBtn: SelectionButton? = null
 
     private var multiCheckbox: PanelCheckbox? = null
+    private val cellFrameMap = mutableMapOf<String, FrameLayout>()
 
     fun show() {
         currentInstance = this
@@ -113,6 +114,7 @@ class ImagePanel(
         scrollHost = null; tabBar = null; chips = null; chipsView = null
         cropBtn = null; insertBtn = null
         multiCheckbox = null
+        cellFrameMap.clear()
         currentInstance = null
     }
 
@@ -210,6 +212,7 @@ class ImagePanel(
     private fun showPage(resetScroll: Boolean = true) {
         val grid = contentGrid ?: return
         if (resetScroll) scrollHost?.prepareForContentChange()
+        cellFrameMap.clear()
         grid.removeAllViews()
 
         if (allItems.isEmpty()) {
@@ -298,17 +301,19 @@ class ImagePanel(
                     chips?.rebuildChips()
                     refreshContent()
                 } else if (multiSelectMode) {
-                    if (item.path in multiSelectedPaths) multiSelectedPaths.remove(item.path)
-                    else multiSelectedPaths.add(item.path)
+                    val wasSelected = item.path in multiSelectedPaths
+                    if (wasSelected) multiSelectedPaths.remove(item.path) else multiSelectedPaths.add(item.path)
                     updateMultiSelectUI()
-                    showPage(resetScroll = false)
+                    applyCellSelection(item.path, !wasSelected)
                 } else {
+                    val oldPath = selectedImagePath
                     selectedImagePath = if (selectedImagePath == item.path) null else item.path
                     val hasSelection = selectedImagePath != null
                     cropBtn?.update(hasSelection)
                     insertBtn?.update(hasSelection)
                     updateCheckboxEnabled()
-                    showPage(resetScroll = false)
+                    applyCellSelection(oldPath, false)
+                    applyCellSelection(selectedImagePath, true)
                 }
             }
         }
@@ -361,18 +366,9 @@ class ImagePanel(
             loadThumbnail(item.path, width, thumbH, imageView)
         }
         if (isSelected && multiSelectMode) {
-            thumbFrame.addView(TextView(reactContext).apply {
-                text = "✓"; textSize = sp(12f); setTextColor(Color.WHITE)
-                gravity = Gravity.CENTER
-                background = GradientDrawable().apply {
-                    setColor(Color.BLACK); cornerRadius = dp(10).toFloat()
-                }
-                layoutParams = FrameLayout.LayoutParams(dp(20), dp(20)).apply {
-                    gravity = Gravity.TOP or Gravity.END
-                    setMargins(0, dp(4), dp(4), 0)
-                }
-            })
+            thumbFrame.addView(makeCheckmark())
         }
+        if (!item.isDir) cellFrameMap[item.path] = thumbFrame
         cell.addView(thumbFrame)
 
         val textContainer = LinearLayout(reactContext).apply {
@@ -409,6 +405,34 @@ class ImagePanel(
                 val bmp = BitmapFactory.decodeFile(path, opts) ?: return@thread
                 handler.post { imageView.setImageBitmap(bmp) }
             } catch (_: Exception) {}
+        }
+    }
+
+    private fun makeCheckmark(): TextView = TextView(reactContext).apply {
+        tag = "checkmark"
+        text = "✓"; textSize = sp(12f); setTextColor(Color.WHITE)
+        gravity = Gravity.CENTER
+        background = GradientDrawable().apply {
+            setColor(Color.BLACK); cornerRadius = dp(10).toFloat()
+        }
+        layoutParams = FrameLayout.LayoutParams(dp(20), dp(20)).apply {
+            gravity = Gravity.TOP or Gravity.END
+            setMargins(0, dp(4), dp(4), 0)
+        }
+    }
+
+    private fun applyCellSelection(path: String?, selected: Boolean) {
+        if (path == null) return
+        val frame = cellFrameMap[path] ?: return
+        frame.background = GradientDrawable().apply {
+            setColor(Color.WHITE)
+            setStroke(if (selected) dp(2) else dp(1),
+                if (selected) Color.BLACK else Color.parseColor("#CCCCCC"))
+            cornerRadius = dp(4).toFloat()
+        }
+        if (multiSelectMode) {
+            frame.findViewWithTag<View>("checkmark")?.let { frame.removeView(it) }
+            if (selected) frame.addView(makeCheckmark())
         }
     }
 

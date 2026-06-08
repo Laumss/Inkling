@@ -3,7 +3,7 @@ import { NativeModules, EmitterSubscription, Dimensions } from 'react-native';
 import RNFS from 'react-native-fs';
 import { loadClips, saveClips } from './ToolPresets';
 import { t } from './i18n';
-import { toggleMode, handleAiSend, getLastMode, stopAiMode, ensureLocalSendReady } from './BackgroundService';
+import { toggleMode, handleAiSend, getLastMode, stopAiMode } from './BackgroundService';
 import FloatingToolbarBridge from './FloatingToolbarBridge';
 import FloatingBubbleBridge from './BubbleBridges';
 
@@ -20,10 +20,18 @@ const STICKER_DIR = '/sdcard/MyStyle/Sticker';
 
 async function ensureStickerDir(): Promise<void> {
   try {
+    const parentExists = await RNFS.exists('/sdcard/MyStyle');
+    if (!parentExists) {
+      await RNFS.mkdir('/sdcard/MyStyle');
+      console.log('[CLIP-DBG] created /sdcard/MyStyle');
+    }
     const exists = await RNFS.exists(STICKER_DIR);
-    if (!exists) await RNFS.mkdir(STICKER_DIR);
+    if (!exists) {
+      await RNFS.mkdir(STICKER_DIR);
+      console.log('[CLIP-DBG] created', STICKER_DIR);
+    }
   } catch (e) {
-    console.warn('[ToolActions]: ensureStickerDir failed:', e);
+    console.warn('[CLIP-DBG] ensureStickerDir FAILED:', e);
   }
 }
 
@@ -247,7 +255,6 @@ export async function executeAction(action: string): Promise<string> {
       try { await _insertDocLinkDirect(docPath); } catch (_) {}
       return 'Doc link inserted from queue';
     }
-    ensureLocalSendReady().catch(() => {});
     FloatingToolbarBridge.showDocLinkPanel();
     return 'Doc link panel opened';
   }
@@ -276,7 +283,6 @@ export async function executeAction(action: string): Promise<string> {
       } catch (_) {}
       return 'Image inserted from queue';
     }
-    ensureLocalSendReady().catch(() => {});
     FloatingToolbarBridge.showImagePanel();
     return 'Image panel opened';
   }
@@ -532,16 +538,13 @@ async function clipSmartAction(slot: string): Promise<string> {
 async function clipSave(slot: string): Promise<string> {
   await ensureStickerDir();
 
-  // 如果剪贴板已有内容，弹出确认覆盖对话框
-  const existingClips = await loadClips();
-  if (existingClips[slot]) {
-    try {
-      const confirmed = await NativeUIUtils.showRattaDialog(
-        t('clip_overwrite'), t('btn_cancel'), t('btn_confirm'), true
-      );
-      if (!confirmed) return 'Clip save cancelled';
-    } catch (_) {}
-  }
+  let backedUpRect: any = null;
+  try {
+    const lassoRectRes = await PluginCommAPI.getLassoRect();
+    if (lassoRectRes.success && lassoRectRes.result != null) {
+      backedUpRect = lassoRectRes.result;
+    }
+  } catch (_) {}
 
   try {
     const cntRes = await (PluginCommAPI as any).getLassoElementTypeCounts?.();
@@ -575,29 +578,44 @@ async function clipSave(slot: string): Promise<string> {
     console.warn('[ToolActions]: getLassoElementTypeCounts failed, fall through to sticker:', e);
   }
 
+  const existingClips = await loadClips();
+  const oldPath = existingClips[slot];
   const name = `quickbar_clip_${slot}_${Date.now()}.sticker`;
   const path = `${STICKER_DIR}/${name}`;
 
   console.log('[ToolActions]: clipSave slot=', slot, 'path=', path);
 
-  const lassoRectRes = await PluginCommAPI.getLassoRect();
-  console.log('[ToolActions]: lasso rect before save =', JSON.stringify(lassoRectRes?.result));
-  const saveRes = await PluginCommAPI.saveStickerByLasso(path);
-  if (saveRes.success) {
-    const stickerSizeRes = await PluginCommAPI.getStickerSize(path);
-    console.log('[ToolActions]: saveStickerByLasso ok, stickerSize =', JSON.stringify(stickerSizeRes?.result));
+  const commitSave = async (): Promise<string> => {
+    if (oldPath) {
+      try {
+        const confirmed = await NativeUIUtils.showRattaDialog(
+          t('clip_overwrite'), t('btn_cancel'), t('btn_confirm'), false
+        );
+        if (!confirmed) {
+          try { await RNFS.unlink(path); } catch (_) {}
+          if (backedUpRect) {
+            try {
+              await PluginCommAPI.lassoElements(backedUpRect);
+              await (PluginCommAPI as any).setLassoBoxState?.(0);
+            } catch (_) {}
+          }
+          return 'Clip save cancelled';
+        }
+      } catch (_) {}
+      try {
+        if (await RNFS.exists(oldPath)) await RNFS.unlink(oldPath);
+      } catch (_) {}
+    }
     await PluginCommAPI.setLassoBoxState(2);
     const clips = await loadClips();
     clips[slot] = path;
     await saveClips(clips);
     return `Saved to clip ${slot}`;
-  }
-
-  console.warn('[ToolActions]: saveStickerByLasso failed, fallback to convertElement2Sticker:', saveRes);
+  };
 
   const elemRes = await PluginCommAPI.getLassoElements() as any;
   if (!elemRes?.success || !elemRes.result || !Array.isArray(elemRes.result) || elemRes.result.length === 0) {
-    console.warn('[ToolActions]: getLassoElements failed or empty:', elemRes);
+    console.warn('[CLIP-DBG] getLassoElements failed or empty:', elemRes);
     return `Save clip ${slot} failed (no elements)`;
   }
 
@@ -613,16 +631,11 @@ async function clipSave(slot: string): Promise<string> {
       if (penInfoRes.success && penInfoRes.result != null) {
         resolvedPenType = penInfoRes.result.type;
         resolvedPenWidth = penInfoRes.result.width ?? null;
-        console.log('[ToolActions]: clipSave penInfo type=', resolvedPenType,
-          'width=', resolvedPenWidth,
-          '— SDK defaulted all penTypes to 1, injecting real type+width');
+        console.log('[CLIP-DBG] penInfo type=', resolvedPenType, 'width=', resolvedPenWidth);
       }
-    } else {
-      console.log('[ToolActions]: clipSave penTypes from SDK=',
-        strokeEls.map((el: any) => el.stroke.penType));
     }
   } catch (e) {
-    console.warn('[ToolActions]: getPenInfo failed:', e);
+    console.warn('[CLIP-DBG] getPenInfo failed:', e);
   }
 
   const elementsForConvert = resolvedPenType != null
@@ -636,14 +649,16 @@ async function clipSave(slot: string): Promise<string> {
       })
     : elemRes.result;
 
+  console.log('[CLIP-DBG] convertElement2Sticker machineType=', deviceType, 'elements=', elementsForConvert.length);
   let convertRes = await PluginCommAPI.convertElement2Sticker({
     machineType: deviceType,
     elements: elementsForConvert,
     stickerPath: path,
   });
+  console.log('[CLIP-DBG] convertElement2Sticker result:', JSON.stringify(convertRes));
 
-  if (!convertRes.success) {
-    console.warn('[ToolActions]: convertElement2Sticker failed, retrying with penType=1:', convertRes);
+  if (!convertRes.success || convertRes.result === false) {
+    console.warn('[CLIP-DBG] convertElement2Sticker failed, retrying with penType=1');
     const safeElements = (elemRes.result as any[]).map((el: any) =>
       el?.stroke != null ? { ...el, stroke: { ...el.stroke, penType: 1 } } : el);
     convertRes = await PluginCommAPI.convertElement2Sticker({
@@ -651,25 +666,24 @@ async function clipSave(slot: string): Promise<string> {
       elements: safeElements,
       stickerPath: path,
     });
+    console.log('[CLIP-DBG] convertElement2Sticker retry result:', JSON.stringify(convertRes));
   }
 
-  if (!convertRes.success) {
-    console.warn('[ToolActions]: convertElement2Sticker failed:', convertRes);
+  if (!convertRes.success || convertRes.result === false) {
+    console.warn('[CLIP-DBG] convertElement2Sticker final FAILED');
     return `Save clip ${slot} failed`;
   }
 
-  await PluginCommAPI.setLassoBoxState(2);
-
-  const clips = await loadClips();
-  clips[slot] = path;
-  await saveClips(clips);
-  return `Saved to clip ${slot}`;
+  return await commitSave();
 }
 
 async function clipPasteSticker(slot: string): Promise<string> {
   const clips = await loadClips();
   const stored = clips[slot];
-  if (!stored) return 'Clip empty';
+  if (!stored) {
+    NativeUIUtils.showErrorTipDialog(t('clip_empty_hint'));
+    return 'Clip empty';
+  }
 
   let paths: string[];
   if (stored.startsWith('/')) {
@@ -732,15 +746,18 @@ async function clipPasteSticker(slot: string): Promise<string> {
       }
     }
 
+    console.log('[CLIP-DBG] clipPaste path=', path);
     try {
       const r = await PluginCommAPI.insertSticker(path);
+      console.log('[CLIP-DBG] insertSticker result:', JSON.stringify(r));
       if (r.success) return `Pasted clip ${slot}`;
-    } catch {}
+    } catch (e) { console.warn('[CLIP-DBG] insertSticker error:', e); }
 
     try {
       const r2 = await PluginCommAPI.insertSticker(path + '.sticker');
+      console.log('[CLIP-DBG] insertSticker(.sticker) result:', JSON.stringify(r2));
       if (r2.success) return `Pasted clip ${slot}`;
-    } catch {}
+    } catch (e) { console.warn('[CLIP-DBG] insertSticker(.sticker) error:', e); }
   }
 
   return `Paste clip ${slot} failed`;

@@ -32,6 +32,9 @@ import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.zip.ZipEntry
+import java.util.zip.ZipInputStream
+import java.util.zip.ZipOutputStream
 import javax.net.ssl.*
 import kotlin.concurrent.thread
 import org.json.JSONArray
@@ -62,6 +65,7 @@ class SendPanel(
     private var sending = false
     private var peerPollRunnable: Runnable? = null
     private var cameFromBubble = false
+    private var clipboardSyncMode = false
 
     private var statusTextView: TextView? = null
     private var previewTextView: TextView? = null
@@ -71,11 +75,12 @@ class SendPanel(
     private var cancelBtn: View? = null
     private var fileButtonsContainer: LinearLayout? = null
 
-    fun show(fromBubble: Boolean = false) {
+    fun show(fromBubble: Boolean = false, syncClipboard: Boolean = false) {
         currentInstance = this
         pendingText = ""; pendingImages = emptyList(); pendingLinkedFiles = emptyList()
         selectedPeer = null; sending = false
         cameFromBubble = fromBubble
+        clipboardSyncMode = syncClipboard
         showPanel()
         handler.post {
             startPeerPolling()
@@ -165,7 +170,7 @@ class SendPanel(
         })
         root.addView(statusBar)
 
-        scrollHost = PanelScrollHost(reactContext)
+        scrollHost = PanelScrollHost(reactContext, overlayScrollbar = true)
         peerContainer = scrollHost!!.content.apply {
             setPadding(dp(5), dp(5), dp(5), dp(5))
         }
@@ -197,7 +202,9 @@ class SendPanel(
             }
         }
         cancelBtn = makeOutlinedBtn(NativeLocale.t("cancel")) { closeAndRestore() }
-        sendTextBtn = makeFilledBtn(NativeLocale.t("send_text_btn")) { handleSendText() }
+        sendTextBtn = makeFilledBtn(
+            if (clipboardSyncMode) NativeLocale.t("sync_clipboard_btn") else NativeLocale.t("send_text_btn")
+        ) { if (clipboardSyncMode) handleSyncClipboard() else handleSendText() }
         updateSendBtnState()
 
         return makeBottomBar(
@@ -341,6 +348,75 @@ class SendPanel(
         }
     }
 
+    private fun handleSyncClipboard() {
+        val peer = selectedPeer ?: return
+        if (sending) return
+        sending = true
+        statusTextView?.text = NativeLocale.t("sync_packaging")
+        updateSendBtnState()
+        thread(isDaemon = true) {
+            try {
+                val zipPath = packageClipboard()
+                if (zipPath == null) {
+                    handler.post {
+                        sending = false
+                        statusTextView?.text = NativeLocale.t("sync_clipboard_empty")
+                        updateSendBtnState()
+                    }
+                    return@thread
+                }
+                LocalSendModule.sendFileDirect(peer.ip, peer.port, zipPath)
+                try { File(zipPath).delete() } catch (_: Exception) {}
+                handler.post {
+                    statusTextView?.text = NativeLocale.t("send_success")
+                    handler.postDelayed({ closeAndRestore() }, 800)
+                }
+            } catch (e: Exception) {
+                handler.post {
+                    sending = false
+                    statusTextView?.text = "${NativeLocale.t("send_failed")}: ${e.message}"
+                    updateSendBtnState()
+                }
+            }
+        }
+    }
+
+    private fun packageClipboard(): String? {
+        val prefs = reactContext.getSharedPreferences("quicktoolbar_presets", 0)
+        val clipsJson = prefs.getString("preset_99", null) ?: return null
+        val clips = JSONObject(clipsJson)
+        val stickerDir = "/sdcard/MyStyle/Sticker"
+        var hasAny = false
+        val keys = clips.keys()
+        while (keys.hasNext()) {
+            val slot = keys.next()
+            val path = clips.optString(slot, "")
+            if (path.isNotEmpty() && File(path).exists()) { hasAny = true; break }
+        }
+        if (!hasAny) return null
+
+        val cacheDir = reactContext.cacheDir
+        val zipFile = File(cacheDir, "clipboard_sync_${System.currentTimeMillis()}.zip")
+        ZipOutputStream(zipFile.outputStream().buffered()).use { zos ->
+            zos.putNextEntry(ZipEntry("clips.json"))
+            zos.write(clipsJson.toByteArray(Charsets.UTF_8))
+            zos.closeEntry()
+
+            val keys2 = clips.keys()
+            while (keys2.hasNext()) {
+                val slot = keys2.next()
+                val path = clips.optString(slot, "")
+                if (path.isEmpty()) continue
+                val f = File(path)
+                if (!f.exists()) continue
+                zos.putNextEntry(ZipEntry("stickers/${f.name}"))
+                f.inputStream().buffered().use { it.copyTo(zos) }
+                zos.closeEntry()
+            }
+        }
+        return zipFile.absolutePath
+    }
+
     private var pollCount = 0
 
     private fun startPeerPolling() {
@@ -385,7 +461,8 @@ class SendPanel(
 
     private fun updateSendBtnState() {
         val hasPeer = selectedPeer != null
-        val textEnabled = hasPeer && pendingText.isNotEmpty() && !sending
+        val textEnabled = if (clipboardSyncMode) hasPeer && !sending
+                          else hasPeer && pendingText.isNotEmpty() && !sending
         sendTextBtn?.apply { alpha = if (textEnabled) 1f else 0.4f; isEnabled = textEnabled }
         val fileEnabled = hasPeer && !sending
         val container = fileButtonsContainer ?: return
@@ -910,6 +987,16 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
         discoveredPeers.clear()
         sendEvent("onServerStopped", Arguments.createMap())
         promise.resolve("stopped")
+    }
+
+    @ReactMethod
+    fun isWifiConnected(promise: Promise) {
+        val cm = reactApplicationContext
+            .getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        if (cm == null) { promise.resolve(false); return }
+        val net = cm.activeNetwork
+        val caps = if (net != null) cm.getNetworkCapabilities(net) else null
+        promise.resolve(caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true)
     }
 
     @ReactMethod
@@ -1452,7 +1539,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             }
 
             val sessionId = UUID.randomUUID().toString().replace("-", "").substring(0, 22)
-            val session = UploadSession(sessionId, remoteIp)
+            val session = UploadSession(sessionId, remoteIp, senderAlias = senderAlias)
 
             val tokens = JSONObject()
             val fileNames = mutableListOf<String>()
@@ -1576,7 +1663,9 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             session.received[fileId] = true
             Log.i(TAG, "File received: ${fileInfo.fileName} -> $destFile ($received bytes)")
 
-            if (isTextFile(fileInfo.fileName)) {
+            if (fileInfo.fileName.startsWith("clipboard_sync_") && fileInfo.fileName.endsWith(".zip")) {
+                handleClipboardSyncReceive(destFile, session.senderAlias ?: remoteIp)
+            } else if (isTextFile(fileInfo.fileName)) {
                 val textContent = destFile.readText(Charsets.UTF_8)
                 destFile.delete()
                 sendTextViaBroadcast(textContent)
@@ -1791,6 +1880,56 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
         return ext == "txt"
     }
 
+    private fun handleClipboardSyncReceive(zipFile: File, senderAlias: String) {
+        Log.i(TAG, "Clipboard sync received from [$senderAlias]: ${zipFile.absolutePath}")
+        sendEvent("onClipboardSyncReceived", Arguments.createMap().apply {
+            putString("zipPath", zipFile.absolutePath)
+            putString("senderAlias", senderAlias)
+        })
+    }
+
+    @ReactMethod
+    fun importClipboardSync(zipPath: String, promise: Promise) {
+        thread(isDaemon = true) {
+            try {
+                val zipFile = File(zipPath)
+                if (!zipFile.exists()) { promise.resolve(false); return@thread }
+                val stickerDir = File("/sdcard/MyStyle/Sticker")
+                stickerDir.mkdirs()
+
+                var clipsJson: String? = null
+                ZipInputStream(zipFile.inputStream().buffered()).use { zis ->
+                    var entry = zis.nextEntry
+                    while (entry != null) {
+                        if (entry.name == "clips.json") {
+                            clipsJson = zis.readBytes().toString(Charsets.UTF_8)
+                        } else if (entry.name.startsWith("stickers/")) {
+                            val name = entry.name.removePrefix("stickers/")
+                            if (name.isNotEmpty()) {
+                                val dest = File(stickerDir, name)
+                                dest.outputStream().buffered().use { out -> zis.copyTo(out) }
+                            }
+                        }
+                        zis.closeEntry()
+                        entry = zis.nextEntry
+                    }
+                }
+
+                if (clipsJson != null) {
+                    val prefs = reactApplicationContext.getSharedPreferences("quicktoolbar_presets", 0)
+                    prefs.edit().putString("preset_99", clipsJson).apply()
+                    Log.i(TAG, "Clipboard sync imported, clips updated")
+                }
+
+                zipFile.delete()
+                promise.resolve(true)
+            } catch (e: Exception) {
+                Log.e(TAG, "importClipboardSync failed", e)
+                promise.resolve(false)
+            }
+        }
+    }
+
     data class FileInfo(
         val id: String,
         val fileName: String,
@@ -1802,6 +1941,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
     data class UploadSession(
         val sessionId: String,
         val senderIp: String,
+        var senderAlias: String = "",
         val createdAt: Long = System.currentTimeMillis(),
         val timeout: Long = 600_000L,
         val files: MutableMap<String, FileInfo> = mutableMapOf(),

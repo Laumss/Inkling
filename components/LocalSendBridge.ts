@@ -76,6 +76,10 @@ class LocalSendBridge {
     return await LocalSendModule.stopServer();
   }
 
+  async isWifiConnected(): Promise<boolean> {
+    return await LocalSendModule.isWifiConnected();
+  }
+
   async getServerStatus(): Promise<ServerStatus> {
     return await LocalSendModule.getServerStatus();
   }
@@ -158,6 +162,14 @@ class LocalSendBridge {
 
   onSendError(callback: (info: { error: string }) => void) {
     return this.emitter.addListener('onSendError', callback);
+  }
+
+  onClipboardSyncReceived(callback: (info: { zipPath: string; senderAlias: string }) => void) {
+    return this.emitter.addListener('onClipboardSyncReceived', callback);
+  }
+
+  async importClipboardSync(zipPath: string): Promise<boolean> {
+    return await LocalSendModule.importClipboardSync(zipPath);
   }
 }
 
