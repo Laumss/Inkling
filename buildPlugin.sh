@@ -401,6 +401,8 @@ build_android_apk() {
     if [[ -f "$android_dir/gradlew" ]]; then
         chmod +x "$android_dir/gradlew"
         sed -i 's/\r$//' "$android_dir/gradlew"
+        print_color "Cleaning previous build..." Blue
+        (cd "$android_dir" && ./gradlew clean)
         print_color "Using gradlew to execute buildCustomApkDebug task..." Green
         (cd "$android_dir" && ./gradlew buildCustomApkDebug)
     elif command -v gradle &>/dev/null; then
@@ -439,6 +441,7 @@ copy_apk_and_update_config() {
     print_color "Found APK file: $apk_path" Green
 
     local target="$BUILD_GENERATED_DIR/app.npk"
+    rm -f "$target"
     cp "$apk_path" "$target"
     print_color "APK file copied and renamed to build/generated folder: $target" Green
 

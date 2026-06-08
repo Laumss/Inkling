@@ -264,6 +264,14 @@ const FloatingToolbarBridge = {
     }
   },
 
+  openSendPanelClipboardSync(): void {
+    try {
+      FloatingToolbar?.openSendPanelClipboardSync();
+    } catch (e) {
+      console.warn('[FloatingToolbarBridge]: openSendPanelClipboardSync failed:', e);
+    }
+  },
+
   showLassoScreenshotPanelFromBubble(): void {
     try {
       FloatingToolbar?.showLassoScreenshotPanelFromBubble();

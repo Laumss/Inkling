@@ -22,7 +22,10 @@ import com.facebook.react.bridge.*
 import com.facebook.react.modules.core.DeviceEventManagerModule
 import org.json.JSONArray
 import org.json.JSONObject
+import android.content.Context
 import android.content.res.Configuration
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -158,7 +161,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         private val monitorHandler = Handler(Looper.getMainLooper())
 
         @Volatile @JvmStatic
-        private var currentInstance: FloatingToolbarModule? = null
+        internal var currentInstance: FloatingToolbarModule? = null
 
         @JvmStatic
         private val staticMonitorRunnable = object : Runnable {
@@ -1576,8 +1579,9 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             view.setOnClickListener { handleToolTap(tool, view) }
             view.setOnLongClickListener {
                 if (tool.action == "insert_doc_screenshot") {
-
                     openDocScreenshotPanel()
+                } else if (tool.action == "lasso_smart_send") {
+                    handleSendLongPress()
                 } else {
                     emitEvent("onToolLongPress", Arguments.createMap().apply {
                         putString("toolId", tool.id); putString("toolName", tool.name)
@@ -2378,6 +2382,39 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     }
                 }
             }
+        }
+    }
+
+    private fun isWifiConnected(): Boolean {
+        val cm = reactApplicationContext
+            .getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return false
+        val net = cm.activeNetwork ?: return false
+        val caps = cm.getNetworkCapabilities(net) ?: return false
+        return caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+    }
+
+    private fun handleSendLongPress() {
+        handler.post {
+            if (!isWifiConnected()) {
+                emitEvent("showTip", Arguments.createMap().apply { putString("key", "no_wifi") })
+                return@post
+            }
+            if (!LocalSendModule.staticIsRunning) {
+                emitEvent("showConfirmStartLocalSend", Arguments.createMap())
+                return@post
+            }
+            openSendPanelClipboardSync()
+        }
+    }
+
+    @ReactMethod
+    fun openSendPanelClipboardSync() {
+        handler.post {
+            Log.i(TAG, "openSendPanelClipboardSync")
+            removeAll()
+            callClosePluginView()
+            emitEvent("onNativePanelOpen", Arguments.createMap().apply { putString("panel", "send") })
+            SendPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show(syncClipboard = true)
         }
     }
 

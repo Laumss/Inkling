@@ -128,6 +128,15 @@ class LocalSendBridge {
     return await LocalSendModule.flushPendingTexts();
   }
 
+
+  respondClipboardSync(accepted: boolean): void {
+    LocalSendModule.respondClipboardSync(accepted);
+  }
+
+  onClipboardSyncConfirm(callback: (info: { senderAlias: string }) => void) {
+    return this.emitter.addListener('showClipboardSyncConfirm', callback);
+  }
+
   ackPendingText(id: string): void {
     LocalSendModule.ackPendingText(id);
   }

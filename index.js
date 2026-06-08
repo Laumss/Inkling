@@ -45,6 +45,40 @@ DeviceEventEmitter.addListener('localSendStateChanged', ({ running }) => {
   registerLocalSendButton();
 });
 
+DeviceEventEmitter.addListener('startLocalSendFromNative', async () => {
+  console.log('[index]: startLocalSendFromNative');
+  await startLocalSend();
+});
+
+DeviceEventEmitter.addListener('showTip', ({ key }) => {
+  NativeUIUtils.showErrorTipDialog(t(key));
+});
+
+DeviceEventEmitter.addListener('showClipboardSyncConfirm', async ({ senderAlias }) => {
+  try {
+    const msg = t('sync_clipboard_ask').replace('%s', senderAlias);
+    const confirmed = await NativeUIUtils.showRattaDialog(msg, t('btn_cancel'), t('btn_confirm'), false);
+    LocalSendBridge.respondClipboardSync(confirmed);
+  } catch (e) {
+    console.error('[index]: showClipboardSyncConfirm error:', e);
+    LocalSendBridge.respondClipboardSync(true);
+  }
+});
+
+DeviceEventEmitter.addListener('showConfirmStartLocalSend', async () => {
+  try {
+    const confirmed = await NativeUIUtils.showRattaDialog(
+      t('localsend_ask_enable'), t('btn_cancel'), t('btn_confirm'), false
+    );
+    if (confirmed) {
+      await startLocalSend();
+      FloatingToolbarBridge.openSendPanelClipboardSync();
+    }
+  } catch (e) {
+    console.error('[index]: showConfirmStartLocalSend error:', e);
+  }
+});
+
 DeviceEventEmitter.addListener('clipboardChanged', async () => {
   console.log('[index]: clipboardChanged → refreshing toolbar');
   const newClips = await loadClips();
@@ -107,26 +141,6 @@ FloatingToolbarBridge.onToolLongPress(async ({ toolId }) => {
     const config = getCachedConfig();
     if (config) {
       FloatingToolbarBridge.updateTools(injectClipStatus(config.tools, newClips, null));
-    }
-  }
-
-  if (toolId === 'send_ai') {
-    try {
-      const wifi = await LocalSendBridge.isWifiConnected();
-      if (!wifi) {
-        NativeUIUtils.showErrorTipDialog(t('no_wifi'));
-        return;
-      }
-      if (!isLocalSendRunning()) {
-        const confirmed = await NativeUIUtils.showRattaDialog(
-          t('localsend_ask_enable'), t('btn_cancel'), t('btn_confirm'), false
-        );
-        if (!confirmed) return;
-        await startLocalSend();
-      }
-      FloatingToolbarBridge.openPanel('nativeSendClipboard');
-    } catch (e) {
-      console.error('[index]: send_ai longPress error:', e);
     }
   }
 });

@@ -300,24 +300,6 @@ export function ensureInit(): void {
     DeviceEventEmitter.emit('localSendStateChanged', { running: false });
   });
 
-  LocalSendBridge.onClipboardSyncReceived(async (info) => {
-    console.log('[BackgroundService]: clipboard sync received from', info.senderAlias);
-    try {
-      const msg = t('sync_clipboard_ask').replace('%s', info.senderAlias);
-      const confirmed = await NativeUIUtils.showRattaDialog(msg, t('btn_cancel'), t('btn_confirm'), false);
-      if (!confirmed) {
-        try { const RNFS = require('react-native-fs').default; await RNFS.unlink(info.zipPath); } catch (_) {}
-        return;
-      }
-      const ok = await LocalSendBridge.importClipboardSync(info.zipPath);
-      if (ok) {
-        NativeUIUtils.showErrorTipDialog(t('sync_clipboard_ok'));
-        DeviceEventEmitter.emit('clipboardChanged');
-      }
-    } catch (e) {
-      console.warn('[BackgroundService]: clipboard sync import error:', e);
-    }
-  });
 
   if (FloatingBubbleBridge.isAvailable) {
     const applyBubblePosition = (data: {
@@ -789,6 +771,7 @@ export async function startLocalSend(): Promise<boolean> {
     _localSendStarted = true;
     console.log('[BackgroundService]: LocalSend server started');
     DeviceEventEmitter.emit('localSendStateChanged', { running: true });
+    LocalSendBridge.scanForPeers().catch(() => {});
     return true;
   } catch (e) {
     console.warn('[BackgroundService]: startLocalSend error:', e);

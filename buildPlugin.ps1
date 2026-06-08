@@ -747,6 +747,9 @@ function Build-AndroidApk {
                 }
             }
             
+            # Clean previous build to avoid stale cache
+            Write-ColorOutput 'Cleaning previous build...' 'Blue'
+            & cmd.exe /c gradlew.bat clean
             # Execute gradle build (use direct invocation to avoid stdout buffer deadlock)
             & cmd.exe /c gradlew.bat buildCustomApkDebug
             $buildResult = $LASTEXITCODE
@@ -809,6 +812,7 @@ function Copy-ApkAndUpdateConfig {
     $targetApkPath = Join-Path $BuildGeneratedDir $newApkFileName
     
     try {
+        if (Test-Path $targetApkPath) { Remove-Item $targetApkPath -Force }
         Copy-Item $apkPath $targetApkPath -Force
         Write-ColorOutput "APK file copied and renamed to build/generated folder: $targetApkPath" 'Green'
         

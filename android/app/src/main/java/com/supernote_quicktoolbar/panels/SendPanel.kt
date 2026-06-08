@@ -82,7 +82,7 @@ class SendPanel(
         cameFromBubble = fromBubble
         clipboardSyncMode = syncClipboard
         showPanel()
-        handler.post {
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
             startPeerPolling()
             LocalSendModule.reprobeKnownPeers()
             LocalSendModule.triggerScan()
@@ -90,7 +90,7 @@ class SendPanel(
     }
 
     override fun hide() {
-        handler.post {
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
             stopPeerPolling()
             try { windowManager?.removeView(rootView) } catch (_: Exception) {}
             rootView = null; windowManager = null
@@ -106,14 +106,14 @@ class SendPanel(
     }
 
     override fun suspendVisibility() {
-        handler.post {
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
             rootView?.visibility = View.GONE
             stopPeerPolling()
         }
     }
 
     override fun resumeVisibility() {
-        handler.post {
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
             rootView?.visibility = View.VISIBLE
             startPeerPolling()
         }
@@ -124,7 +124,7 @@ class SendPanel(
         imagePaths: List<String>,
         linkedFiles: List<Triple<String, Int, String>> = emptyList()
     ) {
-        handler.post {
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
             pendingText = text
             pendingImages = imagePaths
             pendingLinkedFiles = linkedFiles
@@ -198,7 +198,7 @@ class SendPanel(
             refreshPeerList()
             thread(isDaemon = true) {
                 LocalSendModule.triggerScan()
-                handler.post { refreshPeerList() }
+                android.os.Handler(android.os.Looper.getMainLooper()).post { refreshPeerList() }
             }
         }
         cancelBtn = makeOutlinedBtn(NativeLocale.t("cancel")) { closeAndRestore() }
@@ -214,7 +214,7 @@ class SendPanel(
     }
 
     private fun refreshPeerList() {
-        handler.post {
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
             val container = peerContainer ?: return@post
             container.removeAllViews()
             val peers = LocalSendModule.getPeersSnapshot()
@@ -310,13 +310,13 @@ class SendPanel(
         updateSendBtnState()
         thread(isDaemon = true) {
             try {
-                LocalSendModule.sendTextDirect(peer.ip, peer.port, text)
-                handler.post {
+                LocalSendModule.sendTextDirect(peer.ip, peer.port, text, peer.useTls)
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
                     statusTextView?.text = NativeLocale.t("send_success")
                     handler.postDelayed({ closeAndRestore() }, 800)
                 }
             } catch (e: Exception) {
-                handler.post {
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
                     sending = false
                     statusTextView?.text = "${NativeLocale.t("send_failed")}: ${e.message}"
                     updateSendBtnState()
@@ -333,13 +333,13 @@ class SendPanel(
         updateSendBtnState()
         thread(isDaemon = true) {
             try {
-                LocalSendModule.sendFileDirect(peer.ip, peer.port, path)
-                handler.post {
+                LocalSendModule.sendFileDirect(peer.ip, peer.port, path, peer.useTls)
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
                     statusTextView?.text = NativeLocale.t("send_success")
                     handler.postDelayed({ closeAndRestore() }, 800)
                 }
             } catch (e: Exception) {
-                handler.post {
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
                     sending = false
                     statusTextView?.text = "${NativeLocale.t("send_failed")}: ${e.message}"
                     updateSendBtnState()
@@ -358,23 +358,27 @@ class SendPanel(
             try {
                 val zipPath = packageClipboard()
                 if (zipPath == null) {
-                    handler.post {
+                    android.os.Handler(android.os.Looper.getMainLooper()).post {
                         sending = false
                         statusTextView?.text = NativeLocale.t("sync_clipboard_empty")
                         updateSendBtnState()
                     }
                     return@thread
                 }
-                LocalSendModule.sendFileDirect(peer.ip, peer.port, zipPath)
+                android.os.Handler(android.os.Looper.getMainLooper()).post { statusTextView?.text = NativeLocale.t("sync_waiting") }
+                LocalSendModule.sendFileDirect(peer.ip, peer.port, zipPath, peer.useTls)
                 try { File(zipPath).delete() } catch (_: Exception) {}
-                handler.post {
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
                     statusTextView?.text = NativeLocale.t("send_success")
                     handler.postDelayed({ closeAndRestore() }, 800)
                 }
             } catch (e: Exception) {
-                handler.post {
+                val msg = if (e.message?.contains("403") == true)
+                    NativeLocale.t("sync_rejected")
+                else "${NativeLocale.t("send_failed")}: ${e.message}"
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
                     sending = false
-                    statusTextView?.text = "${NativeLocale.t("send_failed")}: ${e.message}"
+                    statusTextView?.text = msg
                     updateSendBtnState()
                 }
             }
@@ -548,7 +552,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
 
         @Volatile private var staticServerSocket: ServerSocket? = null
         @Volatile private var staticMulticastSocket: MulticastSocket? = null
-        @Volatile private var staticIsRunning = false
+        @Volatile @JvmStatic var staticIsRunning = false
 
         fun forceCloseAll() {
             staticIsRunning = false
@@ -775,19 +779,19 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
 
         @JvmStatic
         @Throws(Exception::class)
-        fun sendTextDirect(ip: String, port: Int, text: String): String {
+        fun sendTextDirect(ip: String, port: Int, text: String, useTls: Boolean = true): String {
             val textBytes = text.toByteArray(Charsets.UTF_8)
             val fileId = "text-${UUID.randomUUID().toString().substring(0, 8)}"
             val filesJson = buildSingleFileJson(
                 fileId, "message.txt", textBytes.size, "text/plain",
                 staticSha256Hex(textBytes), preview = text
             )
-            return doUploadDirect(ip, port, filesJson, mapOf(fileId to textBytes))
+            return doUploadDirect(ip, port, filesJson, mapOf(fileId to textBytes), useTls)
         }
 
         @JvmStatic
         @Throws(Exception::class)
-        fun sendFileDirect(ip: String, port: Int, filePath: String): String {
+        fun sendFileDirect(ip: String, port: Int, filePath: String, useTls: Boolean = true): String {
             val file = File(filePath)
             if (!file.exists()) throw Exception("File not found: $filePath")
             val fileBytes = file.readBytes()
@@ -796,13 +800,13 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                 fileId, file.name, fileBytes.size, staticGuessMimeType(file.name),
                 staticSha256Hex(fileBytes)
             )
-            return doUploadDirect(ip, port, filesJson, mapOf(fileId to fileBytes))
+            return doUploadDirect(ip, port, filesJson, mapOf(fileId to fileBytes), useTls)
         }
 
         private fun doUploadDirect(
-            ip: String, port: Int, filesJson: JSONObject, fileData: Map<String, ByteArray>
+            ip: String, port: Int, filesJson: JSONObject, fileData: Map<String, ByteArray>,
+            useTls: Boolean = true
         ): String {
-            val baseUrl = "https://$ip:$port$API_BASE"
             val prepareBody = JSONObject().apply {
                 put("info", JSONObject().apply {
                     put("alias", staticDeviceAlias); put("version", PROTOCOL_VERSION)
@@ -811,18 +815,83 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                 })
                 put("files", filesJson)
             }
-            val prepareResp = staticHttpPostJson("$baseUrl/prepare-upload", prepareBody.toString())
-            val prepareJson = JSONObject(prepareResp)
-            val sessionId = prepareJson.optString("sessionId", "")
-            val tokenMap = prepareJson.optJSONObject("files")
-            if (sessionId.isEmpty()) return "auto"
-            for ((fileId, data) in fileData) {
-                val token = tokenMap?.optString(fileId, "") ?: ""
-                if (token.isEmpty()) continue
-                val uploadUrl = "$baseUrl/upload?sessionId=$sessionId&fileId=$fileId&token=$token"
-                staticHttpPostBinary(uploadUrl, data)
+            try {
+                val prepareResp: String
+                if (useTls) {
+                    val baseUrl = "https://$ip:$port$API_BASE"
+                    Log.i(TAG, "[SEND-DBG] doUploadDirect HTTPS baseUrl=$baseUrl")
+                    prepareResp = staticHttpPostJson("$baseUrl/prepare-upload", prepareBody.toString())
+                } else {
+                    Log.i(TAG, "[SEND-DBG] doUploadDirect raw-socket HTTP to $ip:$port")
+                    prepareResp = staticRawSocketPostJson(ip, port,
+                        "$API_BASE/prepare-upload", prepareBody.toString())
+                }
+                Log.i(TAG, "[SEND-DBG] prepare-upload response: $prepareResp")
+                val prepareJson = JSONObject(prepareResp)
+                val sessionId = prepareJson.optString("sessionId", "")
+                val tokenMap = prepareJson.optJSONObject("files")
+                if (sessionId.isEmpty()) { Log.i(TAG, "[SEND-DBG] auto-accepted"); return "auto" }
+                for ((fileId, data) in fileData) {
+                    val token = tokenMap?.optString(fileId, "") ?: ""
+                    if (token.isEmpty()) continue
+                    val path = "$API_BASE/upload?sessionId=$sessionId&fileId=$fileId&token=$token"
+                    Log.i(TAG, "[SEND-DBG] uploading $fileId size=${data.size}")
+                    if (useTls) {
+                        staticHttpPostBinary("https://$ip:$port$path", data)
+                    } else {
+                        staticRawSocketPostBinary(ip, port, path, data)
+                    }
+                    Log.i(TAG, "[SEND-DBG] upload $fileId done")
+                }
+                return sessionId
+            } catch (e: Exception) {
+                Log.e(TAG, "[SEND-DBG] doUploadDirect FAILED: ${e.javaClass.simpleName}: ${e.message}")
+                throw e
             }
-            return sessionId
+        }
+
+        private fun staticRawSocketPostJson(ip: String, port: Int, path: String, jsonBody: String): String {
+            val body = jsonBody.toByteArray(Charsets.UTF_8)
+            val sock = Socket()
+            sock.connect(InetSocketAddress(ip, port), 5000)
+            sock.soTimeout = 10000
+            val out = sock.getOutputStream()
+            val header = "POST $path HTTP/1.1\r\nHost: $ip:$port\r\nContent-Type: application/json\r\nContent-Length: ${body.size}\r\nConnection: keep-alive\r\n\r\n"
+            out.write(header.toByteArray(Charsets.UTF_8))
+            out.write(body)
+            out.flush()
+            val reader = sock.getInputStream().bufferedReader(Charsets.UTF_8)
+            val statusLine = reader.readLine() ?: throw IOException("No response")
+            if (!statusLine.contains("200")) { sock.close(); throw IOException("HTTP POST failed: $statusLine") }
+            var contentLen = -1
+            while (true) {
+                val h = reader.readLine() ?: break
+                if (h.isEmpty()) break
+                if (h.lowercase().startsWith("content-length:")) contentLen = h.substringAfter(":").trim().toIntOrNull() ?: -1
+            }
+            val respBody = if (contentLen > 0) {
+                val buf = CharArray(contentLen)
+                var read = 0
+                while (read < contentLen) { val r = reader.read(buf, read, contentLen - read); if (r < 0) break; read += r }
+                String(buf, 0, read)
+            } else reader.readText()
+            sock.close()
+            return respBody
+        }
+
+        private fun staticRawSocketPostBinary(ip: String, port: Int, path: String, data: ByteArray) {
+            val sock = Socket()
+            sock.connect(InetSocketAddress(ip, port), 5000)
+            sock.soTimeout = 30000
+            val out = sock.getOutputStream()
+            val header = "POST $path HTTP/1.1\r\nHost: $ip:$port\r\nContent-Type: application/octet-stream\r\nContent-Length: ${data.size}\r\nConnection: close\r\n\r\n"
+            out.write(header.toByteArray(Charsets.UTF_8))
+            out.write(data)
+            out.flush()
+            val reader = sock.getInputStream().bufferedReader(Charsets.UTF_8)
+            val statusLine = reader.readLine() ?: throw IOException("No response")
+            if (!statusLine.contains("200")) { sock.close(); throw IOException("HTTP POST failed: $statusLine") }
+            sock.close()
         }
 
         @JvmStatic
@@ -869,24 +938,48 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
         }
 
         private fun probeHostStatic(ip: String, port: Int) {
+            // HTTPS first (official LocalSend clients)
             try {
-                val conn = staticOpenConn("https://$ip:$port$API_BASE/info", 500, 500)
+                val conn = staticOpenConn("https://$ip:$port$API_BASE/info", 1500, 1500)
                 conn.requestMethod = "GET"
                 if (conn.responseCode == 200) {
                     val body = conn.inputStream.bufferedReader().readText()
                     conn.disconnect()
-                    val data = JSONObject(body)
-                    val fp = data.optString("fingerprint", "")
-                    if (fp.isNotEmpty() && fp != staticDeviceFingerprint) {
-                        staticDiscoveredPeers[fp] = DiscoveredPeer(
-                            data.optString("alias", "Unknown"), ip,
-                            data.optInt("port", port), data.optString("deviceType", "desktop"), fp
-                        )
-                    }
+                    registerPeerFromJson(body, ip, port, useTls = true)
                     return
                 }
                 conn.disconnect()
             } catch (_: Exception) {}
+
+            // Raw socket HTTP (bypasses Android cleartext traffic policy)
+            try {
+                val sock = Socket()
+                sock.connect(InetSocketAddress(ip, port), 1500)
+                sock.soTimeout = 1500
+                val out = sock.getOutputStream()
+                val req = "GET $API_BASE/info HTTP/1.1\r\nHost: $ip:$port\r\nConnection: close\r\n\r\n"
+                out.write(req.toByteArray(Charsets.UTF_8))
+                out.flush()
+                val reader = sock.getInputStream().bufferedReader(Charsets.UTF_8)
+                val statusLine = reader.readLine() ?: ""
+                if (!statusLine.contains("200")) { sock.close(); return }
+                while (true) { if ((reader.readLine() ?: break).isEmpty()) break }
+                val body = reader.readText()
+                sock.close()
+                registerPeerFromJson(body, ip, port, useTls = false)
+            } catch (_: Exception) {}
+        }
+
+        private fun registerPeerFromJson(body: String, ip: String, port: Int, useTls: Boolean = true) {
+            val data = JSONObject(body)
+            val fp = data.optString("fingerprint", "")
+            if (fp.isNotEmpty() && fp != staticDeviceFingerprint) {
+                staticDiscoveredPeers[fp] = DiscoveredPeer(
+                    data.optString("alias", "Unknown"), ip,
+                    data.optInt("port", port), data.optString("deviceType", "desktop"), fp,
+                    useTls = useTls
+                )
+            }
         }
     }
 
@@ -900,7 +993,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
         get() = staticIsRunning
         set(v) { staticIsRunning = v }
     private var serverPort = DEFAULT_PORT
-    private var deviceAlias = "Supernote"
+    private var deviceAlias = "Supernote-${(1000..9999).random()}"
     private var deviceFingerprint = UUID.randomUUID().toString().replace("-", "")
     private var receiveDir = "/sdcard/LocalSend"
     private var pin = ""
@@ -914,7 +1007,8 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
         val port: Int,
         val deviceType: String,
         val fingerprint: String,
-        val lastSeen: Long = System.currentTimeMillis()
+        val lastSeen: Long = System.currentTimeMillis(),
+        val useTls: Boolean = true
     )
     private val discoveredPeers = ConcurrentHashMap<String, DiscoveredPeer>()
 
@@ -1069,6 +1163,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
         }
         thread(isDaemon = true, name = "LocalSend-Scan") {
             scanRunning = true
+            discoveredPeers.clear()
             try {
                 val localIp = getLocalIp()
                 Log.i(TAG, "scanForPeers: localIp=$localIp")
@@ -1114,6 +1209,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
     }
 
     private fun probeHost(ip: String, port: Int) {
+        // HTTPS first (official LocalSend clients)
         try {
             val url = "https://$ip:$port$API_BASE/info"
             Log.d(TAG, "probeHost: trying $url")
@@ -1124,34 +1220,57 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             if (code == 200) {
                 val body = conn.inputStream.bufferedReader().readText()
                 conn.disconnect()
-                Log.d(TAG, "probeHost: $ip response body: $body")
-                val data = JSONObject(body)
-                val fp = data.optString("fingerprint", "")
-                if (fp.isNotEmpty() && fp != deviceFingerprint) {
-                    val peerAlias = data.optString("alias", "Unknown")
-                    val peerPort = data.optInt("port", port)
-                    val peerDeviceType = data.optString("deviceType", "desktop")
-                    Log.i(TAG, "probeHost: FOUND peer $peerAlias @ $ip:$peerPort")
-                    discoveredPeers[fp] = DiscoveredPeer(
-                        alias = peerAlias,
-                        ip = ip,
-                        port = peerPort,
-                        deviceType = peerDeviceType,
-                        fingerprint = fp
-                    )
-                    sendEvent("onPeerFound", Arguments.createMap().apply {
-                        putString("alias", peerAlias)
-                        putString("ip", ip)
-                        putString("deviceType", peerDeviceType)
-                        putInt("port", peerPort)
-                        putString("fingerprint", fp)
-                    })
-                }
+                registerPeerFromProbe(body, ip, port, useTls = true)
                 return
             }
             conn.disconnect()
         } catch (e: Exception) {
             Log.d(TAG, "probeHost: https://$ip:$port failed: ${e.javaClass.simpleName}: ${e.message}")
+        }
+
+        // Raw socket HTTP fallback (other Supernote devices)
+        try {
+            val sock = Socket()
+            sock.connect(InetSocketAddress(ip, port), 500)
+            sock.soTimeout = 500
+            val out = sock.getOutputStream()
+            val req = "GET $API_BASE/info HTTP/1.1\r\nHost: $ip:$port\r\nConnection: close\r\n\r\n"
+            out.write(req.toByteArray(Charsets.UTF_8))
+            out.flush()
+            val reader = sock.getInputStream().bufferedReader(Charsets.UTF_8)
+            val statusLine = reader.readLine() ?: ""
+            if (!statusLine.contains("200")) { sock.close(); return }
+            while (true) { if ((reader.readLine() ?: break).isEmpty()) break }
+            val body = reader.readText()
+            sock.close()
+            Log.d(TAG, "probeHost: http://$ip:$port (raw) → 200")
+            registerPeerFromProbe(body, ip, port, useTls = false)
+        } catch (e: Exception) {
+            Log.d(TAG, "probeHost: http://$ip:$port (raw) failed: ${e.javaClass.simpleName}: ${e.message}")
+        }
+    }
+
+    private fun registerPeerFromProbe(body: String, ip: String, port: Int, useTls: Boolean = true) {
+        Log.d(TAG, "probeHost: $ip response body: $body")
+        val data = JSONObject(body)
+        val fp = data.optString("fingerprint", "")
+        if (fp.isNotEmpty() && fp != deviceFingerprint) {
+            val peerAlias = data.optString("alias", "Unknown")
+            val peerPort = data.optInt("port", port)
+            val peerDeviceType = data.optString("deviceType", "desktop")
+            Log.i(TAG, "probeHost: FOUND peer $peerAlias @ $ip:$peerPort (tls=$useTls)")
+            discoveredPeers[fp] = DiscoveredPeer(
+                alias = peerAlias, ip = ip, port = peerPort,
+                deviceType = peerDeviceType, fingerprint = fp,
+                useTls = useTls
+            )
+            sendEvent("onPeerFound", Arguments.createMap().apply {
+                putString("alias", peerAlias)
+                putString("ip", ip)
+                putString("deviceType", peerDeviceType)
+                putInt("port", peerPort)
+                putString("fingerprint", fp)
+            })
         }
     }
 
@@ -1232,7 +1351,9 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
         filesJson: JSONObject,
         fileData: Map<String, ByteArray>
     ): String {
-        val baseUrl = "https://$ip:$port$API_BASE"
+        val peer = discoveredPeers.values.find { it.ip == ip && it.port == port }
+        val scheme = if (peer?.useTls != false) "https" else "http"
+        val baseUrl = "$scheme://$ip:$port$API_BASE"
 
         val prepareBody = JSONObject().apply {
             put("info", JSONObject().apply {
@@ -1305,7 +1426,6 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
 
     private fun runHttpServer() {
         try {
-
             val sock = ServerSocket()
             sock.reuseAddress = true
             var boundPort = serverPort
@@ -1350,11 +1470,20 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
     private fun handleClient(socket: Socket) {
         try {
             socket.soTimeout = 30000
-            val input = BufferedInputStream(socket.inputStream)
-            val output = BufferedOutputStream(socket.outputStream)
             val remoteIp = (socket.remoteSocketAddress as? InetSocketAddress)?.address?.hostAddress ?: "0.0.0.0"
+            val input: BufferedInputStream
+            val output: BufferedOutputStream
+            try {
+                input = BufferedInputStream(socket.inputStream)
+                output = BufferedOutputStream(socket.outputStream)
+            } catch (e: SSLException) {
+                Log.d(TAG, "[RECV-DBG] TLS handshake failed from $remoteIp (non-TLS client?), ignoring")
+                try { socket.close() } catch (_: Exception) {}
+                return
+            }
 
             val requestLine = readLine(input) ?: return
+            Log.d(TAG, "[RECV-DBG] request: $requestLine from $remoteIp")
             val parts = requestLine.split(" ")
             if (parts.size < 3) return
 
@@ -1402,6 +1531,8 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                 else ->
                     sendHttpResponse(output, 404, """{"error":"Not found"}""")
             }
+        } catch (e: SSLException) {
+            Log.d(TAG, "[RECV-DBG] TLS error from client (non-TLS?), ignoring: ${e.message}")
         } catch (e: Exception) {
             Log.e(TAG, "Client handler error", e)
         } finally {
@@ -1480,6 +1611,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
         output: BufferedOutputStream, body: String,
         remoteIp: String, params: Map<String, String>
     ) {
+        Log.i(TAG, "[RECV-DBG] handlePrepareUpload from $remoteIp body=${body.take(200)}")
 
         if (pin.isNotEmpty()) {
             val pinParam = params["pin"] ?: ""
@@ -1559,6 +1691,40 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                 session.received[fileId] = false
                 tokens.put(fileId, token)
                 fileNames.add(fileName)
+            }
+
+            val isClipboardSync = fileNames.any {
+                it.startsWith("clipboard_sync_") && it.endsWith(".zip")
+            }
+
+            if (isClipboardSync) {
+                val latch = java.util.concurrent.CountDownLatch(1)
+                var accepted = false
+                val msg = NativeLocale.t("sync_clipboard_ask").replace("%s", senderAlias)
+                val activity = currentActivity
+                if (activity != null) {
+                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                        Log.i(TAG, "[SYNC-DBG] showRattaDialog for prepare-upload confirm")
+                        com.ratta.supernote.pluginlib.api.HostUIAPI.getInstance().showRattaDialog(
+                            activity, msg,
+                            NativeLocale.t("cancel"), NativeLocale.t("confirm"), false,
+                            object : com.ratta.supernote.pluginlib.callback.RattaDialogListener {
+                                override fun onConfirm() { accepted = true; latch.countDown() }
+                                override fun onCancel() { accepted = false; latch.countDown() }
+                            }
+                        )
+                    }
+                } else {
+                    Log.w(TAG, "[SYNC-DBG] no activity for clipboard sync confirm, auto-accepting")
+                    accepted = true
+                    latch.countDown()
+                }
+                latch.await(30, TimeUnit.SECONDS)
+                if (!accepted) {
+                    Log.i(TAG, "Clipboard sync rejected by user from [$senderAlias]")
+                    sendHttpResponse(output, 403, """{"error":"Rejected by user"}""")
+                    return
+                }
             }
 
             uploadSessions[sessionId] = session
@@ -1881,11 +2047,67 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
     }
 
     private fun handleClipboardSyncReceive(zipFile: File, senderAlias: String) {
-        Log.i(TAG, "Clipboard sync received from [$senderAlias]: ${zipFile.absolutePath}")
-        sendEvent("onClipboardSyncReceived", Arguments.createMap().apply {
-            putString("zipPath", zipFile.absolutePath)
-            putString("senderAlias", senderAlias)
-        })
+        Log.i(TAG, "Clipboard sync received from [$senderAlias], importing (user already confirmed in prepare-upload)")
+        thread(isDaemon = true) { doImportClipboardSync(zipFile) }
+    }
+
+    private fun doImportClipboardSync(zipFile: File) {
+        try {
+            val stickerDir = File("/sdcard/MyStyle/Sticker")
+            stickerDir.mkdirs()
+            var clipsJson: String? = null
+            ZipInputStream(zipFile.inputStream().buffered()).use { zis ->
+                var entry = zis.nextEntry
+                while (entry != null) {
+                    if (entry.name == "clips.json") {
+                        clipsJson = zis.readBytes().toString(Charsets.UTF_8)
+                    } else if (entry.name.startsWith("stickers/")) {
+                        val name = entry.name.removePrefix("stickers/")
+                        if (name.isNotEmpty()) {
+                            File(stickerDir, name).outputStream().buffered().use { out -> zis.copyTo(out) }
+                        }
+                    }
+                    zis.closeEntry()
+                    entry = zis.nextEntry
+                }
+            }
+            if (clipsJson != null) {
+                reactApplicationContext.getSharedPreferences("quicktoolbar_presets", 0)
+                    .edit().putString("preset_99", clipsJson).apply()
+                Log.i(TAG, "Clipboard sync imported, clips updated")
+            }
+            zipFile.delete()
+            val activity = currentActivity
+            if (activity != null) {
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    com.ratta.supernote.pluginlib.api.HostUIAPI.getInstance().showTipDialog(
+                        activity, true, NativeLocale.t("sync_clipboard_ok"),
+                        object : com.ratta.supernote.pluginlib.callback.RattaDialogListener {
+                            override fun onConfirm() {}
+                            override fun onCancel() {}
+                        }
+                    )
+                }
+            }
+            refreshToolbarClipIcons()
+        } catch (e: Exception) {
+            Log.e(TAG, "doImportClipboardSync failed", e)
+        }
+    }
+
+    private fun refreshToolbarClipIcons() {
+        val prefs = reactApplicationContext.getSharedPreferences("quicktoolbar_presets", 0)
+        val clipsJson = prefs.getString("preset_99", null) ?: return
+        try {
+            val obj = JSONObject(clipsJson)
+            val filled = JSONArray()
+            for (i in 1..6) {
+                filled.put(obj.optString(i.toString(), "").isNotEmpty())
+            }
+            FloatingToolbarModule.currentInstance?.updateTitleClips(filled.toString())
+        } catch (e: Exception) {
+            Log.w(TAG, "refreshToolbarClipIcons: ${e.message}")
+        }
     }
 
     @ReactMethod

@@ -47,6 +47,8 @@ object NativeLocale {
         "sync_clipboard_empty" to ("剪贴板为空" to "Clipboard is empty"),
         "sync_clipboard_ask" to ("是否接受来自 %s 的剪贴板？" to "Accept clipboard from %s?"),
         "sync_clipboard_ok"  to ("剪贴板已同步" to "Clipboard synced"),
+        "sync_waiting"       to ("等待对方确认…" to "Waiting for confirmation…"),
+        "sync_rejected"      to ("对方拒绝了同步请求" to "Sync request rejected"),
         "extracting"         to ("正在提取套索内容..." to "Extracting lasso content..."),
         "rescan"             to ("重新扫描" to "Rescan"),
         "close"              to ("关闭" to "Close"),
@@ -82,6 +84,11 @@ object NativeLocale {
                                      to "Flip the page, then press the DOC button again."),
 
         "page_indicator"         to ("%d / %d" to "%d / %d"),
+
+        "no_wifi"                to ("未连接 WiFi" to "WiFi is not connected"),
+        "localsend_ask_enable"   to ("LocalSend 未开启，是否立即开启？" to "LocalSend is not running. Start it now?"),
+        "btn_cancel"             to ("取消" to "Cancel"),
+        "btn_confirm"            to ("确定" to "OK"),
     )
 
     fun t(key: String): String {
