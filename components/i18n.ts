@@ -81,6 +81,7 @@ const STRINGS = {
   clip_err_textbox:       { zh: '文本框暂不支持剪贴板保存', en: 'Text boxes cannot be saved to clipboard' },
   clip_err_image:         { zh: '图片暂不支持剪贴板保存', en: 'Images cannot be saved to clipboard' },
   clip_overwrite:         { zh: '剪贴板已有内容，是否覆盖？', en: 'Clipboard slot is not empty. Overwrite?' },
+  clip_err_layer:         { zh: '受 SDK 限制，非主图层内容暂不支持剪贴板保存', en: 'Due to SDK limitations, non-main layer content cannot be saved to clipboard' },
   clip_empty_hint:        { zh: '剪贴板为空，请先用套索选中内容保存', en: 'Clipboard is empty. Select content with lasso first.' },
   btn_cancel:             { zh: '取消', en: 'Cancel' },
   btn_confirm:            { zh: '确定', en: 'OK' },

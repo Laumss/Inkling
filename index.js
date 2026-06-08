@@ -45,6 +45,15 @@ DeviceEventEmitter.addListener('localSendStateChanged', ({ running }) => {
   registerLocalSendButton();
 });
 
+DeviceEventEmitter.addListener('clipboardChanged', async () => {
+  console.log('[index]: clipboardChanged → refreshing toolbar');
+  const newClips = await loadClips();
+  const config = getCachedConfig();
+  if (config && FloatingToolbarBridge.isShowingSync()) {
+    FloatingToolbarBridge.updateTools(injectClipStatus(config.tools, newClips, null));
+  }
+});
+
 FloatingToolbarBridge.onTitlePenLassoAction(() => {
   console.log('[index]: onTitlePenLassoAction → arm pen lasso');
   PenLasso.arm().catch(e => console.error('[index]: PenLasso.arm error:', e));

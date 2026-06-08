@@ -638,6 +638,12 @@ async function clipSave(slot: string): Promise<string> {
     console.warn('[CLIP-DBG] getPenInfo failed:', e);
   }
 
+  const hasNonMainLayer = (elemRes.result as any[]).some((el: any) => el?.layerNum !== undefined && el.layerNum !== 0);
+  if (hasNonMainLayer) {
+    NativeUIUtils.showErrorTipDialog(t('clip_err_layer'));
+    return 'Non-main layer clip not supported';
+  }
+
   const elementsForConvert = resolvedPenType != null
     ? (elemRes.result as any[]).map((el: any) => {
         if (el?.stroke != null) {

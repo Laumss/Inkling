@@ -396,6 +396,11 @@ export function ensureInit(): void {
             cancelSub.remove();
             restoreBubbleAfterLasso();
           });
+        } else if (actionId === 'copilot') {
+          FloatingToolbar?.launchActivity(
+            'com.dictation.server.relay',
+            'com.dictation.server.MainActivity',
+          ).catch((e: any) => console.warn('[BackgroundService]: copilot launchActivity failed:', e));
         } else if (actionId === 'cancel_ai') {
           stopAiMode();
         }

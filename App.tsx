@@ -83,6 +83,7 @@ function App(): React.JSX.Element {
   console.log('[App] init: pendingBtn=', initialPending, 'pendingScreen=', JSON.stringify(initialPendingScreen));
   const [screen, setScreen]               = useState<AppScreen>(
     (initialPendingScreen === 'penLock') ? 'penLock' :
+    (initialPendingScreen === 'nativeSendHelper' || initialPendingScreen === 'nativeInsertHelper' || initialPendingScreen?.startsWith('action:')) ? 'nativeHelper' :
     'main'
   );
   const [tools, setTools]                 = useState<ToolItem[]>(AVAILABLE_TOOLS.slice(0, 7));
