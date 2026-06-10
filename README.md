@@ -21,6 +21,35 @@ It integrates with [LocalSend](https://localsend.org), a free, open-source cross
 - **Text** — With paragraph mode (preserves line breaks) and no-space mode (strips whitespace, useful for CJK text)
 - **Clipboard** — Basically what you've been selecting: writing, painting and textbox. It's 2026 and there's still no official clipboard on any e-ink device.
 
+### Users Guide
+#### Entry to the plugin
+There are two entries in the note toolbar: 
+- LocalSend: this will turn on (filled circle) and off (not filled circle) the LocalSend server on the supernote device.
+- Inkling: this will show or hide the inkling overlay toolbar
+
+#### The Inkling Overlay Toolbar:
+General: use tap to interact, as pen will also write on the note; use finger to move the overlay toolbar on the screen, move it to the right border to hide it except for a small tab, and pull from right side to make it fully visible again. 
+
+##### Left side buttons:
+Image: insert an image (either from file system, or from ???) 
+Document Screenshot: simple tab inserts the next queued screenshot if defined or brings up option to snip a new screenshot brings up a photo icon. Long press opens a dialog with the whole queue of screenshots. 
+Text: activating this (together with active LocalSend) will allow inserting text from another device via localSend. It will appear on the current page. 
+Link: opens a file browser. Selecting a file will insert a link to that file in the current note
+Audio: very unclear was this does: brings up window with buttons AI, St, SI, Co, needs something to be lassoed, that will be recognized and sent to AI ???
+
+##### Right Side Buttons
+1-4: these are four clipboards, tapping while having something selected will put the selection into that clipboard. Otherwise tapping will insert that clipboard in the middle of the current note. A filled clipboard will show with black background. Long pressing a number to clear the current clipboard content. 
+
+Arrow up and Arrow down: shift layer of currently lassoed elements up or down a layer
+
+Dokument Icon: will allow you to define an area that will be then clipped (taking maximum boundary as rectangle) and insert it into a new page and create forward and back links.
+
+Further icon (half hidden for me): 
+
+### Snipping Screenshots: 
+documentation to be done
+
+
 ## About LocalSend
 
 [LocalSend](https://localsend.org) is a free, open-source app for securely sharing files between nearby devices without needing the internet. Available on Windows, macOS, Linux, Android, and iOS.
