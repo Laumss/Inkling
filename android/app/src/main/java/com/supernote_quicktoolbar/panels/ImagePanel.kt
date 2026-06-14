@@ -1,26 +1,27 @@
 package com.supernote_quicktoolbar.panels
+import com.supernote_quicktoolbar.BuildConfig
 import com.supernote_quicktoolbar.*
-import com.supernote_quicktoolbar.overlays.*
-import com.supernote_quicktoolbar.bubbles.*
 
 import android.graphics.*
 import android.graphics.drawable.GradientDrawable
 import android.util.Log
 import android.view.*
 import android.widget.*
-import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.ReactApplicationContext
+import com.supernote_quicktoolbar.ui_common.BrowseDirs
+import com.supernote_quicktoolbar.ui_common.ButtonHandle
+import com.supernote_quicktoolbar.ui_common.CheckboxHandle
+import com.supernote_quicktoolbar.ui_common.ChipsHandle
 import com.supernote_quicktoolbar.ui_common.FolderCoverView
+import com.supernote_quicktoolbar.ui_common.GridHandle
+import com.supernote_quicktoolbar.ui_common.MultiSelectState
 import com.supernote_quicktoolbar.ui_common.PanelBase
-import com.supernote_quicktoolbar.ui_common.PanelCheckbox
 import com.supernote_quicktoolbar.ui_common.PanelChips
-import com.supernote_quicktoolbar.ui_common.PanelGrid
-import com.supernote_quicktoolbar.ui_common.PanelHeader
-import com.supernote_quicktoolbar.ui_common.PanelScrollHost
+import com.supernote_quicktoolbar.ui_common.PanelHost
 import com.supernote_quicktoolbar.ui_common.PanelTabBar
-import com.supernote_quicktoolbar.ui_common.SelectionButton
+import com.supernote_quicktoolbar.ui_common.PanelWidgets
+import com.supernote_quicktoolbar.ui_common.TabBarHandle
 import java.io.File
-import java.io.FileOutputStream
 import kotlin.concurrent.thread
 
 class ImagePanel(
@@ -56,64 +57,93 @@ class ImagePanel(
                 val meta = File(cacheDir, "${src.nameWithoutExtension}.meta")
                 meta.writeText("$notePath\n$pageNum\n$imagePath")
             } catch (e: Exception) {
-                Log.e("ImagePanel", "saveToInsertCacheStatic: ${e.message}")
+                if (BuildConfig.ENABLE_DEBUG) Log.e("ImagePanel", "saveToInsertCacheStatic: ${e.message}")
             }
         }
     }
+
+    data class GridItem(
+        val name: String,
+        val path: String,
+        val isDir: Boolean,
+        val size: Long = 0,
+        val childCount: Int = 0,
+        val previewPaths: List<String> = emptyList()
+    )
 
     private var activeTab = "received"
     private var browseDir: String? = null
     private var currentBrowsePath: String = "/sdcard"
     private var selectedImagePath: String? = null
     private var allItems: List<GridItem> = emptyList()
-
-    private var multiSelectMode = false
-    private val multiSelectedPaths = linkedSetOf<String>()
-
-    private val DEST_DIR_MAP = mapOf(
-        "Document" to "/sdcard/Document", "Export" to "/sdcard/EXPORT",
-        "MyStyle" to "/sdcard/MyStyle", "Note" to "/sdcard/Note",
-        "SCREENSHOT" to "/sdcard/SCREENSHOT", "INBOX" to "/sdcard/INBOX"
-    )
-    private val DIR_KEYS = listOf("Document", "Export", "MyStyle", "Note", "SCREENSHOT", "INBOX")
-
-    private var contentGrid: LinearLayout? = null
-    private var scrollHost: PanelScrollHost? = null
-    private var tabBar: PanelTabBar? = null
-    private var chips: PanelChips? = null
-    private var chipsView: View? = null
-    private var cropBtn: SelectionButton? = null
-    private var insertBtn: SelectionButton? = null
-
-    private var multiCheckbox: PanelCheckbox? = null
+    private val multi = MultiSelectState()
     private val cellFrameMap = mutableMapOf<String, FrameLayout>()
+
+    private lateinit var tabBarH: TabBarHandle
+    private lateinit var chipsH: ChipsHandle
+    private lateinit var gridH: GridHandle
+    private lateinit var cropBtn: ButtonHandle
+    private lateinit var insertBtn: ButtonHandle
+    private lateinit var multiCheckbox: CheckboxHandle
+    private var chipsView: View? = null
 
     fun show() {
         currentInstance = this
         selectedImagePath = null
-        multiSelectMode = false
-        multiSelectedPaths.clear()
+        multi.clear()
         activeTab = "received"; browseDir = null; currentBrowsePath = "/sdcard"
         showPanel()
         handler.post { refreshContent() }
     }
 
-    override fun hide() {
-        handler.post {
-            try { windowManager?.removeView(rootView) } catch (_: Exception) {}
-            rootView = null; windowManager = null
-            onHide()
-            toolbarModule.disablePenBlock()
-            toolbarModule.emitEventPublic("onNativePanelClose",
-                Arguments.createMap().apply { putString("panel", "image") })
+    override fun buildContent(root: LinearLayout) {
+        renderDsl(root) {
+            header(NativeLocale.t("image_panel_title"))
+
+            tabBarH = tabBar(
+                listOf(
+                    PanelTabBar.Tab.Icon("icons/ic_tab_received.xml", "received"),
+                    PanelTabBar.Tab.Icon("icons/ic_tab_browse.xml", "browse")
+                ),
+                initial = 0
+            ) { idx -> switchTab(if (idx == 0) "received" else "browse") }
+
+            custom { host ->
+                val c = PanelChips(host.ctx, BrowseDirs.KEYS) { selected ->
+                    if (activeTab == "browse" || selected != null) {
+                        activeTab = "browse"
+                        tabBarH.setSelection(1)
+                        browseDir = selected
+                        currentBrowsePath = BrowseDirs.pathForKey(selected)
+                    }
+                    chipsH.setSelection(browseDir)
+                    refreshContent()
+                }
+                chipsH = ChipsHandle().also { it.chips = c }
+                c.createView().also {
+                    chipsView = it
+                    it.visibility = if (activeTab == "received") View.GONE else View.VISIBLE
+                }
+            }
+
+            gridH = grid(
+                itemsProvider = { allItems },
+                emptyText = if (activeTab == "received") NativeLocale.t("no_received") else NativeLocale.t("no_images")
+            ) { host, item, colW -> gridCell(host, item, colW) }
+
+            bottomBar {
+                multiCheckbox = checkbox(NativeLocale.t("multi_select")) { toggleMultiSelect() }
+                outlined(NativeLocale.t("cancel")) { closeAndRestore() }
+                cropBtn = outlined(NativeLocale.t("crop_and_insert")) { doCropAndInsert() }
+                insertBtn = filled(NativeLocale.t("insert")) { doInsertOriginal() }
+            }
         }
+        cropBtn.enabled = false
+        insertBtn.enabled = false
+        updateCheckboxEnabled()
     }
 
     override fun onHide() {
-        contentGrid = null
-        scrollHost = null; tabBar = null; chips = null; chipsView = null
-        cropBtn = null; insertBtn = null
-        multiCheckbox = null
         cellFrameMap.clear()
         currentInstance = null
     }
@@ -126,65 +156,10 @@ class ImagePanel(
         }
     }
 
-    override fun buildContent(root: LinearLayout) {
-        root.addView(PanelHeader.create(reactContext, NativeLocale.t("image_panel_title")))
-
-        tabBar = PanelTabBar(reactContext, listOf(
-            PanelTabBar.Tab.Icon("icons/ic_tab_received.xml", "received"),
-            PanelTabBar.Tab.Icon("icons/ic_tab_browse.xml", "browse")
-        ), leftMarginDp = 30, rightMarginDp = 28) { idx -> switchTab(if (idx == 0) "received" else "browse") }
-        tabBar!!.setSelection(0)
-        root.addView(tabBar!!.createView())
-
-        chips = PanelChips(reactContext, DIR_KEYS) { selected ->
-            if (activeTab == "browse" || selected != null) {
-                activeTab = "browse"
-                tabBar?.setSelection(1)
-                browseDir = selected
-                currentBrowsePath = if (selected != null) DEST_DIR_MAP[selected] ?: "/sdcard" else "/sdcard"
-            }
-            chips?.rebuildChips()
-            refreshContent()
-        }
-        chipsView = chips!!.createView().apply {
-            visibility = if (activeTab == "received") View.GONE else View.VISIBLE
-        }
-        root.addView(chipsView)
-
-        scrollHost = PanelScrollHost(reactContext)
-        contentGrid = scrollHost!!.content
-
-        contentGrid!!.setPadding(
-            contentGrid!!.paddingLeft,
-            contentGrid!!.paddingTop,
-            0,
-            contentGrid!!.paddingBottom
-        )
-        root.addView(scrollHost!!.view)
-
-        val cropTv = makeOutlinedBtn(NativeLocale.t("crop_and_insert")) { doCropAndInsert() }
-        val insertTv = makeFilledBtn(NativeLocale.t("insert")) { doInsertOriginal() }
-        cropBtn = SelectionButton(cropTv)
-        insertBtn = SelectionButton(insertTv)
-
-        val checkbox = PanelCheckbox(reactContext, NativeLocale.t("multi_select")) { toggleMultiSelect() }
-        multiCheckbox = checkbox
-
-        root.addView(makeBottomBar(
-            leftFlex = checkbox.view,
-            rightButtons = listOf(
-                makeOutlinedBtn(NativeLocale.t("cancel")) { closeAndRestore() },
-                cropTv,
-                insertTv
-            )
-        ))
-    }
-
     private fun switchTab(tab: String) {
         activeTab = tab
         if (tab == "received") browseDir = null
-        chips?.setSelection(browseDir)
-        chips?.rebuildChips()
+        chipsH.setSelection(browseDir)
         chipsView?.visibility = if (tab == "received") View.GONE else View.VISIBLE
         refreshContent()
     }
@@ -194,46 +169,22 @@ class ImagePanel(
     private fun refreshContent(clearSelection: Boolean) {
         if (clearSelection) {
             selectedImagePath = null
-            cropBtn?.update(false)
-            insertBtn?.update(false)
+            cropBtn.enabled = false
+            insertBtn.enabled = false
         }
 
         if (activeTab == "received") {
             val files = LocalSendModule.getReceivedImageFiles()
-            Log.i(tag, "refreshContent: received tab, session files=${files.size}")
+            if (BuildConfig.ENABLE_DEBUG) Log.i(tag, "refreshContent: received tab, session files=${files.size}")
             allItems = if (files.isEmpty()) emptyList()
                        else files.map { GridItem(it.name, it.path, false, it.size) }
         } else {
             loadItems(currentBrowsePath)
         }
-        showPage()
-    }
-
-    private fun showPage(resetScroll: Boolean = true) {
-        val grid = contentGrid ?: return
-        if (resetScroll) scrollHost?.prepareForContentChange()
         cellFrameMap.clear()
-        grid.removeAllViews()
-
-        if (allItems.isEmpty()) {
-            val msg = if (activeTab == "received") NativeLocale.t("no_received") else NativeLocale.t("no_images")
-            grid.addView(makeEmptyView(msg))
-            scrollHost?.refreshThumb()
-            return
-        }
-
-        buildImageGrid(allItems)
-        if (resetScroll) scrollHost?.scrollToTop() else scrollHost?.refreshThumb()
+        gridH.refresh()
+        gridH.scrollTop()
     }
-
-    data class GridItem(
-        val name: String,
-        val path: String,
-        val isDir: Boolean,
-        val size: Long = 0,
-        val childCount: Int = 0,
-        val previewPaths: List<String> = emptyList()
-    )
 
     private fun loadItems(path: String) {
         val dir = File(path)
@@ -270,75 +221,59 @@ class ImagePanel(
             }
     }
 
-    private fun buildImageGrid(items: List<GridItem>) {
-        val host = scrollHost ?: return
-        val density = reactContext.resources.displayMetrics.density
-        Log.i("ImagePanel", "[GRID-DBG] screenW=$screenW winW=$winW density=$density scrollLane=${host.scrollBarLaneWidthPx} contentPadL=${host.content.paddingLeft} contentPadR=${host.content.paddingRight} availW=${host.availableContentWidth(winW)}")
-        PanelGrid.build(reactContext, host, screenW, winW, items) { item, colW ->
-            Log.i("ImagePanel", "[GRID-DBG] colW=$colW")
-            createGridCell(item, colW)
-        }
-    }
-
-    private fun createGridCell(item: GridItem, width: Int): LinearLayout {
-        val thumbH = (width * 1.22f).toInt()
-        val isSelected = if (multiSelectMode) {
-            !item.isDir && item.path in multiSelectedPaths
+    private fun gridCell(host: PanelHost, item: GridItem, colW: Int): View {
+        val thumbH = (colW * 1.22f).toInt()
+        val isSelected = if (multi.isActive) {
+            !item.isDir && multi.isSelected(item.path)
         } else {
             !item.isDir && selectedImagePath == item.path
         }
 
-        val cell = LinearLayout(reactContext).apply {
+        val cell = LinearLayout(host.ctx).apply {
             orientation = LinearLayout.VERTICAL
-            layoutParams = LinearLayout.LayoutParams(width, LinearLayout.LayoutParams.WRAP_CONTENT)
+            layoutParams = LinearLayout.LayoutParams(colW, LinearLayout.LayoutParams.WRAP_CONTENT)
             setOnClickListener {
                 if (item.isDir) {
                     currentBrowsePath = item.path
-
-                    val matchedKey = DEST_DIR_MAP.entries.firstOrNull { it.value == item.path }?.key
+                    val matchedKey = BrowseDirs.KEYS.firstOrNull { BrowseDirs.pathForKey(it) == item.path }
                     browseDir = matchedKey
-                    chips?.setSelection(matchedKey)
-                    chips?.rebuildChips()
+                    chipsH.setSelection(matchedKey)
                     refreshContent()
-                } else if (multiSelectMode) {
-                    val wasSelected = item.path in multiSelectedPaths
-                    if (wasSelected) multiSelectedPaths.remove(item.path) else multiSelectedPaths.add(item.path)
+                } else if (multi.isActive) {
+                    multi.toggle(item.path)
                     updateMultiSelectUI()
-                    applyCellSelection(item.path, !wasSelected)
+                    gridH.refresh()
                 } else {
-                    val oldPath = selectedImagePath
                     selectedImagePath = if (selectedImagePath == item.path) null else item.path
                     val hasSelection = selectedImagePath != null
-                    cropBtn?.update(hasSelection)
-                    insertBtn?.update(hasSelection)
+                    cropBtn.enabled = hasSelection
+                    insertBtn.enabled = hasSelection
                     updateCheckboxEnabled()
-                    applyCellSelection(oldPath, false)
-                    applyCellSelection(selectedImagePath, true)
+                    gridH.refresh()
                 }
             }
         }
 
-        val thumbFrame = FrameLayout(reactContext).apply {
-            layoutParams = LinearLayout.LayoutParams(width, thumbH)
+        val thumbFrame = FrameLayout(host.ctx).apply {
+            layoutParams = LinearLayout.LayoutParams(colW, thumbH)
             background = GradientDrawable().apply {
                 setColor(Color.WHITE)
-                setStroke(if (isSelected) dp(2) else dp(1),
+                setStroke(if (isSelected) host.dp(2) else host.dp(1),
                     if (isSelected) Color.BLACK else Color.parseColor("#CCCCCC"))
-                cornerRadius = dp(4).toFloat()
+                cornerRadius = host.dp(4).toFloat()
             }
             clipToOutline = true
             outlineProvider = object : ViewOutlineProvider() {
                 override fun getOutline(v: View, o: android.graphics.Outline) {
-                    o.setRoundRect(0, 0, v.width, v.height, dp(4).toFloat())
+                    o.setRoundRect(0, 0, v.width, v.height, host.dp(4).toFloat())
                 }
             }
         }
         if (item.isDir) {
-
             thumbFrame.clipToOutline = false
             thumbFrame.background = null
             thumbFrame.setBackgroundColor(Color.WHITE)
-            val cover = FolderCoverView(reactContext).apply {
+            val cover = FolderCoverView(host.ctx).apply {
                 layoutParams = FrameLayout.LayoutParams(
                     FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
                 )
@@ -355,39 +290,39 @@ class ImagePanel(
                 }
             }
         } else {
-            val imageView = ImageView(reactContext).apply {
+            val imageView = ImageView(host.ctx).apply {
                 layoutParams = FrameLayout.LayoutParams(
                     FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
                 )
                 scaleType = ImageView.ScaleType.FIT_CENTER
-                setPadding(dp(2), dp(2), dp(2), dp(2))
+                setPadding(host.dp(2), host.dp(2), host.dp(2), host.dp(2))
             }
             thumbFrame.addView(imageView)
-            loadThumbnail(item.path, width, thumbH, imageView)
+            loadThumbnail(item.path, colW, thumbH, imageView)
         }
-        if (isSelected && multiSelectMode) {
-            thumbFrame.addView(makeCheckmark())
+        if (isSelected && multi.isActive) {
+            thumbFrame.addView(makeCheckmark(host))
         }
         if (!item.isDir) cellFrameMap[item.path] = thumbFrame
         cell.addView(thumbFrame)
 
-        val textContainer = LinearLayout(reactContext).apply {
+        val textContainer = LinearLayout(host.ctx).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(2), dp(6), dp(2), dp(4))
+            setPadding(host.dp(2), host.dp(6), host.dp(2), host.dp(4))
         }
-        textContainer.addView(TextView(reactContext).apply {
-            text = item.name; textSize = sp(12f); setTextColor(Color.BLACK)
+        textContainer.addView(TextView(host.ctx).apply {
+            text = item.name; textSize = host.sp(12f); setTextColor(Color.BLACK)
             typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
             maxLines = 2
         })
         if (item.isDir) {
-            textContainer.addView(TextView(reactContext).apply {
+            textContainer.addView(TextView(host.ctx).apply {
                 text = NativeLocale.itemCount(item.childCount)
-                textSize = sp(10f); setTextColor(Color.parseColor("#666666"))
+                textSize = host.sp(10f); setTextColor(Color.parseColor("#666666"))
             })
         } else if (item.size > 0) {
-            textContainer.addView(TextView(reactContext).apply {
-                text = formatSize(item.size); textSize = sp(10f)
+            textContainer.addView(TextView(host.ctx).apply {
+                text = PanelWidgets.formatSize(item.size); textSize = host.sp(10f)
                 setTextColor(Color.parseColor("#666666"))
             })
         }
@@ -408,31 +343,16 @@ class ImagePanel(
         }
     }
 
-    private fun makeCheckmark(): TextView = TextView(reactContext).apply {
+    private fun makeCheckmark(host: PanelHost): TextView = TextView(host.ctx).apply {
         tag = "checkmark"
-        text = "✓"; textSize = sp(12f); setTextColor(Color.WHITE)
+        text = "✓"; textSize = host.sp(12f); setTextColor(Color.WHITE)
         gravity = Gravity.CENTER
         background = GradientDrawable().apply {
-            setColor(Color.BLACK); cornerRadius = dp(10).toFloat()
+            setColor(Color.BLACK); cornerRadius = host.dp(10).toFloat()
         }
-        layoutParams = FrameLayout.LayoutParams(dp(20), dp(20)).apply {
+        layoutParams = FrameLayout.LayoutParams(host.dp(20), host.dp(20)).apply {
             gravity = Gravity.TOP or Gravity.END
-            setMargins(0, dp(4), dp(4), 0)
-        }
-    }
-
-    private fun applyCellSelection(path: String?, selected: Boolean) {
-        if (path == null) return
-        val frame = cellFrameMap[path] ?: return
-        frame.background = GradientDrawable().apply {
-            setColor(Color.WHITE)
-            setStroke(if (selected) dp(2) else dp(1),
-                if (selected) Color.BLACK else Color.parseColor("#CCCCCC"))
-            cornerRadius = dp(4).toFloat()
-        }
-        if (multiSelectMode) {
-            frame.findViewWithTag<View>("checkmark")?.let { frame.removeView(it) }
-            if (selected) frame.addView(makeCheckmark())
+            setMargins(0, host.dp(4), host.dp(4), 0)
         }
     }
 
@@ -446,15 +366,14 @@ class ImagePanel(
     }
 
     private fun doInsertOriginal() {
-        if (multiSelectMode) {
-            if (multiSelectedPaths.isEmpty()) return
-            val paths = multiSelectedPaths.toList()
-            multiSelectedPaths.clear()
-            multiSelectMode = false
+        if (multi.isActive) {
+            if (multi.count == 0) return
+            val paths = multi.selectedPaths
+            multi.clear()
             synchronized(ImagePanel::class.java) {
                 imageQueue.clear()
                 imageQueue.addAll(paths.drop(1))
-                Log.i(tag, "[QUEUE-DBG] doInsertOriginal: selected=${paths.size} queued=${imageQueue.size} queue=${imageQueue.toList()}")
+                if (BuildConfig.ENABLE_DEBUG) Log.i(tag, "[QUEUE-DBG] doInsertOriginal: selected=${paths.size} queued=${imageQueue.size} queue=${imageQueue.toList()}")
             }
             hide()
             toolbarModule.requestInsertImage(paths.first())
@@ -467,24 +386,32 @@ class ImagePanel(
 
     private fun doCropAndInsert() {
         val path = selectedImagePath ?: return
-        Log.i("ImagePanel", "[CROP] doCropAndInsert path=$path")
+        if (BuildConfig.ENABLE_DEBUG) Log.i("ImagePanel", "[CROP] doCropAndInsert path=$path")
         hide()
         handler.postDelayed({
-            Log.i("ImagePanel", "[CROP] opening CropPanel")
+            if (BuildConfig.ENABLE_DEBUG) Log.i("ImagePanel", "[CROP] opening CropPanel")
             CropPanel.getInstance(reactContext, toolbarModule).show(path) { crop ->
             kotlin.concurrent.thread(isDaemon = true) {
                 try {
                     val src = BitmapFactory.decodeFile(path) ?: return@thread
                     val cropped = Bitmap.createBitmap(src, crop.offsetX, crop.offsetY, crop.width, crop.height)
-                    src.recycle()
+                    val output = if (crop.opacity < 100) {
+                        val alphaBmp = Bitmap.createBitmap(cropped.width, cropped.height, Bitmap.Config.ARGB_8888)
+                        val canvas = android.graphics.Canvas(alphaBmp)
+                        val paint = android.graphics.Paint().apply { alpha = (255 * crop.opacity / 100) }
+                        canvas.drawBitmap(cropped, 0f, 0f, paint)
+                        cropped.recycle()
+                        alphaBmp
+                    } else cropped
                     val outPath = "${reactContext.cacheDir.absolutePath}/crop_${System.currentTimeMillis()}.png"
                     java.io.FileOutputStream(outPath).use { fos ->
-                        cropped.compress(Bitmap.CompressFormat.PNG, 100, fos)
+                        output.compress(Bitmap.CompressFormat.PNG, 100, fos)
                     }
-                    cropped.recycle()
+                    if (output != src) output.recycle()
+                    src.recycle()
                     handler.post { toolbarModule.requestInsertImage(outPath) }
                 } catch (e: Exception) {
-                    Log.e("ImagePanel", "crop failed: ${e.message}", e)
+                    if (BuildConfig.ENABLE_DEBUG) Log.e("ImagePanel", "crop failed: ${e.message}", e)
                     handler.post { toolbarModule.restoreToolbar() }
                 }
             }
@@ -498,41 +425,38 @@ class ImagePanel(
     }
 
     private fun toggleMultiSelect() {
-        val canToggle = multiSelectMode || selectedImagePath != null
+        val canToggle = multi.isActive || selectedImagePath != null
         if (!canToggle) return
-        if (multiSelectMode) {
-            multiSelectMode = false
-            multiSelectedPaths.clear()
+        if (multi.isActive) {
+            multi.deactivate()
             selectedImagePath = null
-            cropBtn?.update(false)
-            insertBtn?.update(false)
+            cropBtn.enabled = false
+            insertBtn.enabled = false
         } else {
-            multiSelectMode = true
-            selectedImagePath?.let { multiSelectedPaths.add(it) }
+            multi.activate(seed = selectedImagePath)
             selectedImagePath = null
-            cropBtn?.update(false)
+            cropBtn.enabled = false
         }
         updateMultiSelectUI()
-        showPage(resetScroll = false)
+        cellFrameMap.clear()
+        gridH.refresh()
     }
 
     private fun updateMultiSelectUI() {
-        if (multiSelectMode) {
-            val count = multiSelectedPaths.size
-            multiCheckbox?.setChecked(true)
-            multiCheckbox?.setLabel("${NativeLocale.t("multi_select")} ($count)")
-            multiCheckbox?.setActive(true)
-            cropBtn?.update(false)
-            insertBtn?.update(count > 0)
+        if (multi.isActive) {
+            multiCheckbox.setChecked(true)
+            multiCheckbox.setLabel("${NativeLocale.t("multi_select")} (${multi.count})")
+            multiCheckbox.setActive(true)
+            cropBtn.enabled = false
+            insertBtn.enabled = multi.count > 0
         } else {
-            multiCheckbox?.setChecked(false)
-            multiCheckbox?.setLabel(NativeLocale.t("multi_select"))
+            multiCheckbox.setChecked(false)
+            multiCheckbox.setLabel(NativeLocale.t("multi_select"))
             updateCheckboxEnabled()
         }
     }
 
     private fun updateCheckboxEnabled() {
-        val enabled = multiSelectMode || selectedImagePath != null
-        multiCheckbox?.setActive(enabled)
+        multiCheckbox.setActive(multi.isActive || selectedImagePath != null)
     }
 }

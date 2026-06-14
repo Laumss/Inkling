@@ -8,16 +8,14 @@ import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.facebook.react.bridge.ReactApplicationContext
-import kotlin.math.roundToInt
 
 class PanelChips(
     private val ctx: ReactApplicationContext,
     private val keys: List<String>,
     private val onSelect: (selected: String?) -> Unit
 ) {
-    private val density = ctx.resources.displayMetrics.density
     private val scale = ScreenScale.factor(ctx)
-    private fun dp(v: Int) = (v * density * scale).roundToInt()
+    private fun dp(v: Int) = ScreenScale.dp(ctx, v)
 
     private var container: LinearLayout? = null
     private var selected: String? = null

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ============================================================
-# buildPlugin.sh — Analyze Android Dependencies and Generate PluginConfig.json
+# buildPlugin.sh -- Analyze Android Dependencies and Generate PluginConfig.json
 # Bash equivalent of buildPlugin.ps1
 # ============================================================
 
@@ -398,16 +398,22 @@ build_android_apk() {
         return 1
     fi
 
+    local variant="Release"
+    if [[ "${WITH_LOGS:-}" == "1" ]]; then
+        variant="Debug"
+    fi
+    local task="buildCustomApk${variant}"
+
     if [[ -f "$android_dir/gradlew" ]]; then
         chmod +x "$android_dir/gradlew"
         sed -i 's/\r$//' "$android_dir/gradlew"
         print_color "Cleaning previous build..." Blue
         (cd "$android_dir" && ./gradlew clean)
-        print_color "Using gradlew to execute buildCustomApkDebug task..." Green
-        (cd "$android_dir" && ./gradlew buildCustomApkDebug)
+        print_color "Using gradlew to execute ${task} task..." Green
+        (cd "$android_dir" && ./gradlew "$task")
     elif command -v gradle &>/dev/null; then
-        print_color "Using gradle to execute buildCustomApkDebug task..." Green
-        (cd "$android_dir" && gradle buildCustomApkDebug)
+        print_color "Using gradle to execute ${task} task..." Green
+        (cd "$android_dir" && gradle "$task")
     else
         print_color "Neither gradle nor gradlew found, cannot build APK" Red
         return 1
@@ -564,6 +570,19 @@ with zipfile.ZipFile(dst, 'w', zipfile.ZIP_DEFLATED) as zf:
 # Main
 # ============================================================
 main() {
+    # Parse CLI args: --with-logs keeps JS/TS logs (debug build), default strips them (release build).
+    # Don't reset WITH_LOGS so that `WITH_LOGS=1 bash buildPlugin.sh` also works.
+    for arg in "$@"; do
+        case "$arg" in
+            --with-logs) export WITH_LOGS="1" ;;
+        esac
+    done
+    if [[ "${WITH_LOGS:-}" == "1" ]]; then
+        print_color "Log mode: INCLUDED (WITH_LOGS=1, debug build)" Yellow
+    else
+        print_color "Log mode: STRIPPED (release build)" Blue
+    fi
+
     print_color "Running on Linux (bash)" Blue
     print_color "Project root directory: $PROJECT_ROOT" Green
 
@@ -609,6 +628,20 @@ main() {
     local build_config="$BUILD_GENERATED_DIR/PluginConfig.json"
     cp "$root_config" "$build_config"
     print_color "Copied root directory PluginConfig.json to build/generated folder" Green
+
+    if [[ "${WITH_LOGS:-}" == "1" ]]; then
+        python3 -c "
+import json, sys
+p = sys.argv[1]
+with open(p, 'r', encoding='utf-8') as f:
+    c = json.load(f)
+c['name'] = c['name'] + ' - Dev'
+with open(p, 'w', encoding='utf-8') as f:
+    json.dump(c, f, indent=4, ensure_ascii=False)
+" "$build_config"
+        print_color "Dev build: name set to '$(python3 -c "import json; print(json.load(open('$build_config'))['name'])")'" Yellow
+    fi
+
     copy_icon_and_update_path
 
     # Step 7: Parse manually added packages from Application
@@ -675,7 +708,9 @@ main() {
     # Step 14: Package and generate .snplg
     print_color "=== Step 14: Package build/generated directory and generate .snplg file ===" Blue
     local build_outputs="$PROJECT_ROOT/build/outputs"
-    create_snplg_package "$BUILD_GENERATED_DIR" "$build_outputs" "$PKG_NAME"
+    local dev_suffix=""
+    [[ "${WITH_LOGS:-}" == "1" ]] && dev_suffix="-dev"
+    create_snplg_package "$BUILD_GENERATED_DIR" "$build_outputs" "${PKG_NAME}${dev_suffix}"
 }
 
 main "$@"

@@ -1,4 +1,5 @@
 package com.supernote_quicktoolbar.overlays
+import com.supernote_quicktoolbar.BuildConfig
 import com.supernote_quicktoolbar.*
 import com.supernote_quicktoolbar.panels.*
 import com.supernote_quicktoolbar.bubbles.*
@@ -78,14 +79,14 @@ class StrokeEraserOverlay(private val context: Context) {
         try {
             wm.addView(root, lp)
         } catch (e: Exception) {
-            android.util.Log.e(TAG, "addView failed: ${e.message}", e)
+            if (BuildConfig.ENABLE_DEBUG) android.util.Log.e(TAG, "addView failed: ${e.message}", e)
             fireCancel()
             return
         }
 
         timeoutRunnable = Runnable { fireCancel() }
         handler.postDelayed(timeoutRunnable!!, TIMEOUT_MS)
-        android.util.Log.i(TAG, "overlay shown, waiting for eraser stroke...")
+        if (BuildConfig.ENABLE_DEBUG) android.util.Log.i(TAG, "overlay shown, waiting for eraser stroke...")
     }
 
     fun dismiss() {
@@ -135,7 +136,7 @@ class StrokeEraserOverlay(private val context: Context) {
 
     private fun firePath() {
         if (points.size < 2) { fireCancel(); return }
-        android.util.Log.i(TAG, "path: ${points.size} pts")
+        if (BuildConfig.ENABLE_DEBUG) android.util.Log.i(TAG, "path: ${points.size} pts")
         val cb = onPath
         val result = ArrayList(points)
         cleanup()

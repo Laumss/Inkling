@@ -2,79 +2,31 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
-  View, StyleSheet, Pressable, Text, StatusBar, Dimensions, Image,
-  ScrollView, DeviceEventEmitter, AppState, AppStateStatus,
+  View, StyleSheet, StatusBar,
+  DeviceEventEmitter, AppState, AppStateStatus,
 } from 'react-native';
-import { PluginManager, PluginNoteAPI, PluginFileAPI, PluginCommAPI } from 'sn-plugin-lib';
+import { PluginManager, PluginNoteAPI, PluginFileAPI, PluginCommAPI, NativeUIUtils } from 'sn-plugin-lib';
 
-import FloatingToolbarBridge, { ToolItem } from './components/FloatingToolbarBridge';
-import FloatingBubbleBridge from './components/BubbleBridges';
+import FloatingToolbarBridge from './components/FloatingToolbarBridge';
+import FloatingBubbleBridge, { PaletteBubbleBridge } from './components/BubbleBridges';
 import {
-  AVAILABLE_TOOLS, getAvailableTools,
-  loadConfig, saveConfig, isValidToolCount,
-  loadClips, injectClipStatus, ClipData,
-  getLayoutForCount, getToolCategory, ToolCategory,
-  loadBubbleActions, saveBubbleActions, BubbleAction,
+  loadClips, ClipData,
+  loadBubbleActions,
 } from './components/ToolPresets';
 import {
   ensureInit, getActiveMode, flushPendingTexts, reviveIfNeeded,
   setInsertTop, refreshBubbleActions, stopMode, stopAiMode,
 } from './components/BackgroundService';
-import { executeAction, attachModeListeners, detachModeListeners } from './components/ToolActions';
+import { executeAction, attachModeListeners, detachModeListeners, getPaletteLassoInfo } from './components/ToolActions';
 import { InsertMode } from './components/TextInserter';
 import { FileLogger } from './components/FileLogger';
 import { LassoExtractor } from './components/LassoExtractor';
 import { checkPendingButton, peekPendingButton, setAppMounted } from './pendingButton';
 import { t } from './components/i18n';
-import WeChatTransferBridge from './components/WeChatTransferBridge';
 import { appendPageWithLink } from './components/AppendPageService';
 
-function getScreenDims() {
-  const d = Dimensions.get('window');
-  return { width: d.width, height: d.height };
-}
-function getWindowWidth()  { return getScreenDims().width  * 0.72; }
-function getWindowHeight() { return getScreenDims().height * 0.78; }
 
-type AppScreen = 'main' | 'add_tool' | 'permission' | 'nativeHelper' | 'penLock' | 'wechat_qr';
-type CatFilter = 'all' | 'layer' | 'insert' | 'text' | 'lasso';
-
-const CAT_FILTERS: { key: CatFilter; labelKey: string }[] = [
-  { key: 'all',    labelKey: 'cat_all' },
-  { key: 'layer',  labelKey: 'cat_layer' },
-  { key: 'insert', labelKey: 'cat_insert' },
-  { key: 'text',   labelKey: 'cat_text' },
-  { key: 'lasso',  labelKey: 'cat_lasso' },
-];
-
-function MiniToolbarPreview({ tools, side }: { tools: ToolItem[]; side: 'left' | 'right' }) {
-  const layout = getLayoutForCount(tools.length);
-  const { cols, rows } = layout;
-  const isL = side === 'left';
-  const cellSize = 22;
-  const gap = 2;
-  const pad = 2;
-  const maxShow = cols * rows;
-  const handleW = 4;
-  const gridW = cols * cellSize + (cols - 1) * gap + pad * 2;
-  const gridH = rows * cellSize + (rows - 1) * gap + pad * 2;
-
-  const gridView = (
-    <View style={{ width: gridW, height: gridH, backgroundColor: '#F0F0F0', borderRadius: 2, padding: pad, gap, flexDirection: 'row', flexWrap: 'wrap' }}>
-      {[...Array(maxShow)].map((_, i) => (
-        <View key={i} style={{ width: cellSize, height: cellSize, backgroundColor: tools[i] ? '#888' : '#CCCCCC', borderRadius: 2, margin: gap / 2 }} />
-      ))}
-    </View>
-  );
-  const handleView = (
-    <View style={{ width: handleW, height: gridH, backgroundColor: '#AAAAAA', borderRadius: 1 }} />
-  );
-  return (
-    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-      {!isL && gridView}{handleView}{isL && gridView}
-    </View>
-  );
-}
+type AppScreen = 'nativeHelper' | 'penLock';
 
 function App(): React.JSX.Element {
 
@@ -84,57 +36,27 @@ function App(): React.JSX.Element {
   const [screen, setScreen]               = useState<AppScreen>(
     (initialPendingScreen === 'penLock') ? 'penLock' :
     (initialPendingScreen === 'nativeSendHelper' || initialPendingScreen === 'nativeInsertHelper' || initialPendingScreen?.startsWith('action:')) ? 'nativeHelper' :
-    'main'
+    'nativeHelper'
   );
-  const [tools, setTools]                 = useState<ToolItem[]>(AVAILABLE_TOOLS.slice(0, 7));
   const [clips, setClips]                 = useState<ClipData>({ '1': null, '2': null, '3': null, '4': null });
-  const [statusMsg, setStatusMsg]         = useState('');
-  const [hasPermission, setHasPermission] = useState(false);
   const [insertMode, setInsertMode]       = useState<InsertMode | null>(null);
   const [_resumeTick, setResumeTick]      = useState(0);
-  const dockSide                          = 'left' as const;
-  const [catFilter, setCatFilter]         = useState<CatFilter>('all');
   const [bubbleActionIds, setBubbleActionIds] = useState<string[]>([]);
-  const [toolbarOrientation, setToolbarOrientation] = useState<'horizontal' | 'vertical'>(
-    () => (FloatingToolbarBridge as any).getOrientationSync?.() || 'horizontal'
-  );
-  const [wechatStatus, setWechatStatus] = useState<'idle'|'registering'|'scanning'|'bound'|'error'>('idle');
-  const [wechatMsg, setWechatMsg] = useState('');
 
   const actionInProgressRef = useRef(false);
   const nativeSendActiveRef = useRef(false);
 
-  const toolsRef      = useRef(tools);       toolsRef.current      = tools;
-  const clipsRef      = useRef(clips);       clipsRef.current      = clips;
-  const insertModeRef = useRef(insertMode);  insertModeRef.current = insertMode;
-  const hasPermissionRef = useRef(hasPermission); hasPermissionRef.current = hasPermission;
+  const hasPermissionRef = useRef(true);
   const screenRef     = useRef(screen);      screenRef.current     = screen;
 
-  const showStatus = (msg: string) => {
-    setStatusMsg(msg);
-    setTimeout(() => setStatusMsg(''), 2500);
-  };
-
-  const refreshToolbar = useCallback(async (c?: ClipData, ts?: ToolItem[], mode?: InsertMode | null) => {
-    const data = c   || clipsRef.current;
-    const tl   = ts  || toolsRef.current;
-    const m    = mode !== undefined ? mode : insertModeRef.current;
-    FloatingToolbarBridge.updateTools(injectClipStatus(tl, data, m));
-  }, []);
-
   const openMainPanel = useCallback(() => {
-    FloatingToolbarBridge.closeAllForSettings();
     if (getActiveMode()) stopMode();
     stopAiMode();
     flushPendingTexts();
     reviveIfNeeded();
     FloatingToolbarBridge.ackPendingScreen();
-    setScreen('main');
-    setResumeTick(n => n + 1);
+    FloatingToolbarBridge.openPanel('config');
   }, []);
-
-  const layout      = getLayoutForCount(tools.length);
-  const layoutLabel = `${layout.cols}×${layout.rows}`;
 
   useEffect(() => {
     console.log('[App]: ── mount ──');
@@ -163,9 +85,7 @@ function App(): React.JSX.Element {
         setTimeout(() => {
           actionInProgressRef.current = false;
           if (hasPermissionRef.current) {
-            FloatingToolbarBridge.show(
-              injectClipStatus(toolsRef.current, clipsRef.current, getActiveMode())
-            );
+            FloatingToolbarBridge.showCurrent();
           }
           PluginManager.closePluginView();
         }, 300);
@@ -185,8 +105,7 @@ function App(): React.JSX.Element {
       if (getActiveMode()) stopMode();
       flushPendingTexts();
         FloatingToolbarBridge.ackPendingScreen();
-      setScreen('main');
-      setResumeTick(n => n + 1);
+      openMainPanel();
       setTimeout(() => FloatingToolbarBridge.ackOpenMain(), 200);
     } else if (pendingScreen) {
 
@@ -213,9 +132,8 @@ function App(): React.JSX.Element {
         FloatingToolbarBridge.engagePenLock();
         setScreen('penLock');
       } else {
-        setScreen(pendingScreen as AppScreen);
-        setResumeTick(n => n + 1);
-        setTimeout(() => FloatingToolbarBridge.ackPendingScreen(), 200);
+        FloatingToolbarBridge.ackPendingScreen();
+        setScreen('nativeHelper');
       }
     } else if (toolbarShowing) {
 
@@ -234,26 +152,25 @@ function App(): React.JSX.Element {
         setTimeout(() => { try { PluginManager.closePluginView(); } catch (_) {} }, 0);
       }
     } else {
-      openMainPanel();
+      // showType=0 的按钮（如 LocalSend）也会触发宿主 showPluginView 把 App 挂起来，
+      // 此时不能落进「打开配置面板」的兜底，否则点 LocalSend 会弹出配置界面
+      const earlyPending = checkPendingButton();
+      if (earlyPending === 200) {
+        setTimeout(() => { try { PluginManager.closePluginView(); } catch (_) {} }, 0);
+      } else {
+        openMainPanel();
+      }
     }
 
     const existingMode = getActiveMode();
     if (existingMode) setInsertMode(existingMode);
 
-    Promise.all([loadConfig(), loadClips(), loadBubbleActions()]).then(([configData, clipData, bubbleIds]) => {
-      setTools(configData.tools);
+    Promise.all([loadClips(), loadBubbleActions()]).then(([clipData, bubbleIds]) => {
       setClips(clipData);
       setBubbleActionIds(bubbleIds);
-      refreshToolbar(clipData, configData.tools);
       const filled = ([1,2,3,4,5,6] as const).map(n => !!clipData[String(n) as keyof typeof clipData]);
       FloatingToolbarBridge.updateTitleClips(filled);
     });
-
-    FloatingToolbarBridge.checkPermission().then(ok => setHasPermission(ok));
-
-    WeChatTransferBridge.getStatus().then(s => {
-      if (s.bound) setWechatStatus('bound');
-    }).catch(() => {});
 
     const toolTapSub = FloatingToolbarBridge.onToolTap(async ({ toolAction }) => {
       const result = await executeAction(toolAction);
@@ -261,7 +178,7 @@ function App(): React.JSX.Element {
 
       if (toolAction === 'voice_transcribe' && result === 'AI receive: ON') {
         if (hasPermissionRef.current) {
-          FloatingToolbarBridge.show(injectClipStatus(toolsRef.current, clipsRef.current, getActiveMode()));
+          FloatingToolbarBridge.showCurrent();
         }
         setTimeout(() => PluginManager.closePluginView(), 300);
         return;
@@ -270,7 +187,6 @@ function App(): React.JSX.Element {
           (result.startsWith('Saved to clip') || (result.startsWith('Clip') && result.endsWith('cleared')))) {
         const newClips = await loadClips();
         setClips(newClips);
-        refreshToolbar(newClips);
       }
     });
 
@@ -283,7 +199,8 @@ function App(): React.JSX.Element {
     const clipsChangedSub = DeviceEventEmitter.addListener('clipsChanged', async () => {
       const newClips = await loadClips();
       setClips(newClips);
-      refreshToolbar(newClips);
+      const filled = ([1,2,3,4,5,6] as const).map(n => !!newClips[String(n) as keyof typeof newClips]);
+      FloatingToolbarBridge.updateTitleClips(filled);
     });
 
     const longPressSub = FloatingToolbarBridge.onToolLongPress(async ({ toolId }) => {
@@ -293,7 +210,24 @@ function App(): React.JSX.Element {
         console.log('[App]: long press clear:', result);
         const newClips = await loadClips();
         setClips(newClips);
-        refreshToolbar(newClips);
+      } else if (toolId === 'invert_ink') {
+        try {
+          const cntRes = await (PluginCommAPI as any).getLassoElementTypeCounts?.();
+          const c = cntRes?.result;
+          const nonInk =
+            (c?.titleNum ?? 0) +
+            (c?.textLinkNum ?? 0) + (c?.trailLinkNum ?? 0) + (c?.todoLinkNum ?? 0) +
+            (c?.normalTextBoxNum ?? 0) + (c?.digestTextBoxNum ?? 0) + (c?.digestTextBoxEditableNum ?? 0) +
+            (c?.bitmapNum ?? 0);
+          if (nonInk > 0) {
+            NativeUIUtils.showErrorTipDialog(t('palette_ink_only'));
+            return;
+          }
+          const info = await getPaletteLassoInfo();
+          FloatingToolbarBridge.showPalettePanel(JSON.stringify(info ?? {}));
+        } catch (e) {
+          console.warn('[App] palette long-press failed:', e);
+        }
       }
     });
 
@@ -330,9 +264,8 @@ function App(): React.JSX.Element {
           FloatingToolbarBridge.engagePenLock();
           setScreen('penLock');
         } else {
-          FloatingToolbarBridge.hide();
-          setScreen(pendingScr as AppScreen);
           FloatingToolbarBridge.ackPendingScreen();
+          setScreen('nativeHelper');
         }
       } else {
 
@@ -350,15 +283,9 @@ function App(): React.JSX.Element {
 
     });
 
-    const permDeniedSub = FloatingToolbarBridge.onPermissionDenied(() => {
-      setHasPermission(false);
-      setScreen('permission');
-    });
-
     const clipChangeSub = DeviceEventEmitter.addListener('clipboardChanged', async () => {
       const newClips = await loadClips();
       setClips(newClips);
-      refreshToolbar(newClips);
     });
 
     const modeSub = DeviceEventEmitter.addListener(
@@ -367,20 +294,15 @@ function App(): React.JSX.Element {
         console.log('[App]: insertModeChanged →', mode);
         setInsertMode(mode);
 
-        refreshToolbar(undefined, undefined, mode);
         if (!mode) {
 
           FloatingBubbleBridge.hide();
           if (hasPermissionRef.current && FloatingToolbarBridge.isShowingSync()) {
-            FloatingToolbarBridge.show(injectClipStatus(toolsRef.current, clipsRef.current, null));
+            FloatingToolbarBridge.showCurrent();
           }
         }
       },
     );
-
-    const localeSub = DeviceEventEmitter.addListener('localeChanged', (_: unknown) => {
-      loadConfig().then(d => setTools(d.tools));
-    });
 
     const appStateSub = AppState.addEventListener('change', (state: AppStateStatus) => {
       if (state === 'active') {
@@ -388,7 +310,7 @@ function App(): React.JSX.Element {
         const pending = FloatingToolbarBridge.checkPendingOpenMainSync();
         if (pending && screenRef.current !== 'penLock') {
           FloatingToolbarBridge.hide();
-          setScreen('main');
+          openMainPanel();
           FloatingToolbarBridge.ackOpenMain();
         }
         setResumeTick(n => n + 1);
@@ -399,35 +321,6 @@ function App(): React.JSX.Element {
       if (buttonId === 999) {
 
         openMainPanel();
-        return;
-      }
-      if (buttonId === 888) {
-
-        setScreen('wechat_qr');
-        WeChatTransferBridge.getStatus().then(s => {
-          if (s.bound) {
-            setWechatStatus('bound');
-            WeChatTransferBridge.startPolling().catch(() => {});
-          } else {
-            setWechatStatus('registering');
-            setWechatMsg('正在注册设备…');
-            WeChatTransferBridge.register().then(() => {
-              setWechatMsg('获取二维码…');
-              return WeChatTransferBridge.getQrCodeUrl();
-            }).then(qr => {
-              if (qr.qrCodeUrl) {
-                setWechatStatus('scanning');
-                setWechatMsg('');
-              } else {
-                setWechatStatus('error');
-                setWechatMsg('获取二维码失败');
-              }
-            }).catch((e: any) => {
-              setWechatStatus('error');
-              setWechatMsg('错误: ' + e.message);
-            });
-          }
-        }).catch(() => {});
         return;
       }
       if (buttonId === 300) {
@@ -464,9 +357,8 @@ function App(): React.JSX.Element {
             FloatingToolbarBridge.engagePenLock();
             setScreen('penLock');
           } else {
-            setScreen(pendingScr as AppScreen);
-            setResumeTick(n => n + 1);
-            setTimeout(() => FloatingToolbarBridge.ackPendingScreen(), 200);
+            FloatingToolbarBridge.ackPendingScreen();
+            setScreen('nativeHelper');
           }
           return;
         }
@@ -671,6 +563,128 @@ function App(): React.JSX.Element {
       PluginManager.closePluginView();
     });
 
+    async function doPalette(
+      elementNums: number[],
+      penColor: number | null,
+      thickness: number | null,
+      penType: number | null,
+      tag: string,
+    ): Promise<void> {
+      if (elementNums.length === 0) return;
+      const wantColorOrThickness = penColor !== null || thickness !== null;
+      const wantPenType = penType !== null;
+      if (!wantColorOrThickness && !wantPenType) return;
+
+      await PluginNoteAPI.saveCurrentNote();
+      await PluginCommAPI.reloadFile();
+
+      const fpRes: any = await PluginCommAPI.getCurrentFilePath();
+      const pgRes: any = await PluginCommAPI.getCurrentPageNum();
+      if (!fpRes?.success || !pgRes?.success) return;
+      const filePath = fpRes.result;
+      const pageNum = pgRes.result;
+
+      // ── Pass 1: color / thickness (must NOT touch stroke.penType) ──
+      if (wantColorOrThickness) {
+        const elRes: any = await PluginFileAPI.getElements(pageNum, filePath);
+        if (!elRes?.success || !Array.isArray(elRes.result)) return;
+        const allElements: any[] = elRes.result;
+        try {
+          const numSet = new Set(elementNums);
+          const targets = allElements.filter(
+            (el: any) => el?.numInPage != null && numSet.has(el.numInPage) && (el.type === 0 || el.type === 700)
+          );
+          if (targets.length === 0) { console.log(`[App] ${tag}: no matching elements`); return; }
+
+          for (const el of targets) {
+            if (penColor !== null) {
+              if (el.type === 0 && el.stroke) el.stroke.penColor = penColor;
+              if (el.type === 700 && el.geometry) el.geometry.penColor = penColor;
+            }
+            if (thickness !== null) {
+              if (el.type === 0) el.thickness = Math.max(10, thickness);
+              if (el.type === 700 && el.geometry) el.geometry.penWidth = Math.max(10, thickness);
+            }
+          }
+
+          const modRes: any = await (PluginFileAPI as any).modifyElements(filePath, pageNum, targets);
+          console.log(`[App] ${tag} color/thickness:`, modRes?.success, targets.length, 'els');
+          await PluginCommAPI.reloadFile();
+        } finally {
+          for (const el of allElements) { try { el?.recycle?.(); } catch (_) {} }
+          try { (PluginCommAPI as any).clearElementCache?.(); } catch (_) {}
+        }
+      }
+
+      // ── Pass 2: penType (separate call — mixing with color/thickness causes code 302) ──
+      if (wantPenType) {
+        const apiPenType = penType!;
+        const elRes2: any = await PluginFileAPI.getElements(pageNum, filePath);
+        if (!elRes2?.success || !Array.isArray(elRes2.result)) return;
+        const allElements2: any[] = elRes2.result;
+        try {
+          const numSet = new Set(elementNums);
+          const targets2 = allElements2.filter(
+            (el: any) => el?.numInPage != null && numSet.has(el.numInPage) && el.type === 0
+          );
+          if (targets2.length === 0) { console.log(`[App] ${tag}: no stroke elements for penType`); return; }
+
+          for (const el of targets2) {
+            if (el.stroke) el.stroke.penType = apiPenType;
+          }
+
+          const modRes2: any = await (PluginFileAPI as any).modifyElements(filePath, pageNum, targets2);
+          console.log(`[App] ${tag} penType(${apiPenType}):`, modRes2?.success, targets2.length, 'els');
+          await PluginCommAPI.reloadFile();
+        } finally {
+          for (const el of allElements2) { try { el?.recycle?.(); } catch (_) {} }
+          try { (PluginCommAPI as any).clearElementCache?.(); } catch (_) {}
+        }
+      }
+
+      console.log(`[App] ${tag} done`);
+    }
+
+    const paletteApplySub = DeviceEventEmitter.addListener('paletteApply', async (evt: any) => {
+      console.log('[App] paletteApply:', evt);
+      try {
+        const penColor = evt.penColor != null ? evt.penColor : null;
+        const thickness = evt.thickness != null ? evt.thickness : null;
+        const penType = evt.penType != null ? evt.penType : null;
+        const elementNums: number[] = evt.elementNums ? JSON.parse(evt.elementNums) : [];
+        await doPalette(elementNums, penColor, thickness, penType, 'paletteApply');
+      } catch (e) {
+        console.error('[App] paletteApply error:', e);
+      }
+    });
+
+    const COLOR_MAP: Record<string, number> = { black: 0x00, darkGray: 0x9D, lightGray: 0xC9, ghost: 0xFE };
+    let cachedPaletteNums: number[] = [];
+
+    const paletteBubbleSlotSub = PaletteBubbleBridge.onSlotTap(async ({ color, thickness, penType }) => {
+      try {
+        const cntRes = await (PluginCommAPI as any).getLassoElementTypeCounts?.();
+        const c = cntRes?.result;
+        const nonInk =
+          (c?.titleNum ?? 0) +
+          (c?.textLinkNum ?? 0) + (c?.trailLinkNum ?? 0) + (c?.todoLinkNum ?? 0) +
+          (c?.normalTextBoxNum ?? 0) + (c?.digestTextBoxNum ?? 0) + (c?.digestTextBoxEditableNum ?? 0) +
+          (c?.bitmapNum ?? 0);
+        if (nonInk > 0) {
+          NativeUIUtils.showErrorTipDialog(t('palette_ink_only'));
+          return;
+        }
+        const info = await getPaletteLassoInfo();
+        const elementNums: number[] = info?.elementNums ?? cachedPaletteNums;
+        if (elementNums.length === 0) { console.log('[App] palette bubble: no selection'); return; }
+        cachedPaletteNums = elementNums;
+        const penColor = COLOR_MAP[color] ?? null;
+        await doPalette(elementNums, penColor, thickness, penType, 'paletteBubble');
+      } catch (e) {
+        console.error('[App] palette bubble slot tap error:', e);
+      }
+    });
+
     const appendPageSub = DeviceEventEmitter.addListener('onAppendPageAction', (evt: any) => {
       if (!evt?.imagePath) return;
       const crop = evt.cropX >= 0 ? {
@@ -689,7 +703,6 @@ function App(): React.JSX.Element {
           (result.startsWith('Saved to clip') || (result.startsWith('Clip') && result.endsWith('cleared')))) {
         const newClips = await loadClips();
         setClips(newClips);
-        refreshToolbar(newClips);
         const filled = ([1,2,3,4,5,6] as const).map(n => !!newClips[String(n) as keyof typeof newClips]);
         FloatingToolbarBridge.updateTitleClips(filled);
       }
@@ -700,7 +713,6 @@ function App(): React.JSX.Element {
           await executeAction(`clip_clear_${slot}`);
           const newClips = await loadClips();
           setClips(newClips);
-          refreshToolbar(newClips);
           const filled = ([1,2,3,4,5,6] as const).map(n => !!newClips[String(n) as keyof typeof newClips]);
           FloatingToolbarBridge.updateTitleClips(filled);
         })
@@ -740,15 +752,15 @@ function App(): React.JSX.Element {
       clipsChangedSub.remove();
       openMainSub.remove();
       tapSub.remove();
-      permDeniedSub.remove();
       clipChangeSub.remove();
       modeSub.remove();
-      localeSub.remove();
       btnSub.remove();
       appStateSub.remove();
       nativeInsertSub.remove();
       nativeDocLinkSub.remove();
       nativeCloseSub.remove();
+      paletteApplySub.remove();
+      paletteBubbleSlotSub.remove();
       appendPageSub.remove();
       nativePanelOpenSub.remove();
       nativePanelCloseSub.remove();
@@ -761,298 +773,12 @@ function App(): React.JSX.Element {
     };
   }, []);
 
-  const isFirstToolsLoad = useRef(true);
-  useEffect(() => {
-    if (isFirstToolsLoad.current) { isFirstToolsLoad.current = false; return; }
-    if (isValidToolCount(tools.length)) saveConfig({ tools });
-  }, [tools]);
-
-  const showToolbarAndClose = useCallback(async () => {
-    if (!hasPermission) { setScreen('permission'); return; }
-    FloatingToolbarBridge.show(injectClipStatus(toolsRef.current, clipsRef.current, insertModeRef.current));
-
-    const clips = clipsRef.current;
-    const filled = ([1,2,3,4,5,6] as const).map(n => !!clips[String(n) as keyof typeof clips]);
-    FloatingToolbarBridge.updateTitleClips(filled);
-    setTimeout(() => PluginManager.closePluginView(), 150);
-  }, [hasPermission]);
-
-  const removeTool  = useCallback((id: string) => setTools(prev => prev.filter(t => t.id !== id)), []);
-  const moveToolUp  = useCallback((idx: number) => {
-    if (idx <= 0) return;
-    setTools(prev => { const a = [...prev]; [a[idx - 1], a[idx]] = [a[idx], a[idx - 1]]; return a; });
-  }, []);
-  const moveToolDown = useCallback((idx: number) => {
-    setTools(prev => {
-      if (idx >= prev.length - 1) return prev;
-      const a = [...prev]; [a[idx], a[idx + 1]] = [a[idx + 1], a[idx]]; return a;
-    });
-  }, []);
-  const addTool  = useCallback((tool: ToolItem) => setTools(prev => prev.some(t => t.id === tool.id) ? prev : [...prev, tool]), []);
-
-  const collapseAll = useCallback(() => {
-    showToolbarAndClose();
-  }, [hasPermission, tools, clips, insertMode]);
-
-  const destroyAll = useCallback(() => {
-    FloatingToolbarBridge.destroyAll();
-    PluginManager.closePluginView();
-  }, []);
 
   console.log('[App] render: screen=', screen);
   return (
     <View style={st.container}>
       <StatusBar barStyle="dark-content" />
       <View key={`ct-${_resumeTick}`} style={st.centerWrapper}>
-
-        {screen === 'permission' && (
-          <View style={[st.window, { width: getWindowWidth(), height: getWindowHeight() * 0.55 }]}>
-            <View style={st.sectionHeader}>
-              <View style={st.headerRow}>
-                <View style={st.permIcon}><Text style={st.permIconText}>!</Text></View>
-                <View>
-                  <Text style={st.headerLabel}>{t('perm_required')}</Text>
-                  <Text style={st.headerSub}>PERMISSION REQUIRED</Text>
-                </View>
-              </View>
-            </View>
-            <View style={st.permBody}>
-              <Text style={st.permText}>{t('perm_text')}</Text>
-              <View style={st.permPkg}><Text style={st.permPkgText}>com.ratta.supernote.pluginhost</Text></View>
-              <View style={st.permBtns}>
-                <Pressable onPress={() => { FloatingToolbarBridge.requestPermission(); showStatus(t('perm_check_settings')); }} style={st.btnFill}>
-                  <Text style={st.btnFillT}>{t('perm_open_settings')}</Text>
-                </Pressable>
-                <Pressable onPress={async () => {
-                  const ok = await FloatingToolbarBridge.checkPermission();
-                  setHasPermission(ok);
-                  if (ok) { setScreen('main'); showStatus(t('perm_granted')); }
-                  else showStatus(t('perm_not_granted'));
-                }} style={st.btnLine}>
-                  <Text style={st.btnLineT}>{t('perm_recheck')}</Text>
-                </Pressable>
-                <Pressable onPress={() => setScreen('main')} style={st.btnGhost}>
-                  <Text style={st.btnGhostT}>{t('back')}</Text>
-                </Pressable>
-              </View>
-            </View>
-            {statusMsg ? <View style={st.toast}><Text style={st.toastT}>{statusMsg}</Text></View> : null}
-          </View>
-        )}
-
-        {screen === 'main' && (
-          <View style={[st.window, { width: getWindowWidth(), height: getWindowHeight() }]}>
-            <View style={st.titleBar}>
-              <Text style={st.titleTextCenter}>{t('app_title')}</Text>
-            </View>
-            {statusMsg ? <View style={st.toast}><Text style={st.toastT}>{statusMsg}</Text></View> : null}
-
-            <View style={st.prevSection}>
-              <View style={st.prevHeader}>
-                <View style={st.headerRow}>
-                  <Text style={st.headerLabel}>{t('preview')}</Text>
-                  <Text style={st.headerSub}>PREVIEW</Text>
-                </View>
-              </View>
-              <View style={st.prevBody}>
-                <View style={st.devFrame}>
-                  {[...Array(8)].map((_, i) => (
-                    <View key={i} style={{ height: 3, borderRadius: 1, marginBottom: 5, backgroundColor: i % 4 === 0 ? '#CCCCCC' : '#DDDDDD', width: i === 7 ? '25%' : i % 3 === 2 ? '65%' : '90%', marginHorizontal: 10 }} />
-                  ))}
-                  <View style={[st.miniWrap, dockSide === 'left' ? { left: 0 } : { right: 0 }]}>
-                    <MiniToolbarPreview tools={tools} side={dockSide} />
-                  </View>
-                </View>
-                <View style={st.layoutCol}>
-                  <View style={st.layoutBadge}>
-                    <Text style={st.layoutBadgeT}>{tools.length} tools</Text>
-                  </View>
-                </View>
-              </View>
-            </View>
-
-            <View style={st.toolSection}>
-              <View style={st.toolHeader}>
-                <View style={st.headerRow}>
-                  <Text style={st.headerLabel}>{t('tool_list')}</Text>
-                  <Text style={st.headerSub}>TOOLS · {tools.length}</Text>
-                </View>
-                <Pressable onPress={() => { setCatFilter('all'); setScreen('add_tool'); }} style={st.addBtn}>
-                  <Text style={st.addBtnT}>{t('add_tool')}</Text>
-                </Pressable>
-              </View>
-              <ScrollView style={st.toolScroll}>
-                {tools.length === 0 && (
-                  <View style={st.empty}>
-                    <Text style={st.emptyT}>{t('empty_tools')}</Text>
-                    <Text style={st.emptyH}>{t('empty_tools_hint')}</Text>
-                  </View>
-                )}
-                {injectClipStatus(tools, clips, insertMode).map((tool, idx) => (
-                    <View key={tool.id + idx} style={st.toolRow}>
-                      <View style={st.idxBadge}>
-                        <Text style={st.idxBadgeT}>{idx + 1}</Text>
-                      </View>
-                      <View style={st.toolIcon}>
-                        <Text style={st.toolIconT}>{tool.icon}</Text>
-                      </View>
-                      <View style={st.toolInfo}>
-                        <Text style={st.toolName}>{tool.name}</Text>
-                        <Text style={st.toolAct}>{tool.action}</Text>
-                      </View>
-                      <View style={st.moveBtns}>
-                        <Pressable onPress={() => moveToolUp(idx)} style={st.moveBtn} hitSlop={8}><Text style={st.moveBtnT}>▲</Text></Pressable>
-                        <Pressable onPress={() => moveToolDown(idx)} style={st.moveBtn} hitSlop={8}><Text style={st.moveBtnT}>▼</Text></Pressable>
-                      </View>
-                    </View>
-                ))}
-              </ScrollView>
-            </View>
-
-            <View style={st.bubbleSection}>
-              <View style={st.bubbleHeader}>
-                <Text style={st.headerLabel}>微信传输</Text>
-                <Text style={st.headerSub}>WECHAT TRANSFER</Text>
-              </View>
-              <View style={{ paddingHorizontal: 14, paddingVertical: 8 }}>
-                {wechatStatus === 'bound' ? (
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-                    <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#2E7D32' }} />
-                    <Text style={{ fontSize: 12, color: '#333' }}>已绑定微信 · 接收文件到 /INBOX</Text>
-                    <Pressable onPress={async () => {
-                      try {
-                        await WeChatTransferBridge.stopPolling();
-                        await WeChatTransferBridge.unbind();
-                        setWechatStatus('idle');
-                        setWechatMsg('已解绑');
-                      } catch (e: any) { setWechatMsg('解绑失败: ' + e.message); }
-                    }} style={[st.btnGhost, { paddingHorizontal: 8, paddingVertical: 4 }]}>
-                      <Text style={[st.btnGhostT, { fontSize: 11 }]}>解绑</Text>
-                    </Pressable>
-                  </View>
-                ) : wechatStatus === 'scanning' ? (
-                  <View>
-                    <Text style={{ fontSize: 12, color: '#333', marginBottom: 6 }}>请用微信扫描二维码绑定设备</Text>
-                    <Text style={{ fontSize: 11, color: '#999' }}>扫码后自动检测绑定状态…</Text>
-                    {wechatMsg ? <Text style={{ fontSize: 11, color: '#666', marginTop: 4 }}>{wechatMsg}</Text> : null}
-                  </View>
-                ) : (
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-                    <Pressable onPress={async () => {
-                      try {
-                        setWechatStatus('registering');
-                        setWechatMsg('正在注册设备…');
-                        await WeChatTransferBridge.register();
-                        setWechatMsg('获取二维码…');
-                        const qr = await WeChatTransferBridge.getQrCodeUrl();
-                        if (qr.qrCodeUrl) {
-                          setWechatMsg('二维码已获取，正在打开扫码界面…');
-                          setWechatStatus('scanning');
-                          setScreen('wechat_qr');
-                        } else {
-                          setWechatStatus('error');
-                          setWechatMsg('获取二维码失败');
-                        }
-                      } catch (e: any) {
-                        setWechatStatus('error');
-                        setWechatMsg('错误: ' + e.message);
-                      }
-                    }} style={st.btnLine}>
-                      <Text style={st.btnLineT}>绑定微信</Text>
-                    </Pressable>
-                    {wechatMsg ? <Text style={{ fontSize: 11, color: wechatStatus === 'error' ? '#C62828' : '#666' }}>{wechatMsg}</Text> : null}
-                  </View>
-                )}
-              </View>
-            </View>
-
-            <View style={st.bottomBar}>
-              <Pressable onPress={() => {
-                FloatingToolbarBridge.dockToEdge();
-              }} style={st.btnGhost}>
-                <Text style={st.btnGhostT}>{t('dock_to_edge')}</Text>
-              </Pressable>
-              <Pressable onPress={collapseAll} style={st.btnLine}><Text style={st.btnLineT}>{t('collapse')}</Text></Pressable>
-              <Pressable onPress={destroyAll} style={st.btnFill}><Text style={st.btnFillT}>{t('save')}</Text></Pressable>
-            </View>
-          </View>
-        )}
-
-        {screen === 'add_tool' && (
-          <View style={[st.window, { width: getWindowWidth(), height: getWindowHeight() }]}>
-            <View style={st.titleBar}>
-              <Text style={st.titleTextCenter}>{t('add_tool_title')}</Text>
-            </View>
-            <View style={st.catRow}>
-              {CAT_FILTERS.map(cf => (
-                <Pressable key={cf.key} onPress={() => setCatFilter(cf.key)} style={[st.catPill, catFilter === cf.key && st.catPillA]}>
-                  <Text style={[st.catPillT, catFilter === cf.key && st.catPillTA]}>{t(cf.labelKey as any)}</Text>
-                </Pressable>
-              ))}
-            </View>
-            <ScrollView style={st.toolScroll}>
-              {injectClipStatus(getAvailableTools(), clips, insertMode)
-                .filter(tool => catFilter === 'all' || getToolCategory(tool.id) === catFilter)
-                .map(tool => {
-                  const added = tools.some(t => t.id === tool.id);
-                  return (
-                    <Pressable key={tool.id} onPress={() => !added && addTool(tool)} style={st.toolRow}>
-                      <View style={[st.toolIcon, added && st.toolIconM]}>
-                        <Text style={[st.toolIconT, added && st.toolIconTM]}>{tool.icon}</Text>
-                      </View>
-                      <View style={st.toolInfo}>
-                        <Text style={[st.toolName, added && st.toolNameM]}>{tool.name}</Text>
-                        <Text style={st.toolAct}>{tool.action}</Text>
-                      </View>
-                      {added
-                        ? <Pressable onPress={() => removeTool(tool.id)} style={st.delBtn} hitSlop={8}><Text style={st.delBtnT}>✕</Text></Pressable>
-                        : <View style={st.addIconBtn}><Text style={st.addIconBtnT}>+</Text></View>}
-                    </Pressable>
-                  );
-                })}
-            </ScrollView>
-            <View style={st.bottomBar}>
-              <Text style={st.footerCount}>{t('selected_count', { n: tools.length })} · {layoutLabel}</Text>
-              <Pressable
-                onPress={() => { if (tools.length >= 5) setScreen('main'); }}
-                style={[st.btnFill, tools.length < 5 && st.btnDis]}
-                disabled={tools.length < 5}
-              >
-                <Text style={st.btnFillT}>{t('done')}</Text>
-              </Pressable>
-            </View>
-          </View>
-        )}
-
-        {screen === 'wechat_qr' && (
-          <View style={[st.window, { width: getWindowWidth(), height: getWindowHeight() * 0.7 }]}>
-            <View style={st.titleBar}>
-              <Text style={st.titleTextCenter}>微信传输 · 扫码绑定</Text>
-            </View>
-            <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20 }}>
-              <Text style={{ fontSize: 14, color: '#333', marginBottom: 16, textAlign: 'center' }}>
-                打开微信扫一扫{'\n'}扫描下方二维码绑定设备
-              </Text>
-              <View style={{ width: 200, height: 200, borderWidth: 1, borderColor: '#DDD', justifyContent: 'center', alignItems: 'center', marginBottom: 16 }}>
-                <WeChatQrView onBound={() => {
-                  setWechatStatus('bound');
-                  setWechatMsg('绑定成功！');
-                  setScreen('main');
-                  WeChatTransferBridge.startPolling().catch(() => {});
-                }} />
-              </View>
-              <Text style={{ fontSize: 11, color: '#999', textAlign: 'center' }}>
-                设备名称: Supernote{'\n'}
-                绑定后可从微信直接发送文件到本设备
-              </Text>
-            </View>
-            <View style={st.bottomBar}>
-              <Pressable onPress={() => { setScreen('main'); setWechatStatus('idle'); setWechatMsg(''); }} style={st.btnLine}>
-                <Text style={st.btnLineT}>取消</Text>
-              </Pressable>
-            </View>
-          </View>
-        )}
 
         {screen === 'nativeHelper' && (
           <View style={{ flex: 1, backgroundColor: 'transparent' }} />
@@ -1068,159 +794,11 @@ function App(): React.JSX.Element {
   );
 }
 
-function WeChatQrView({ onBound }: { onBound: () => void }) {
-  const [qrPath, setQrPath] = React.useState<string | null>(null);
-  const [error, setError] = React.useState('');
-  const pollRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
-
-  React.useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const qr = await WeChatTransferBridge.getQrCodeUrl();
-        if (cancelled) return;
-        if (qr.qrCodeUrl) {
-          const path = await WeChatTransferBridge.downloadQrImage(qr.qrCodeUrl);
-          if (!cancelled) setQrPath(path);
-        } else {
-          setError('无法获取二维码');
-        }
-      } catch (e: any) {
-        if (!cancelled) setError(e.message || '获取二维码失败');
-      }
-    })();
-
-    pollRef.current = setInterval(async () => {
-      try {
-        const bound = await WeChatTransferBridge.checkBind();
-        if (bound && !cancelled) {
-          if (pollRef.current) clearInterval(pollRef.current);
-          onBound();
-        }
-      } catch (_) {}
-    }, 2500);
-
-    return () => {
-      cancelled = true;
-      if (pollRef.current) clearInterval(pollRef.current);
-    };
-  }, []);
-
-  if (error) return <ScrollView style={{ maxHeight: 160, padding: 8, borderWidth: 1, borderColor: '#DDD' }}><Text style={{ color: '#C62828', fontSize: 11 }} selectable>{error}</Text></ScrollView>;
-  if (!qrPath) return <Text style={{ color: '#999', fontSize: 12 }}>加载中…</Text>;
-  return <Image source={{ uri: 'file://' + qrPath }} style={{ width: 180, height: 180 }} resizeMode="contain" />;
-}
 
 const st = StyleSheet.create({
   container:     { flex: 1, backgroundColor: 'transparent' },
   centerWrapper: { flex: 1, justifyContent: 'center', alignItems: 'center' },
 
-  window: { backgroundColor: '#FFFFFF', borderWidth: 1.5, borderColor: '#444444', borderRadius: 8, overflow: 'hidden' },
-
-  titleBar:  { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 14, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#D8D8D8' },
-  titleText: { fontSize: 17, fontWeight: '700', color: '#111111' },
-  titleTextCenter: { fontSize: 17, fontWeight: '700', color: '#111111', textAlign: 'center' },
-  chipBtn:   { paddingVertical: 4, paddingHorizontal: 10, borderWidth: 1, borderColor: '#000000', borderRadius: 3, backgroundColor: '#FFFFFF' },
-  chipBtnT:  { fontSize: 12, fontWeight: '700', color: '#000000' },
-  backBtn:   { width: 28, height: 28, borderWidth: 1, borderColor: '#CCCCCC', borderRadius: 3, justifyContent: 'center', alignItems: 'center' },
-  backBtnT:  { fontSize: 18, fontWeight: '500', color: '#333333', marginTop: -2 },
-
-  toast:  { paddingHorizontal: 14, paddingVertical: 6, backgroundColor: '#111111' },
-  toastT: { fontSize: 11, fontWeight: '500', color: '#FFFFFF' },
-
-  sectionHeader: { paddingHorizontal: 14, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#E8E8E8' },
-  headerRow:     { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  headerLabel:   { fontSize: 12, fontWeight: '700', color: '#222222' },
-  headerSub:     { fontSize: 9,  fontWeight: '400', color: '#AAAAAA' },
-
-  prevSection: { borderBottomWidth: 1, borderBottomColor: '#E0E0E0', backgroundColor: '#FAFAF8' },
-  prevHeader:  { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 14, paddingTop: 8, paddingBottom: 6 },
-  prevBody:    { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 10, paddingBottom: 10, gap: 12 },
-
-  devFrame:  { width: 120, height: 155, backgroundColor: '#E8E8E8', borderRadius: 6, borderWidth: 1, borderColor: '#888888', position: 'relative', overflow: 'hidden', paddingTop: 10 },
-  miniWrap:  { position: 'absolute', top: '40%' },
-
-  layoutCol:     { alignItems: 'center', gap: 6 },
-  layoutBadge:   { paddingVertical: 4, paddingHorizontal: 10, borderWidth: 1.5, borderColor: '#444444', borderRadius: 4, alignItems: 'center' },
-  layoutBadgeT:  { fontSize: 16, fontWeight: '700', color: '#111111' },
-  layoutBadgeS:  { fontSize: 8, color: '#888888', marginTop: 1 },
-  layoutMiniRow: { flexDirection: 'row', gap: 4 },
-  layoutMini:    { alignItems: 'center', paddingVertical: 3, paddingHorizontal: 5, borderRadius: 3, borderWidth: 1, borderColor: '#DDDDDD', backgroundColor: '#FAFAFA' },
-  layoutMiniA:   { borderColor: '#000000', backgroundColor: '#F5F3ED' },
-  layoutMiniT:   { fontSize: 8, color: '#AAAAAA', marginTop: 2 },
-  layoutMiniTA:  { color: '#000000', fontWeight: '700' },
-  warnBadge:     { paddingVertical: 2, paddingHorizontal: 6, backgroundColor: '#FFF5F5', borderRadius: 3, borderWidth: 1, borderColor: '#EECCCC' },
-  warnBadgeT:    { fontSize: 8, color: '#CC4444' },
-
-  toolSection: { flex: 1 },
-  toolHeader:  { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 14, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: '#EEEEEE', backgroundColor: '#FAFAFA' },
-  addBtn:      { paddingVertical: 4, paddingHorizontal: 12, borderWidth: 1.5, borderColor: '#000000', borderRadius: 3, backgroundColor: '#FFFFFF' },
-  addBtnT:     { fontSize: 11, fontWeight: '600', color: '#000000' },
-  toolScroll:  { flex: 1 },
-
-  toolRow:    { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 10, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: '#F0F0F0', gap: 8 },
-  toolRowDim: { opacity: 0.4 },
-
-  idxBadge:   { width: 18, height: 18, borderRadius: 9, backgroundColor: '#000000', justifyContent: 'center', alignItems: 'center' },
-  idxBadgeM:  { backgroundColor: '#DDDDDD' },
-  idxBadgeT:  { fontSize: 9, fontWeight: '700', color: '#FFFFFF' },
-  idxBadgeTM: { color: '#999999' },
-
-  toolIcon:   { width: 36, height: 36, borderWidth: 1.5, borderColor: '#888888', borderRadius: 4, justifyContent: 'center', alignItems: 'center', backgroundColor: '#FFFFFF' },
-  toolIconM:  { borderColor: '#DDDDDD', backgroundColor: '#F8F8F8' },
-  toolIconT:  { fontSize: 13, fontWeight: '700', color: '#333333' },
-  toolIconTM: { color: '#BBBBBB' },
-
-  toolInfo:  { flex: 1 },
-  toolName:  { fontSize: 13, fontWeight: '600', color: '#111111' },
-  toolNameM: { color: '#AAAAAA' },
-  toolAct:   { fontSize: 9, color: '#AAAAAA', marginTop: 1 },
-
-  moveBtns: { flexDirection: 'column', gap: 2 },
-  moveBtn:  { width: 24, height: 18, borderWidth: 1, borderColor: '#DDDDDD', borderRadius: 2, justifyContent: 'center', alignItems: 'center', backgroundColor: '#FAFAFA' },
-  moveBtnT: { fontSize: 8, color: '#888888' },
-  delBtn:   { width: 24, height: 24, borderWidth: 1, borderColor: '#E0C0C0', borderRadius: 3, justifyContent: 'center', alignItems: 'center', backgroundColor: '#FFF8F8' },
-  delBtnT:  { fontSize: 10, color: '#CC6666' },
-
-  empty:  { paddingVertical: 40, alignItems: 'center' },
-  emptyT: { fontSize: 14, fontWeight: '600', color: '#999999' },
-  emptyH: { fontSize: 11, color: '#BBBBBB', marginTop: 4 },
-
-  overflowBar: { paddingHorizontal: 14, paddingVertical: 6, backgroundColor: '#FFFBE6', borderTopWidth: 1, borderTopColor: '#F0E8C0' },
-  overflowT:   { fontSize: 9, color: '#A08800' },
-
-  bubbleSection:        { borderTopWidth: 1, borderTopColor: '#E8E8E8', paddingHorizontal: 14, paddingVertical: 8, backgroundColor: '#FAFAF8' },
-  bubbleHeader:         { marginBottom: 6 },
-
-  catRow:    { flexDirection: 'row', flexWrap: 'wrap', gap: 4, paddingHorizontal: 14, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: '#F0F0F0' },
-  catPill:   { paddingVertical: 3, paddingHorizontal: 10, borderWidth: 1, borderColor: '#DDDDDD', borderRadius: 12, backgroundColor: '#FFFFFF' },
-  catPillA:  { backgroundColor: '#000000', borderColor: '#000000' },
-  catPillT:  { fontSize: 10, color: '#888888' },
-  catPillTA: { color: '#FFFFFF' },
-
-  addedBadge:  { paddingVertical: 2, paddingHorizontal: 8, borderWidth: 1, borderColor: '#E0E0E0', borderRadius: 3 },
-  addedBadgeT: { fontSize: 9, color: '#BBBBBB' },
-  addIconBtn:  { width: 26, height: 26, borderWidth: 1.5, borderColor: '#000000', borderRadius: 3, justifyContent: 'center', alignItems: 'center' },
-  addIconBtnT: { fontSize: 14, fontWeight: '700', color: '#000000' },
-  footerCount: { fontSize: 10, color: '#888888' },
-
-  bottomBar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderTopWidth: 1, borderTopColor: '#D8D8D8', paddingHorizontal: 14, paddingVertical: 10 },
-
-  btnFill:   { paddingVertical: 8, paddingHorizontal: 18, backgroundColor: '#000000', borderRadius: 3 },
-  btnFillT:  { fontSize: 13, fontWeight: '600', color: '#FFFFFF' },
-  btnLine:   { paddingVertical: 8, paddingHorizontal: 18, borderWidth: 1.5, borderColor: '#000000', backgroundColor: '#FFFFFF', borderRadius: 3 },
-  btnLineT:  { fontSize: 13, fontWeight: '500', color: '#000000' },
-  btnGhost:  { paddingVertical: 8, paddingHorizontal: 14, borderWidth: 1, borderColor: '#CCCCCC', borderRadius: 3, backgroundColor: '#FFFFFF' },
-  btnGhostT: { fontSize: 13, color: '#888888' },
-  btnDis:    { opacity: 0.35 },
-
-  permIcon:     { width: 30, height: 30, borderWidth: 2, borderColor: '#000000', borderRadius: 15, justifyContent: 'center', alignItems: 'center' },
-  permIconText: { fontSize: 15, fontWeight: '700', color: '#000000' },
-  permBody:     { flex: 1, paddingHorizontal: 18, paddingVertical: 16 },
-  permText:     { fontSize: 13, color: '#444444', lineHeight: 22, marginBottom: 12 },
-  permPkg:      { paddingVertical: 5, paddingHorizontal: 10, backgroundColor: '#F8F8F8', borderRadius: 3, borderWidth: 1, borderColor: '#EEEEEE', marginBottom: 18 },
-  permPkgText:  { fontSize: 9, color: '#999999' },
-  permBtns:     { flexDirection: 'row', gap: 8, flexWrap: 'wrap' },
 });
 
 export default App;

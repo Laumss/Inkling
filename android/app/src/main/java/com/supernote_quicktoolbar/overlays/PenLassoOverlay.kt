@@ -1,4 +1,5 @@
 package com.supernote_quicktoolbar.overlays
+import com.supernote_quicktoolbar.BuildConfig
 import com.supernote_quicktoolbar.*
 import com.supernote_quicktoolbar.panels.*
 import com.supernote_quicktoolbar.bubbles.*
@@ -78,14 +79,14 @@ class PenLassoOverlay(private val context: Context) {
         try {
             wm.addView(root, lp)
         } catch (e: Exception) {
-            android.util.Log.e(TAG, "addView failed: ${e.message}", e)
+            if (BuildConfig.ENABLE_DEBUG) android.util.Log.e(TAG, "addView failed: ${e.message}", e)
             fireCancel()
             return
         }
 
         timeoutRunnable = Runnable { fireCancel() }
         handler.postDelayed(timeoutRunnable!!, TIMEOUT_MS)
-        android.util.Log.i(TAG, "overlay shown, waiting for pen stroke...")
+        if (BuildConfig.ENABLE_DEBUG) android.util.Log.i(TAG, "overlay shown, waiting for pen stroke...")
     }
 
     fun dismiss() {
@@ -141,10 +142,10 @@ class PenLassoOverlay(private val context: Context) {
             if (p.x > maxX) maxX = p.x; if (p.y > maxY) maxY = p.y
         }
         if (maxX - minX < 2f || maxY - minY < 2f) {
-            android.util.Log.w(TAG, "bbox too small, cancel")
+            if (BuildConfig.ENABLE_DEBUG) android.util.Log.w(TAG, "bbox too small, cancel")
             fireCancel(); return
         }
-        android.util.Log.i(TAG, "bbox: [$minX,$minY,$maxX,$maxY] from ${points.size} pts")
+        if (BuildConfig.ENABLE_DEBUG) android.util.Log.i(TAG, "bbox: [$minX,$minY,$maxX,$maxY] from ${points.size} pts")
         val cb = onBbox
         cleanup()
         cb?.invoke(minX.toInt(), minY.toInt(), maxX.toInt(), maxY.toInt())

@@ -1,9 +1,9 @@
 package com.supernote_quicktoolbar.panels
+import com.supernote_quicktoolbar.BuildConfig
 import com.supernote_quicktoolbar.*
 import com.supernote_quicktoolbar.overlays.*
 import com.supernote_quicktoolbar.bubbles.*
 
-import android.content.Intent
 import android.graphics.*
 import android.graphics.Bitmap
 import android.graphics.Typeface
@@ -20,12 +20,14 @@ import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
+import com.supernote_quicktoolbar.ui_common.ButtonHandle
 import com.supernote_quicktoolbar.ui_common.PanelBase
 import com.supernote_quicktoolbar.ui_common.PanelGrid
-import com.supernote_quicktoolbar.ui_common.PanelHeader
+import com.supernote_quicktoolbar.ui_common.PanelHost
 import com.supernote_quicktoolbar.ui_common.PanelScrollHost
 import com.supernote_quicktoolbar.ui_common.PanelTabBar
-import com.supernote_quicktoolbar.ui_common.SelectionButton
+import com.supernote_quicktoolbar.ui_common.PanelWidgets
+import com.supernote_quicktoolbar.ui_common.TabBarHandle
 import java.io.File
 import java.io.FileOutputStream
 import kotlin.concurrent.thread
@@ -56,12 +58,11 @@ class DocScreenshotPanel(
     private var activeTab = "history"
     private var selectedPath: String? = null
 
-    private var contentGrid: LinearLayout? = null
-    private var scrollHost: PanelScrollHost? = null
-    private val cellFrameMap = mutableMapOf<String, FrameLayout>()
-    private var tabBar: PanelTabBar? = null
-    private var insertBtn: SelectionButton? = null
-    private var deleteBtn: SelectionButton? = null
+    private lateinit var tabBarH: TabBarHandle
+    private lateinit var insertBtn: ButtonHandle
+    private lateinit var deleteBtn: ButtonHandle
+    private var gridRebuild: (() -> Unit)? = null
+    private var gridScrollTop: (() -> Unit)? = null
 
     fun show(initialTab: String = "history") {
         ScreenshotBubble.pendingReshow = false
@@ -75,178 +76,162 @@ class DocScreenshotPanel(
             if (!hasFiles) activeTab = "history"
         }
         showPanel()
-        handler.post { refreshContent() }
     }
 
     override fun onHide() {
-        contentGrid = null; scrollHost = null; tabBar = null
-        insertBtn = null; deleteBtn = null
-        cellFrameMap.clear()
+        gridRebuild = null
+        gridScrollTop = null
         currentInstance = null
     }
 
     override fun buildContent(root: LinearLayout) {
-        root.addView(PanelHeader.create(reactContext, NativeLocale.t("screenshot_panel_title")))
+        renderDsl(root) {
+            header(NativeLocale.t("screenshot_panel_title"))
+            tabBarH = tabBar(
+                listOf(
+                    PanelTabBar.Tab.Icon("icons/ic_tab_queue.xml", "queue"),
+                    PanelTabBar.Tab.Icon("icons/ic_tab_history.xml", "history")
+                ),
+                initial = if (activeTab == "queue") 0 else 1
+            ) { idx -> switchTab(if (idx == 0) "queue" else "history") }
 
-        tabBar = PanelTabBar(reactContext, listOf(
-            PanelTabBar.Tab.Icon("icons/ic_tab_queue.xml", "queue"),
-            PanelTabBar.Tab.Icon("icons/ic_tab_history.xml", "history")
-        ), leftMarginDp = 30, rightMarginDp = 36) { idx -> switchTab(if (idx == 0) "queue" else "history") }
-        tabBar!!.setSelection(if (activeTab == "queue") 0 else 1)
-        root.addView(tabBar!!.createView())
+            custom { host ->
+                val scroll = PanelScrollHost(host.ctx, overlayScrollbar = true)
+                gridRebuild = {
+                    scroll.content.removeAllViews()
+                    val files = loadFiles()
+                    if (files.isEmpty()) {
+                        scroll.content.addView(PanelWidgets.emptyView(host,
+                            if (activeTab == "queue") NativeLocale.t("no_queue")
+                            else NativeLocale.t("no_history")))
+                    } else {
+                        PanelGrid.build(host.ctx, scroll, host.screenW, host.panelW, files) { file, colW ->
+                            screenshotCell(host, file, colW)
+                        }
+                    }
+                    scroll.refreshThumb()
+                }
+                gridScrollTop = { scroll.scrollToTop() }
+                gridRebuild?.invoke()
+                scroll.view
+            }
 
-        scrollHost = PanelScrollHost(reactContext)
-        contentGrid = scrollHost!!.content
-        root.addView(scrollHost!!.view)
+            custom { host ->
+                val deleteTv = PanelWidgets.outlinedButton(host, NativeLocale.t("delete")) { doDelete() }
+                deleteBtn = ButtonHandle().also { it.view = deleteTv }
+                val insertTv = PanelWidgets.filledButton(host, NativeLocale.t("insert")) { doInsert() }
+                insertBtn = ButtonHandle().also { it.view = insertTv }
 
-        val deleteTv = makeOutlinedBtn(NativeLocale.t("delete")) { doDelete() }
-        val insertTv = makeFilledBtn(NativeLocale.t("insert")) { doInsert() }
-        deleteBtn = SelectionButton(deleteTv)
-        insertBtn = SelectionButton(insertTv)
-
-        root.addView(makeBottomBar(
-            leftButtons = listOf(deleteTv),
-            rightButtons = listOf(
-                makeOutlinedBtn(NativeLocale.t("cancel")) { closeAndRestore() },
-                makeOutlinedBtn(NativeLocale.t("screenshot_bubble")) { showBubbleAndClose() },
-                insertTv
-            )
-        ))
+                val wrapper = LinearLayout(host.ctx).apply { orientation = LinearLayout.VERTICAL }
+                wrapper.addView(PanelWidgets.divider(host))
+                val bar = LinearLayout(host.ctx).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(host.dp(28), host.dp(28), host.dp(28), host.dp(28))
+                }
+                bar.addView(deleteTv)
+                bar.addView(View(host.ctx).apply {
+                    layoutParams = LinearLayout.LayoutParams(0, 1, 1f)
+                })
+                bar.addView(PanelWidgets.outlinedButton(host, NativeLocale.t("cancel")) { closeAndRestore() })
+                bar.addView(PanelWidgets.outlinedButton(host, NativeLocale.t("screenshot_bubble")) { showBubbleAndClose() })
+                bar.addView(insertTv)
+                wrapper.addView(bar)
+                wrapper
+            }
+        }
+        insertBtn.enabled = false
+        deleteBtn.enabled = false
     }
 
     private fun switchTab(tab: String) {
         activeTab = tab
         selectedPath = null
         updateButtons()
-        refreshContent()
+        gridRebuild?.invoke()
+        gridScrollTop?.invoke()
     }
 
     private fun updateButtons() {
         val hasSel = selectedPath != null
-        insertBtn?.update(hasSel)
-        deleteBtn?.update(hasSel)
+        insertBtn.enabled = hasSel
+        deleteBtn.enabled = hasSel
     }
 
-    private fun refreshContent() { refreshContent(clearSelection = true) }
-
-    private fun refreshContent(clearSelection: Boolean) {
-        val grid = contentGrid ?: return
-        if (clearSelection) scrollHost?.prepareForContentChange()
-        cellFrameMap.clear()
-        grid.removeAllViews()
-        if (clearSelection) { selectedPath = null; updateButtons() }
-
+    private fun loadFiles(): List<File> {
         val dir = if (activeTab == "queue") QUEUE_DIR else HISTORY_DIR
         val folder = File(dir)
-        if (!folder.exists() || !folder.isDirectory) {
-            grid.addView(makeEmptyView(
-                if (activeTab == "queue") NativeLocale.t("no_queue") else NativeLocale.t("no_history")
-            ))
-            scrollHost?.refreshThumb()
-            return
-        }
-
-        val files = (folder.listFiles() ?: emptyArray())
+        if (!folder.exists() || !folder.isDirectory) return emptyList()
+        return (folder.listFiles() ?: emptyArray())
             .filter { it.name.endsWith(".png") }
             .sortedByDescending { it.name.removeSuffix(".png").toLongOrNull() ?: 0L }
-
-        if (files.isEmpty()) {
-            grid.addView(makeEmptyView(
-                if (activeTab == "queue") NativeLocale.t("no_queue") else NativeLocale.t("no_history")
-            ))
-            scrollHost?.refreshThumb()
-            return
-        }
-        buildGrid(files)
-        if (clearSelection) scrollHost?.scrollToTop() else scrollHost?.refreshThumb()
     }
 
-    private fun buildGrid(files: List<File>) {
-        val host = scrollHost ?: return
-        PanelGrid.build(reactContext, host, screenW, winW, files) { file, colW ->
-            createCell(file, colW)
-        }
-    }
-
-    private fun createCell(file: File, width: Int): LinearLayout {
-        val thumbH = (width * 1.1f).toInt()
+    private fun screenshotCell(host: PanelHost, file: File, colW: Int): View {
+        val thumbH = (colW * 1.1f).toInt()
         val isSelected = selectedPath == file.absolutePath
 
-        val cell = LinearLayout(reactContext).apply {
+        val cell = LinearLayout(host.ctx).apply {
             orientation = LinearLayout.VERTICAL
-            layoutParams = LinearLayout.LayoutParams(width, LinearLayout.LayoutParams.WRAP_CONTENT)
+            layoutParams = LinearLayout.LayoutParams(colW, LinearLayout.LayoutParams.WRAP_CONTENT)
             setOnClickListener {
-                val oldPath = selectedPath
                 selectedPath = if (selectedPath == file.absolutePath) null else file.absolutePath
                 updateButtons()
-                applyCellSelection(oldPath, false)
-                applyCellSelection(selectedPath, true)
+                gridRebuild?.invoke()
             }
         }
 
-        val thumbFrame = FrameLayout(reactContext).apply {
-            layoutParams = LinearLayout.LayoutParams(width, thumbH)
+        val thumbFrame = FrameLayout(host.ctx).apply {
+            layoutParams = LinearLayout.LayoutParams(colW, thumbH)
             background = GradientDrawable().apply {
                 setColor(Color.WHITE)
-                setStroke(if (isSelected) dp(2) else dp(1),
+                setStroke(if (isSelected) host.dp(2) else host.dp(1),
                     if (isSelected) Color.BLACK else Color.parseColor("#CCCCCC"))
-                cornerRadius = dp(4).toFloat()
+                cornerRadius = host.dp(4).toFloat()
             }
             clipToOutline = true
             outlineProvider = object : ViewOutlineProvider() {
                 override fun getOutline(v: View, o: android.graphics.Outline) {
-                    o.setRoundRect(0, 0, v.width, v.height, dp(4).toFloat())
+                    o.setRoundRect(0, 0, v.width, v.height, host.dp(4).toFloat())
                 }
             }
         }
-        val imageView = ImageView(reactContext).apply {
+        val imageView = ImageView(host.ctx).apply {
             layoutParams = FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
             )
             scaleType = ImageView.ScaleType.FIT_CENTER
-            setPadding(dp(2), dp(2), dp(2), dp(2))
+            setPadding(host.dp(2), host.dp(2), host.dp(2), host.dp(2))
         }
         thumbFrame.addView(imageView)
-        loadThumbnail(file.absolutePath, width, thumbH, imageView)
-        cellFrameMap[file.absolutePath] = thumbFrame
+        loadThumbnail(file.absolutePath, colW, thumbH, imageView)
         cell.addView(thumbFrame)
 
-        val textContainer = LinearLayout(reactContext).apply {
+        val textContainer = LinearLayout(host.ctx).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(2), dp(6), dp(2), dp(4))
+            setPadding(host.dp(2), host.dp(6), host.dp(2), host.dp(4))
         }
         val ts = file.name.removeSuffix(".png").toLongOrNull() ?: 0L
         val timeStr = if (ts > 0) {
             java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault()).format(java.util.Date(ts))
         } else file.name
-        textContainer.addView(TextView(reactContext).apply {
-            text = timeStr; textSize = sp(12f); setTextColor(Color.BLACK)
+        textContainer.addView(TextView(host.ctx).apply {
+            text = timeStr; textSize = host.sp(12f); setTextColor(Color.BLACK)
             typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
             maxLines = 2
         })
-        textContainer.addView(TextView(reactContext).apply {
-            text = formatSize(file.length()); textSize = sp(10f)
+        textContainer.addView(TextView(host.ctx).apply {
+            text = PanelWidgets.formatSize(file.length()); textSize = host.sp(10f)
             setTextColor(Color.parseColor("#666666"))
         })
         cell.addView(textContainer)
         return cell
     }
 
-    private fun applyCellSelection(path: String?, selected: Boolean) {
-        if (path == null) return
-        val frame = cellFrameMap[path] ?: return
-        frame.background = GradientDrawable().apply {
-            setColor(Color.WHITE)
-            setStroke(if (selected) dp(2) else dp(1),
-                if (selected) Color.BLACK else Color.parseColor("#CCCCCC"))
-            cornerRadius = dp(4).toFloat()
-        }
-    }
-
     private fun doInsert() {
         val path = selectedPath ?: return
         hide()
-        Log.i(tag, "[INSERT-DBG/Kt] panel insert path=$path fromQueue=${activeTab == "queue"}")
+        if (BuildConfig.ENABLE_DEBUG) Log.i(tag, "[INSERT-DBG/Kt] panel insert path=$path fromQueue=${activeTab == "queue"}")
         thread(isDaemon = true) {
             ImagePanel.saveToInsertCacheStatic(
                 path, FloatingToolbarModule.lastNotePath, FloatingToolbarModule.lastPageNum
@@ -265,7 +250,7 @@ class DocScreenshotPanel(
         kotlin.concurrent.thread(isDaemon = true) { DocScreenshotService.unmarkInsertNext(fileName) }
         selectedPath = null
         updateButtons()
-        refreshContent()
+        gridRebuild?.invoke()
     }
 
     private fun showBubbleAndClose() {
@@ -316,23 +301,23 @@ class ScreenshotModule(reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun takeScreenshot(promise: Promise) {
-        android.util.Log.i("ScreenshotModule", "[LASSO-DBG/Kt] takeScreenshot invoked")
+        if (BuildConfig.ENABLE_DEBUG) android.util.Log.i("ScreenshotModule", "[LASSO-DBG/Kt] takeScreenshot invoked")
         Thread {
             try {
                 val ts = System.currentTimeMillis()
                 val outPath = "$cacheDir/screenshot_crop_$ts.png"
-                android.util.Log.i("ScreenshotModule", "[LASSO-DBG/Kt] takeScreenshot running screencap -> $outPath")
+                if (BuildConfig.ENABLE_DEBUG) android.util.Log.i("ScreenshotModule", "[LASSO-DBG/Kt] takeScreenshot running screencap -> $outPath")
                 val process = Runtime.getRuntime().exec(arrayOf("screencap", "-p", outPath))
                 val exitCode = process.waitFor()
                 val file = File(outPath)
-                android.util.Log.i("ScreenshotModule", "[LASSO-DBG/Kt] screencap exit=$exitCode size=${file.length()}")
+                if (BuildConfig.ENABLE_DEBUG) android.util.Log.i("ScreenshotModule", "[LASSO-DBG/Kt] screencap exit=$exitCode size=${file.length()}")
                 if (exitCode == 0 && file.exists() && file.length() > 500) {
                     promise.resolve(outPath)
                 } else {
                     promise.reject("SCREENCAP_FAILED", "exit=$exitCode size=${file.length()}")
                 }
             } catch (e: Exception) {
-                android.util.Log.e("ScreenshotModule", "[LASSO-DBG/Kt] takeScreenshot EX: ${e.message}", e)
+                if (BuildConfig.ENABLE_DEBUG) android.util.Log.e("ScreenshotModule", "[LASSO-DBG/Kt] takeScreenshot EX: ${e.message}", e)
                 promise.reject("SCREENCAP_ERROR", e.message, e)
             }
         }.also { it.isDaemon = false }.start()
@@ -356,8 +341,8 @@ class ScreenshotModule(reactContext: ReactApplicationContext) :
                 }
                 if (activity == null) return@Thread
 
-                val restartIntent = Intent(activity.intent).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                val restartIntent = android.content.Intent(activity.intent).apply {
+                    addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
 
                 activity.finish()
@@ -377,7 +362,7 @@ class ScreenshotModule(reactContext: ReactApplicationContext) :
                 appContext.startActivity(restartIntent)
 
             } catch (e: Exception) {
-                android.util.Log.e("ScreenshotModule", "captureAndReopen error: ${e.message}", e)
+                if (BuildConfig.ENABLE_DEBUG) android.util.Log.e("ScreenshotModule", "captureAndReopen error: ${e.message}", e)
             }
         }.also { it.isDaemon = false }.start()
     }
@@ -394,21 +379,21 @@ class ScreenshotModule(reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun setPendingLassoPath(path: String?) {
-        android.util.Log.i("ScreenshotModule", "[LASSO-DBG/Kt] setPendingLassoPath: $path (prev=$pendingLassoPath)")
+        if (BuildConfig.ENABLE_DEBUG) android.util.Log.i("ScreenshotModule", "[LASSO-DBG/Kt] setPendingLassoPath: $path (prev=$pendingLassoPath)")
         pendingLassoPath = path
     }
 
     @ReactMethod
     fun getPendingLassoPath(promise: Promise) {
         val path = pendingLassoPath
-        android.util.Log.i("ScreenshotModule", "[LASSO-DBG/Kt] getPendingLassoPath returning: $path")
+        if (BuildConfig.ENABLE_DEBUG) android.util.Log.i("ScreenshotModule", "[LASSO-DBG/Kt] getPendingLassoPath returning: $path")
         pendingLassoPath = null
         promise.resolve(path)
     }
 
     @ReactMethod
     fun peekPendingLassoPath(promise: Promise) {
-        android.util.Log.i("ScreenshotModule", "[LASSO-DBG/Kt] peekPendingLassoPath: $pendingLassoPath")
+        if (BuildConfig.ENABLE_DEBUG) android.util.Log.i("ScreenshotModule", "[LASSO-DBG/Kt] peekPendingLassoPath: $pendingLassoPath")
         promise.resolve(pendingLassoPath)
     }
 

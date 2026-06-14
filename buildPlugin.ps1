@@ -1,5 +1,10 @@
 # PowerShell Script: Analyze Android Dependencies and Generate PluginConfig.json
 
+param(
+    # Keep JS/TS logs (debug build); default strips logs (release build).
+    [switch]$WithLogs
+)
+
 # Set color output function
 function Write-ColorOutput {
     param(
@@ -467,7 +472,7 @@ function Find-ManualReactPackagesFromApplication {
         foreach ($f in $files) {
             try {
                 $text = Get-Content $f.FullName -Raw -ErrorAction SilentlyContinue
-                # 去除注释，避免匹配示例代码
+                # Strip comments to avoid matching example code
                 $text = ($text -replace '(?m)^\s*//.*$', '')
                 $text = ($text -replace '(?s)/\*.*?\*/', '')
                 $packageName = $null
@@ -521,7 +526,7 @@ function Find-ManualReactPackagesFromApplication {
                     }
                 }
 
-                # Kotlin add(ClassName()) 或 packages.add(ClassName())
+                # Kotlin add(ClassName()) or packages.add(ClassName())
                 $matchesKotlin = [System.Text.RegularExpressions.Regex]::Matches($text, '\badd\(\s*([A-Za-z0-9_\.]+)\s*\(')
                 foreach ($m in $matchesKotlin) {
                     $name = $m.Groups[1].Value
@@ -538,7 +543,7 @@ function Find-ManualReactPackagesFromApplication {
                     }
                 }
 
-                # Java packages.add(new ClassName()) 或 add(new ClassName())
+                # Java packages.add(new ClassName()) or add(new ClassName())
                 $matchesJava = [System.Text.RegularExpressions.Regex]::Matches($text, '\b(?:packages\.)?add\(\s*new\s+([A-Za-z0-9_\.]+)\s*\(')
                 foreach ($m in $matchesJava) {
                     $name = $m.Groups[1].Value
@@ -857,6 +862,18 @@ function Build-ReactNativeBundle {
     param([string]$ProjectRoot, [string]$ProjectName, [string]$OutputDir)
     
     Write-ColorOutput 'Starting React Native bundling...' 'Blue'
+
+    # Log toggle: -WithLogs keeps JS/TS logs (debug build), default strips them (release build).
+    # Start-Process inherits env vars; child cmd/npx processes use WITH_LOGS to let babel decide.
+    # Don't clear WITH_LOGS so that pre-setting $env:WITH_LOGS='1' also works.
+    if ($script:WithLogs) {
+        $env:WITH_LOGS = '1'
+        Write-ColorOutput 'Log mode: INCLUDED (WITH_LOGS=1, debug build)' 'Yellow'
+    } elseif ($env:WITH_LOGS -eq '1') {
+        Write-ColorOutput 'Log mode: INCLUDED (WITH_LOGS=1 from environment)' 'Yellow'
+    } else {
+        Write-ColorOutput 'Log mode: STRIPPED (release build)' 'Blue'
+    }
     
     # Build bundle output path and assets directory
     $bundleOutput = Join-Path $OutputDir "$ProjectName.bundle"
@@ -1187,7 +1204,16 @@ function Main {
     $buildGeneratedConfigFile = Join-Path $buildGeneratedDir 'PluginConfig.json'
     Copy-Item $rootConfigFile $buildGeneratedConfigFile -Force
     Write-ColorOutput 'Copied root directory PluginConfig.json to build/generated folder' 'Green'
-    
+
+    if ($script:WithLogs) {
+        $cfg = Get-Content $buildGeneratedConfigFile -Raw | ConvertFrom-Json
+        $cfgHash = @{}
+        $cfg.PSObject.Properties | ForEach-Object { $cfgHash[$_.Name] = $_.Value }
+        $cfgHash.name = $cfgHash.name + ' - Dev'
+        $cfgHash | ConvertTo-Json -Depth 10 | Set-Content $buildGeneratedConfigFile -Encoding UTF8
+        Write-ColorOutput "Dev build: name set to '$($cfgHash.name)'" 'Yellow'
+    }
+
     # Copy icon file and update iconPath field
     Copy-IconAndUpdatePath -ProjectRoot $projectRoot -BuildGeneratedDir $buildGeneratedDir -BuildGeneratedConfigFile $buildGeneratedConfigFile
     
@@ -1237,7 +1263,7 @@ function Main {
         Write-ColorOutput 'Build conditions not met; skipping steps 10–13 and proceeding to packaging' 'Yellow'
     }
 
-    # Step 14: 打包输出 .snplg
+    # Step 14: Package and output .snplg
     Write-ColorOutput 'Step 14: Package build/generated directory and generate .snplg file...' 'Green'
     
     # Create build/outputs directory
@@ -1271,9 +1297,11 @@ function Main {
     }
     
     # Rename to .snplg file
-    $snplgFileName = "$($packageInfo.Name).snplg"
+    $devSuffix = if ($script:WithLogs) { '-dev' } else { '' }
+    $snplgFileName = "$($packageInfo.Name)$devSuffix.snplg"
     $finalSnplgPath = Join-Path $buildOutputsDir $snplgFileName
-    $null = Rename-ToSnplgFile -ZipFilePath $tempZipPath -ProjectName $packageInfo.Name -OutputDir $buildOutputsDir
+    $outputName = "$($packageInfo.Name)$devSuffix"
+    $null = Rename-ToSnplgFile -ZipFilePath $tempZipPath -ProjectName $outputName -OutputDir $buildOutputsDir
     if (Test-Path $finalSnplgPath) {
         Write-ColorOutput "Plugin package successfully generated: $finalSnplgPath" 'Green'
         

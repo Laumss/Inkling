@@ -21,7 +21,7 @@ class PanelScrollHost(
 ) {
     private val density = ctx.resources.displayMetrics.density
     private val scale = ScreenScale.factor(ctx)
-    private fun dp(v: Int) = (v * density * scale).roundToInt()
+    private fun dp(v: Int) = ScreenScale.dp(ctx, v)
     private fun dpf(v: Float) = v * density * scale
 
     companion object {

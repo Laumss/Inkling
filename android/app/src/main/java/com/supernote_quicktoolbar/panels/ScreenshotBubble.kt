@@ -1,4 +1,5 @@
 package com.supernote_quicktoolbar.panels
+import com.supernote_quicktoolbar.BuildConfig
 
 import android.content.ComponentName
 import android.content.Intent
@@ -60,7 +61,7 @@ object ScreenshotBubble {
             toolbar = toolbarModule
 
             if (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(context)) {
-                Log.w(TAG, "no overlay permission"); return@post
+                if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "no overlay permission"); return@post
             }
 
             val d = context.resources.displayMetrics.density * scale()
@@ -148,11 +149,11 @@ object ScreenshotBubble {
             wm = context.getSystemService(android.content.Context.WINDOW_SERVICE) as WindowManager
             try {
                 wm?.addView(container, lp)
-                Log.i(TAG, "shown")
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "shown")
                 toolbarModule.hide()
                 toolbarModule.disablePenBlock()
             } catch (e: Exception) {
-                Log.e(TAG, "addView failed: ${e.message}")
+                if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "addView failed: ${e.message}")
             }
         }
     }
@@ -163,7 +164,7 @@ object ScreenshotBubble {
             val v = btnView ?: return@post
             try { wm?.removeView(v) } catch (_: Exception) {}
             btnView = null; lp = null
-            Log.i(TAG, "hidden")
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "hidden")
         }
     }
 
@@ -174,7 +175,7 @@ object ScreenshotBubble {
             val v = btnView ?: return@post
             try { wm?.removeView(v) } catch (_: Exception) {}
             btnView = null; lp = null
-            Log.i(TAG, "hidden (settings)")
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "hidden (settings)")
         }
     }
 
@@ -198,7 +199,7 @@ object ScreenshotBubble {
     private fun onLongPress() {
         if (isDragging) return
         longPressTriggered = true
-        Log.i(TAG, "long press → switching to last opened note")
+        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "long press → switching to last opened note")
         hide()
         toolbar?.restoreToolbar()
         try {
@@ -212,7 +213,7 @@ object ScreenshotBubble {
             }
             c.startActivity(intent)
         } catch (e: Exception) {
-            Log.e(TAG, "launch Note app failed: ${e.message}", e)
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "launch Note app failed: ${e.message}", e)
         }
     }
 
@@ -220,22 +221,22 @@ object ScreenshotBubble {
         val tb = toolbar ?: return
 
         if (FloatingToolbarModule.isInNoteApp()) {
-            Log.i(TAG, "tapped (in note) → inserting staged screenshot")
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "tapped (in note) → inserting staged screenshot")
             pendingReshow = false
             btnView?.let { v ->
                 try { wm?.removeView(v) } catch (_: Exception) {}
                 btnView = null; lp = null
-                Log.i(TAG, "hidden")
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "hidden")
             }
             handler.postDelayed({ tb.handleDocScreenshot() }, 150)
             return
         }
-        Log.i(TAG, "tapped → starting screencap")
+        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "tapped → starting screencap")
         pendingReshow = true
         btnView?.let { v ->
             try { wm?.removeView(v) } catch (_: Exception) {}
             btnView = null; lp = null
-            Log.i(TAG, "hidden")
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "hidden")
         }
         handler.postDelayed({ tb.handleDocScreenshotCrop() }, 150)
     }

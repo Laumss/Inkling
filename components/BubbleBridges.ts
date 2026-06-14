@@ -161,11 +161,13 @@ function getAiEmitter(): NativeEventEmitter | null {
   return _aiEmitter;
 }
 
+type AiBubbleMode = 'ai' | 'voice';
+
 const AiBubbleBridge = {
   isAvailable: !!AiBubble,
 
-  show(statusText: string): void {
-    try { AiBubble?.show(statusText); } catch (e) {
+  show(statusText: string, mode: AiBubbleMode = 'ai'): void {
+    try { AiBubble?.show(statusText, mode); } catch (e) {
       console.warn('[AiBubbleBridge]: show failed:', e);
     }
   },
@@ -179,6 +181,24 @@ const AiBubbleBridge = {
   updateText(text: string): void {
     try { AiBubble?.updateText(text); } catch (e) {
       console.warn('[AiBubbleBridge]: updateText failed:', e);
+    }
+  },
+
+  updateSubText(text: string): void {
+    try { AiBubble?.updateSubText(text); } catch (e) {
+      console.warn('[AiBubbleBridge]: updateSubText failed:', e);
+    }
+  },
+
+  updateTime(text: string): void {
+    try { AiBubble?.updateTime(text); } catch (e) {
+      console.warn('[AiBubbleBridge]: updateTime failed:', e);
+    }
+  },
+
+  setMode(mode: AiBubbleMode): void {
+    try { AiBubble?.setMode(mode); } catch (e) {
+      console.warn('[AiBubbleBridge]: setMode failed:', e);
     }
   },
 
@@ -233,5 +253,38 @@ const AiBubbleBridge = {
   },
 };
 
+const { PaletteBubble } = NativeModules;
+
+let _paletteEmitter: NativeEventEmitter | null = null;
+function getPaletteEmitter(): NativeEventEmitter | null {
+  if (!PaletteBubble) return null;
+  if (!_paletteEmitter) _paletteEmitter = new NativeEventEmitter(PaletteBubble);
+  return _paletteEmitter;
+}
+
+const PaletteBubbleBridge = {
+  isAvailable: !!PaletteBubble,
+
+  show(): void {
+    try { PaletteBubble?.show(); } catch (e) {
+      console.warn('[PaletteBubbleBridge]: show failed:', e);
+    }
+  },
+
+  hide(): void {
+    try { PaletteBubble?.hide(); } catch (e) {
+      console.warn('[PaletteBubbleBridge]: hide failed:', e);
+    }
+  },
+
+  async isShowing(): Promise<boolean> {
+    try { return await PaletteBubble?.isShowing() ?? false; } catch (_) { return false; }
+  },
+
+  onSlotTap(cb: (e: { slotIndex: number; color: string; thickness: number; penType: number }) => void): { remove(): void } {
+    return getPaletteEmitter()?.addListener('onPaletteBubbleSlotTap', cb) ?? { remove() {} };
+  },
+};
+
 export default FloatingBubbleBridge;
-export { AiBubbleBridge };
+export { AiBubbleBridge, PaletteBubbleBridge };

@@ -1,3 +1,10 @@
 node_modules
 build
 android/.gradle
+CLAUDE.md
+package-lock.json
+android/local.properties
+docs
+logcat_clean.txt
+.claude/settings.json
+.claude/settings.local.json

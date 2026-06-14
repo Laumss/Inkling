@@ -58,7 +58,7 @@ class BroadcastBridge(reactContext: ReactApplicationContext) : ReactContextBaseJ
     fun sendAlive() {
         val intent = Intent("com.dictation.PLUGIN_ALIVE")
         reactApplicationContext.sendBroadcast(intent)
-        Log.i("BroadcastBridge", "PLUGIN_ALIVE sent")
+        if (BuildConfig.ENABLE_DEBUG) Log.i("BroadcastBridge", "PLUGIN_ALIVE sent")
     }
 
     @ReactMethod
@@ -97,7 +97,7 @@ class BroadcastBridge(reactContext: ReactApplicationContext) : ReactContextBaseJ
         try {
             reactApplicationContext.startActivity(intent)
         } catch (e: Exception) {
-            Log.e("BroadcastBridge", "launchRelayApp failed: ${e.message}")
+            if (BuildConfig.ENABLE_DEBUG) Log.e("BroadcastBridge", "launchRelayApp failed: ${e.message}")
         }
     }
 
@@ -109,7 +109,7 @@ class BroadcastBridge(reactContext: ReactApplicationContext) : ReactContextBaseJ
 
     override fun onCatalystInstanceDestroy() {
         stopListening()
-        Log.i("BroadcastBridge", "onCatalystInstanceDestroy — receiver unregistered")
+        if (BuildConfig.ENABLE_DEBUG) Log.i("BroadcastBridge", "onCatalystInstanceDestroy — receiver unregistered")
         super.onCatalystInstanceDestroy()
     }
 }

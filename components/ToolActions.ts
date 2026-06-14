@@ -58,7 +58,7 @@ function isRecognitionNote(): boolean {
 }
 
 async function _insertDocLinkDirect(docPath: string): Promise<void> {
-  // 插入文档链接前，先固化上一次的套索选中态
+
   try { await (PluginCommAPI as any).setLassoBoxState?.(2); } catch (_) {}
 
   const rawName = docPath.split('/').pop() ?? 'link';
@@ -90,7 +90,6 @@ async function _insertDocLinkDirect(docPath: string): Promise<void> {
   const fontSize = 49;
   const lineH = fontSize + 10;
 
-  // 检测页面上已有的文本框/链接，避免重叠插入
   try {
     if (notePath) {
       const elRes: any = await PluginFileAPI.getElements(pageNum, notePath);
@@ -99,14 +98,14 @@ async function _insertDocLinkDirect(docPath: string): Promise<void> {
         for (const el of elRes.result) {
           try {
             const elType = el.type;
-            // type 500-502: 文本框 / 文本摘要
+
             if (typeof elType === 'number' && elType >= 500 && elType <= 502) {
               const rect = el.textBox?.textRect;
               if (rect && typeof rect.top === 'number' && typeof rect.bottom === 'number') {
                 occupied.push({ top: rect.top, bottom: rect.bottom });
               }
             }
-            // type 600: 链接元素
+
             if (typeof elType === 'number' && elType === 600) {
               const lk = el.link;
               if (lk && typeof lk.Y === 'number' && typeof lk.height === 'number') {
@@ -118,7 +117,7 @@ async function _insertDocLinkDirect(docPath: string): Promise<void> {
           }
         }
         occupied.sort((a, b) => a.top - b.top);
-        // 逐个检查碰撞并下移
+
         const GAP = 10;
         for (let iter = 0; iter < 50; iter++) {
           let collision = false;
@@ -133,7 +132,7 @@ async function _insertDocLinkDirect(docPath: string): Promise<void> {
           }
           if (!collision) break;
         }
-        // 确保不超出页面底部
+
         if (top + lineH > pageH - 50) {
           console.warn('[ToolActions] docLink: no room on page, using original position');
           top = Math.round(pageH * 0.15);
@@ -275,9 +274,7 @@ export async function executeAction(action: string): Promise<string> {
       const imgPath = _imageQueue.shift()!;
       console.log('[QUEUE-DBG/TS] image queue pop:', imgPath, 'remaining:', _imageQueue.length);
       try {
-        // 插入新图前，先固化上一张：清掉上一张插入后残留的套索选中态（等价于手动点空白处）。
-        // 插入后保留套索态以便调整；最后一张由用户手动点空白固化。
-        // 第一张时无套索，调用失败无害。禁止用 saveCurrentNote 固化（见 CLAUDE.md）。
+
         try { await (PluginCommAPI as any).setLassoBoxState?.(2); } catch (_) {}
         await (PluginNoteAPI as any).insertImage(imgPath);
       } catch (_) {}
@@ -397,7 +394,6 @@ async function moveLassoElementsLayer(direction: 'up' | 'down'): Promise<string>
     return direction === 'up' ? 'Already at top layer' : 'Already at bottom layer';
   }
 
-  // Get full element data (including stroke binary data) for the elements to move
   const fullRes = await PluginFileAPI.getElements(_pageNum, _filePath) as any;
   if (!fullRes?.success || !fullRes.result) return 'Get page elements failed';
 
@@ -412,10 +408,8 @@ async function moveLassoElementsLayer(direction: 'up' | 'down'): Promise<string>
   console.log('[ToolActions] moveLayer: deleting', numsToDelete.length,
     'elements, inserting to target layers');
 
-  // modifyElements doesn't change layerNum in native — use delete + insert instead
   await PluginNoteAPI.saveCurrentNote();
 
-  // Step 1: Delete elements from source layer
   const delRes = await PluginFileAPI.deleteElements(_filePath, _pageNum, numsToDelete) as any;
   console.log('[ToolActions] deleteElements result:', delRes?.success, delRes?.error);
   if (!delRes?.success) {
@@ -423,7 +417,6 @@ async function moveLassoElementsLayer(direction: 'up' | 'down'): Promise<string>
     return `Delete failed: ${delRes?.error?.message ?? 'unknown'}`;
   }
 
-  // Step 2: Insert elements into target layer
   const insRes = await PluginFileAPI.insertElements(_filePath, _pageNum, toInsert) as any;
   console.log('[ToolActions] insertElements result:', insRes?.success, insRes?.error);
   if (!insRes?.success) {
@@ -526,7 +519,7 @@ async function clipSmartAction(slot: string): Promise<string> {
     if (hasLasso) {
       return await clipSave(slot);
     } else {
-      // 只有在确定要粘贴时，才在粘贴前固化清除套索状态
+
       try { await (PluginCommAPI as any).setLassoBoxState?.(2); } catch (_) {}
       return await clipPasteSticker(slot);
     }
@@ -538,46 +531,6 @@ async function clipSmartAction(slot: string): Promise<string> {
 async function clipSave(slot: string): Promise<string> {
   await ensureStickerDir();
 
-  let backedUpRect: any = null;
-  try {
-    const lassoRectRes = await PluginCommAPI.getLassoRect();
-    if (lassoRectRes.success && lassoRectRes.result != null) {
-      backedUpRect = lassoRectRes.result;
-    }
-  } catch (_) {}
-
-  try {
-    const cntRes = await (PluginCommAPI as any).getLassoElementTypeCounts?.();
-    const c = cntRes?.result;
-
-    if ((c?.titleNum ?? 0) > 0) {
-      NativeUIUtils.showErrorTipDialog(t('clip_err_title'));
-      return 'Title clip not supported';
-    }
-
-    const linkCount = (c?.textLinkNum ?? 0) + (c?.trailLinkNum ?? 0) + (c?.todoLinkNum ?? 0);
-    if (linkCount > 0) {
-      NativeUIUtils.showErrorTipDialog(t('clip_err_link'));
-      return 'Link clip not supported';
-    }
-
-    const tbCount =
-      (c?.normalTextBoxNum ?? 0) +
-      (c?.digestTextBoxNum ?? 0) +
-      (c?.digestTextBoxEditableNum ?? 0);
-    if (tbCount > 0) {
-      NativeUIUtils.showErrorTipDialog(t('clip_err_textbox'));
-      return 'TextBox clip not supported';
-    }
-
-    if ((c?.bitmapNum ?? 0) > 0) {
-      NativeUIUtils.showErrorTipDialog(t('clip_err_image'));
-      return 'Image clip not supported';
-    }
-  } catch (e) {
-    console.warn('[ToolActions]: getLassoElementTypeCounts failed, fall through to sticker:', e);
-  }
-
   const existingClips = await loadClips();
   const oldPath = existingClips[slot];
   const name = `quickbar_clip_${slot}_${Date.now()}.sticker`;
@@ -586,25 +539,18 @@ async function clipSave(slot: string): Promise<string> {
   console.log('[ToolActions]: clipSave slot=', slot, 'path=', path);
 
   const commitSave = async (): Promise<string> => {
-    if (oldPath) {
+    const oldFileExists = oldPath ? await RNFS.exists(oldPath).catch(() => false) : false;
+    if (oldFileExists) {
       try {
         const confirmed = await NativeUIUtils.showRattaDialog(
           t('clip_overwrite'), t('btn_cancel'), t('btn_confirm'), false
         );
         if (!confirmed) {
           try { await RNFS.unlink(path); } catch (_) {}
-          if (backedUpRect) {
-            try {
-              await PluginCommAPI.lassoElements(backedUpRect);
-              await (PluginCommAPI as any).setLassoBoxState?.(0);
-            } catch (_) {}
-          }
           return 'Clip save cancelled';
         }
       } catch (_) {}
-      try {
-        if (await RNFS.exists(oldPath)) await RNFS.unlink(oldPath);
-      } catch (_) {}
+      try { await RNFS.unlink(oldPath!); } catch (_) {}
     }
     await PluginCommAPI.setLassoBoxState(2);
     const clips = await loadClips();
@@ -613,70 +559,49 @@ async function clipSave(slot: string): Promise<string> {
     return `Saved to clip ${slot}`;
   };
 
+  console.log('[CLIP-DBG] trying saveStickerByLasso (fast path)');
+  const fastRes = await PluginCommAPI.saveStickerByLasso(path);
+  console.log('[CLIP-DBG] saveStickerByLasso result:', JSON.stringify(fastRes));
+
+  if (fastRes.success && fastRes.result !== false) {
+    return await commitSave();
+  }
+
+  console.warn('[CLIP-DBG] saveStickerByLasso failed (code:', (fastRes as any).error?.code,
+    'msg:', (fastRes as any).error?.message, '), falling back to convertElement2Sticker');
+
+  try {
+    const cntRes = await (PluginCommAPI as any).getLassoElementTypeCounts?.();
+    const c = cntRes?.result;
+    if ((c?.titleNum ?? 0) > 0) { NativeUIUtils.showErrorTipDialog(t('clip_err_title')); return 'Title clip not supported'; }
+    const linkCount = (c?.textLinkNum ?? 0) + (c?.trailLinkNum ?? 0) + (c?.todoLinkNum ?? 0);
+    if (linkCount > 0) { NativeUIUtils.showErrorTipDialog(t('clip_err_link')); return 'Link clip not supported'; }
+    const tbCount = (c?.normalTextBoxNum ?? 0) + (c?.digestTextBoxNum ?? 0) + (c?.digestTextBoxEditableNum ?? 0);
+    if (tbCount > 0) { NativeUIUtils.showErrorTipDialog(t('clip_err_textbox')); return 'TextBox clip not supported'; }
+    if ((c?.bitmapNum ?? 0) > 0) { NativeUIUtils.showErrorTipDialog(t('clip_err_image')); return 'Image clip not supported'; }
+  } catch (e) {
+    console.warn('[ToolActions]: getLassoElementTypeCounts failed, fall through:', e);
+  }
+
   const elemRes = await PluginCommAPI.getLassoElements() as any;
   if (!elemRes?.success || !elemRes.result || !Array.isArray(elemRes.result) || elemRes.result.length === 0) {
-    console.warn('[CLIP-DBG] getLassoElements failed or empty:', elemRes);
+    console.warn('[CLIP-DBG] getLassoElements failed or empty:', elemRes?.error);
+    NativeUIUtils.showErrorTipDialog(t('clip_err_read_failed'));
     return `Save clip ${slot} failed (no elements)`;
   }
 
   const deviceType = await PluginManager.getDeviceType();
-
-  let resolvedPenType: number | null = null;
-  let resolvedPenWidth: number | null = null;
-  try {
-    const strokeEls = (elemRes.result as any[]).filter((el: any) => el?.stroke != null);
-    const allDefault = strokeEls.length > 0 && strokeEls.every((el: any) => el.stroke.penType === 1);
-    if (allDefault) {
-      const penInfoRes = await PluginCommAPI.getPenInfo();
-      if (penInfoRes.success && penInfoRes.result != null) {
-        resolvedPenType = penInfoRes.result.type;
-        resolvedPenWidth = penInfoRes.result.width ?? null;
-        console.log('[CLIP-DBG] penInfo type=', resolvedPenType, 'width=', resolvedPenWidth);
-      }
-    }
-  } catch (e) {
-    console.warn('[CLIP-DBG] getPenInfo failed:', e);
-  }
-
-  const hasNonMainLayer = (elemRes.result as any[]).some((el: any) => el?.layerNum !== undefined && el.layerNum !== 0);
-  if (hasNonMainLayer) {
-    NativeUIUtils.showErrorTipDialog(t('clip_err_layer'));
-    return 'Non-main layer clip not supported';
-  }
-
-  const elementsForConvert = resolvedPenType != null
-    ? (elemRes.result as any[]).map((el: any) => {
-        if (el?.stroke != null) {
-          const strokePatch: any = { penType: resolvedPenType! };
-          if (resolvedPenWidth != null) strokePatch.penWidth = resolvedPenWidth;
-          return { ...el, stroke: { ...el.stroke, ...strokePatch } };
-        }
-        return el;
-      })
-    : elemRes.result;
-
-  console.log('[CLIP-DBG] convertElement2Sticker machineType=', deviceType, 'elements=', elementsForConvert.length);
-  let convertRes = await PluginCommAPI.convertElement2Sticker({
+  console.log('[CLIP-DBG] convertElement2Sticker elements=', elemRes.result.length, 'machineType=', deviceType);
+  const convertRes: any = await NativeModules.NativePluginAPI.convertElement2Sticker({
     machineType: deviceType,
-    elements: elementsForConvert,
+    elements: elemRes.result,
     stickerPath: path,
   });
   console.log('[CLIP-DBG] convertElement2Sticker result:', JSON.stringify(convertRes));
 
-  if (!convertRes.success || convertRes.result === false) {
-    console.warn('[CLIP-DBG] convertElement2Sticker failed, retrying with penType=1');
-    const safeElements = (elemRes.result as any[]).map((el: any) =>
-      el?.stroke != null ? { ...el, stroke: { ...el.stroke, penType: 1 } } : el);
-    convertRes = await PluginCommAPI.convertElement2Sticker({
-      machineType: deviceType,
-      elements: safeElements,
-      stickerPath: path,
-    });
-    console.log('[CLIP-DBG] convertElement2Sticker retry result:', JSON.stringify(convertRes));
-  }
-
-  if (!convertRes.success || convertRes.result === false) {
-    console.warn('[CLIP-DBG] convertElement2Sticker final FAILED');
+  if (!convertRes?.success || convertRes.result === false) {
+    console.warn('[CLIP-DBG] convertElement2Sticker FAILED', JSON.stringify(convertRes));
+    NativeUIUtils.showErrorTipDialog(t('clip_save_failed'));
     return `Save clip ${slot} failed`;
   }
 
@@ -802,6 +727,82 @@ export async function queryLayerInfo(): Promise<{ current: number; total: number
   }
 }
 
+export interface PaletteLassoInfo {
+  elementNums: number[];
+  strokeCount: number;
+  geometryCount: number;
+  avgThickness: number;
+  hasMarkerStroke: boolean;
+  dominantPenType: number | null;
+  dominantPenColor: number | null;
+}
+
+const PEN_TYPE_MARKER = 11;
+
+export async function getPaletteLassoInfo(): Promise<PaletteLassoInfo | null> {
+  const elemRes = await PluginCommAPI.getLassoElements() as any;
+  if (!elemRes?.success || !Array.isArray(elemRes.result) || elemRes.result.length === 0) {
+    return null;
+  }
+  const els: any[] = elemRes.result;
+  try {
+    const strokes = els.filter((el: any) => el?.type === 0);
+    const geoms   = els.filter((el: any) => el?.type === 700);
+    const elementNums = [...strokes, ...geoms]
+      .map((el: any) => el?.numInPage)
+      .filter((n: any): n is number => typeof n === 'number');
+    if (elementNums.length === 0) return null;
+
+    const thicknessVals: number[] = [];
+    for (const el of strokes) if (typeof el?.thickness === 'number') thicknessVals.push(el.thickness);
+    for (const el of geoms)   if (typeof el?.geometry?.penWidth === 'number') thicknessVals.push(el.geometry.penWidth);
+    const avgThickness = thicknessVals.length
+      ? Math.round(thicknessVals.reduce((a, b) => a + b, 0) / thicknessVals.length)
+      : 100;
+
+    let resolvedDefaultPenType: number | null = null;
+    if (strokes.some((el: any) => el?.stroke?.penType === 1)) {
+      try {
+        const pi = await PluginCommAPI.getPenInfo();
+        if (pi?.success && pi.result != null) resolvedDefaultPenType = pi.result.type ?? null;
+      } catch (e) {
+        console.warn('[ToolActions] getPaletteLassoInfo getPenInfo failed:', e);
+      }
+    }
+
+    const penTypeCount = new Map<number, number>();
+    const penColorCount = new Map<number, number>();
+    for (const el of strokes) {
+      let pt = el?.stroke?.penType;
+      if (pt === 1 && resolvedDefaultPenType != null) pt = resolvedDefaultPenType;
+      if (typeof pt === 'number') penTypeCount.set(pt, (penTypeCount.get(pt) ?? 0) + 1);
+      const pc = el?.stroke?.penColor;
+      if (typeof pc === 'number') penColorCount.set(pc, (penColorCount.get(pc) ?? 0) + 1);
+    }
+    for (const el of geoms) {
+      const pc = el?.geometry?.penColor;
+      if (typeof pc === 'number') penColorCount.set(pc, (penColorCount.get(pc) ?? 0) + 1);
+    }
+    const dominant = (m: Map<number, number>): number | null => {
+      let best: number | null = null, bestN = 0;
+      for (const [k, v] of m) if (v > bestN) { best = k; bestN = v; }
+      return best;
+    };
+
+    return {
+      elementNums,
+      strokeCount: strokes.length,
+      geometryCount: geoms.length,
+      avgThickness,
+      hasMarkerStroke: penTypeCount.has(PEN_TYPE_MARKER),
+      dominantPenType: dominant(penTypeCount),
+      dominantPenColor: dominant(penColorCount),
+    };
+  } finally {
+    for (const el of els) { try { el?.recycle?.(); } catch (_) {} }
+  }
+}
+
 let modeExitSub: EmitterSubscription | null = null;
 
 export function attachModeListeners(): void {
@@ -824,4 +825,3 @@ export function detachModeListeners(): void {
   modeExitSub?.remove();
   modeExitSub = null;
 }
-

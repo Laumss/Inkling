@@ -85,7 +85,7 @@ function _pushActiveModes(): void {
 }
 
 function reviveBridge(): void {
-  if (!BroadcastBridge) return;
+  if (!BroadcastBridge || !_aiActive) return;
 
   if (_broadcastTextSub) {
     _broadcastTextSub.remove();
@@ -124,6 +124,14 @@ function reviveBridge(): void {
   console.log('[BackgroundService]: bridge revived');
 }
 
+function teardownBridge(): void {
+  if (_broadcastTextSub) {
+    _broadcastTextSub.remove();
+    _broadcastTextSub = null;
+  }
+  try { BroadcastBridge?.stopListening?.(); } catch (_) {}
+}
+
 export async function checkNativeBubblePermission(): Promise<boolean> {
   if (!FloatingBubbleBridge.isAvailable) return false;
   if (_nativeBubblePermission !== null) return _nativeBubblePermission;
@@ -139,12 +147,12 @@ export function requestNativeBubblePermission(): void {
   FloatingBubbleBridge.requestPermission();
 }
 
-function showAiBubble(statusText: string): void {
+function showAiBubble(statusText: string, mode: 'ai' | 'voice' = 'ai'): void {
   if (!AiBubbleBridge.isAvailable) return;
   const ps = _textInserter?.getPageSize();
   if (ps) AiBubbleBridge.setPageHeight(ps.height);
   AiBubbleBridge.setActionButtons(resolveAiBubbleActions(_cachedAiBubbleActionIds));
-  AiBubbleBridge.show(statusText);
+  AiBubbleBridge.show(statusText, mode);
 }
 
 function _getBubbleStatusText(): string {
@@ -200,9 +208,9 @@ export function ensureInit(): void {
         _aiWaiting = false;
 
         if (AiBubbleBridge.isAvailable) {
-          AiBubbleBridge.show('Inserted');
+          AiBubbleBridge.updateText('Inserted');
           setTimeout(() => {
-            if (!_aiWaiting) AiBubbleBridge.show(t('bubble_ai_ready'));
+            if (!_aiWaiting) AiBubbleBridge.updateText(t('bubble_ai_ready'));
           }, 2000);
         }
       }
@@ -481,6 +489,7 @@ export async function startAiReceiveMode(): Promise<void> {
     return;
   }
   _aiActive = true;
+  reviveBridge();
   _pushActiveModes();
   if (AiBubbleBridge.isAvailable) showAiBubble(t('bubble_ai_ready'));
 }
@@ -490,6 +499,7 @@ export function stopAiMode(): void {
   _aiWaiting = false;
   _aiPositionLocked = false;
   clearAiTimeout();
+  teardownBridge();
   AiBubbleBridge.hide();
   _pushActiveModes();
 }

@@ -4,7 +4,7 @@ buildscript {
         minSdkVersion = 27
         compileSdkVersion = 35
         targetSdkVersion = 35
-        ndkVersion = "27.1.12297006"
+        ndkVersion = System.getProperty('os.name').toLowerCase().contains('windows') ? "27.0.12077973" : "27.3.13750724"
         kotlinVersion = "2.0.21"
     }
     repositories {
@@ -19,3 +19,31 @@ buildscript {
 }
 
 apply plugin: "com.facebook.react.rootproject"
+
+
+def isWindows = System.getProperty('os.name').toLowerCase().contains('windows')
+def localProps = file("${rootDir}/local.properties")
+def lines = []
+if (isWindows) {
+    lines << 'sdk.dir=C:/Users/Yalums/AppData/Local/Android/Sdk'
+} else {
+    lines << 'sdk.dir=/mnt/c/Users/Yalums/AppData/Local/Android/Sdk'
+    lines << 'ndk.dir=/root/android-ndk-r27d'
+    lines << 'cmake.dir=/usr'
+}
+localProps.text = lines.join('\n') + '\n'
+
+subprojects { subproject ->
+    def applyNdk = {
+        if (subproject.hasProperty('android')) {
+            subproject.android {
+                ndkVersion rootProject.ext.ndkVersion
+            }
+        }
+    }
+    if (subproject.state.executed) {
+        applyNdk()
+    } else {
+        subproject.afterEvaluate { applyNdk() }
+    }
+}

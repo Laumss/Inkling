@@ -7,7 +7,6 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import com.facebook.react.bridge.ReactApplicationContext
-import kotlin.math.roundToInt
 
 class PanelTabBar(
     private val ctx: ReactApplicationContext,
@@ -20,9 +19,7 @@ class PanelTabBar(
         data class Icon(val assetPath: String, val contentDesc: String) : Tab()
     }
 
-    private val density = ctx.resources.displayMetrics.density
-    private val scale = ScreenScale.factor(ctx)
-    private fun dp(v: Int) = (v * density * scale).roundToInt()
+    private fun dp(v: Int) = ScreenScale.dp(ctx, v)
 
     private var selected: Int = 0
     private val iconViews = mutableListOf<ImageView?>()

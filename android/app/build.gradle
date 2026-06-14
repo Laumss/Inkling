@@ -103,7 +103,7 @@ def processCustomApk(String buildType) {
 }
 
 react {
-
+    debuggableVariants = ["debug", "release"]
     autolinkLibrariesWithApp()
 }
 
@@ -135,13 +135,21 @@ android {
     buildTypes {
         debug {
             signingConfig signingConfigs.debug
+            buildConfigField "boolean", "ENABLE_DEBUG", "true"
         }
         release {
-
+            buildConfigField "boolean", "ENABLE_DEBUG", "false"
             signingConfig signingConfigs.debug
             minifyEnabled enableProguardInReleaseBuilds
             proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
         }
+    }
+    aaptOptions {
+        additionalParameters "--package-id", "0x71", "--allow-reserved-package-id"
+    }
+    lintOptions {
+        checkReleaseBuilds false
+        abortOnError false
     }
 }
 

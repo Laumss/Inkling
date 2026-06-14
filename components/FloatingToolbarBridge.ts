@@ -4,25 +4,7 @@ import { NativeModules, NativeEventEmitter } from 'react-native';
 
 const { FloatingToolbar } = NativeModules;
 
-export interface ToolItem {
-  id: string;
-  name: string;
-  icon: string;
-  action: string;
-
-  latches?: boolean;
-}
-
-const LATCHING_ACTIONS = new Set<string>([
-  'insert_text',
-  'text_recv_nospacing',
-  'text_recv_paragraph',
-  'voice_transcribe',
-]);
-
-export function withLatchFlag(tool: Omit<ToolItem, 'latches'>): ToolItem {
-  return { ...tool, latches: LATCHING_ACTIONS.has(tool.action) };
-}
+export const ENABLE_DEBUG: boolean = FloatingToolbar?.getConstants?.()?.ENABLE_DEBUG ?? FloatingToolbar?.ENABLE_DEBUG ?? true;
 
 export interface ToolTapEvent {
   toolId: string;
@@ -44,11 +26,11 @@ const FloatingToolbarBridge = {
 
   isAvailable: !!FloatingToolbar,
 
-  show(tools: ToolItem[]): void {
+  showCurrent(): void {
     try {
-      FloatingToolbar?.show(JSON.stringify(tools.map(withLatchFlag)));
+      FloatingToolbar?.showCurrent();
     } catch (e) {
-      console.warn('[FloatingToolbarBridge]: show failed:', e);
+      console.warn('[FloatingToolbarBridge]: showCurrent failed:', e);
     }
   },
 
@@ -57,14 +39,6 @@ const FloatingToolbarBridge = {
       FloatingToolbar?.hide();
     } catch (e) {
       console.warn('[FloatingToolbarBridge]: hide failed:', e);
-    }
-  },
-
-  updateTools(tools: ToolItem[]): void {
-    try {
-      FloatingToolbar?.updateTools(JSON.stringify(tools.map(withLatchFlag)));
-    } catch (e) {
-      console.warn('[FloatingToolbarBridge]: updateTools failed:', e);
     }
   },
 
@@ -237,6 +211,14 @@ const FloatingToolbarBridge = {
       FloatingToolbar?.showDocLinkPanel();
     } catch (e) {
       console.warn('[FloatingToolbarBridge]: showDocLinkPanel failed:', e);
+    }
+  },
+
+  showPalettePanel(infoJson: string): void {
+    try {
+      FloatingToolbar?.showPalettePanel(infoJson);
+    } catch (e) {
+      console.warn('[FloatingToolbarBridge]: showPalettePanel failed:', e);
     }
   },
 

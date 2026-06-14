@@ -1,23 +1,27 @@
 package com.supernote_quicktoolbar.panels
 import com.supernote_quicktoolbar.*
-import com.supernote_quicktoolbar.overlays.*
-import com.supernote_quicktoolbar.bubbles.*
 
-import android.graphics.*
-import android.graphics.drawable.GradientDrawable
-import android.util.Log
-import android.view.*
-import android.widget.*
+import android.graphics.Bitmap
+import android.graphics.Color
+import android.graphics.Typeface
+import android.view.Gravity
+import android.view.View
+import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.TextView
+import com.supernote_quicktoolbar.ui_common.VectorAssets
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.ReactApplicationContext
+import com.supernote_quicktoolbar.ui_common.BrowseDirs
+import com.supernote_quicktoolbar.ui_common.ButtonHandle
+import com.supernote_quicktoolbar.ui_common.CheckboxHandle
+import com.supernote_quicktoolbar.ui_common.ChipsHandle
+import com.supernote_quicktoolbar.ui_common.ListHandle
+import com.supernote_quicktoolbar.ui_common.MultiSelectState
 import com.supernote_quicktoolbar.ui_common.PanelBase
-import com.supernote_quicktoolbar.ui_common.PanelCheckbox
-import com.supernote_quicktoolbar.ui_common.PanelChips
-import com.supernote_quicktoolbar.ui_common.PanelHeader
-import com.supernote_quicktoolbar.ui_common.PanelScrollHost
-import com.supernote_quicktoolbar.ui_common.SelectionButton
+import com.supernote_quicktoolbar.ui_common.PanelHost
+import com.supernote_quicktoolbar.ui_common.PanelWidgets
 import java.io.File
-import kotlin.collections.LinkedHashSet
 
 class DocLinkPanel(
     ctx: ReactApplicationContext,
@@ -43,237 +47,52 @@ class DocLinkPanel(
         )
     }
 
-    private var currentBrowsePath: String = "/sdcard/Document"
+    data class DocItem(val name: String, val path: String, val isDir: Boolean, val size: Long = 0)
+
+    private var currentBrowsePath = "/sdcard/Document"
     private var selectedDocPath: String? = null
+    private val multi = MultiSelectState()
 
-    private var multiSelectMode = false
-    private val multiSelectedDocPaths = linkedSetOf<String>()
-
-    private val DEST_DIR_MAP = mapOf(
-        "Document" to "/sdcard/Document", "Export" to "/sdcard/EXPORT",
-        "MyStyle" to "/sdcard/MyStyle", "Note" to "/sdcard/Note",
-        "SCREENSHOT" to "/sdcard/SCREENSHOT", "INBOX" to "/sdcard/INBOX"
-    )
-    private val DIR_KEYS = listOf("Document", "Export", "MyStyle", "Note", "SCREENSHOT", "INBOX")
-
-    private var contentGrid: LinearLayout? = null
-    private var scrollHost: PanelScrollHost? = null
-    private var insertBtn: SelectionButton? = null
-    private var chips: PanelChips? = null
-
-    private var multiCheckbox: PanelCheckbox? = null
+    private lateinit var chipsH: ChipsHandle
+    private lateinit var listH: ListHandle
+    private lateinit var insertBtn: ButtonHandle
+    private lateinit var multiCheckbox: CheckboxHandle
 
     fun show() {
         currentInstance = this
         selectedDocPath = null
-        multiSelectMode = false
-        multiSelectedDocPaths.clear()
+        multi.clear()
         currentBrowsePath = "/sdcard/Document"
         showPanel()
-        handler.post { refreshContent() }
-    }
-
-    fun onFileReceived() {
-        handler.post {
-            if (rootView != null) {
-                rebuildList()
-            }
-        }
     }
 
     override fun buildContent(root: LinearLayout) {
-        root.addView(PanelHeader.create(reactContext, NativeLocale.t("doc_panel_title")) { closeAndRestore() })
-
-        chips = PanelChips(reactContext, DIR_KEYS) { selected ->
-            currentBrowsePath = if (selected != null) DEST_DIR_MAP[selected] ?: "/sdcard" else "/sdcard"
-            refreshContent()
+        renderDsl(root) {
+            header(NativeLocale.t("doc_panel_title"))
+            chipsH = chips(BrowseDirs.KEYS, initial = "Document") { key ->
+                currentBrowsePath = BrowseDirs.pathForKey(key)
+                refreshList()
+            }
+            listH = list(
+                itemsProvider = { loadItems() },
+                emptyText = NativeLocale.t("doc_no_files")
+            ) { h, item -> docRow(h, item) }
+            bottomBar {
+                multiCheckbox = checkbox(NativeLocale.t("multi_select")) { toggleMulti() }
+                outlined(NativeLocale.t("cancel")) { closeAndRestore() }
+                insertBtn = filled(NativeLocale.t("doc_insert_link")) { doInsertLink() }
+            }
         }
-        chips!!.setSelection("Document")
-        root.addView(chips!!.createView())
-
-        scrollHost = PanelScrollHost(reactContext, overlayScrollbar = true)
-        contentGrid = scrollHost!!.content
-        root.addView(scrollHost!!.view)
-
-        val insertTv = makeFilledBtn(NativeLocale.t("doc_insert_link")) { doInsertLink() }
-        insertBtn = SelectionButton(insertTv)
-
-        val checkbox = PanelCheckbox(reactContext, NativeLocale.t("multi_select")) { toggleMultiSelect() }
-        multiCheckbox = checkbox
-
-        root.addView(makeBottomBar(
-            leftFlex = checkbox.view,
-            rightButtons = listOf(
-                makeOutlinedBtn(NativeLocale.t("cancel")) { closeAndRestore() },
-                insertTv
-            )
-        ))
+        insertBtn.enabled = false
+        updateCheckboxEnabled()
     }
 
     override fun onHide() {
-        contentGrid = null; scrollHost = null
-        insertBtn = null; chips = null
-        multiCheckbox = null
         currentInstance = null
     }
 
-    private fun refreshContent() {
-        val grid = contentGrid ?: return
-        grid.removeAllViews()
-        selectedDocPath = null
-        insertBtn?.update(false)
-        updateCheckboxEnabled()
-        loadAndShowDirectory(currentBrowsePath)
-        scrollHost?.scrollToTop()
-    }
-
-    data class DocItem(val name: String, val path: String, val isDir: Boolean, val size: Long = 0)
-
-    private fun loadAndShowDirectory(path: String) {
-        val dir = File(path)
-        if (!dir.exists() || !dir.isDirectory) {
-            contentGrid?.addView(makeEmptyView(NativeLocale.t("doc_no_files")))
-            return
-        }
-
-        val items = (dir.listFiles() ?: emptyArray())
-            .filter { !it.name.startsWith(".") }
-            .filter { f ->
-                if (f.isDirectory) {
-                    if (path == "/sdcard") ALLOWED_ROOT_FOLDERS.contains(f.name) else true
-                } else {
-                    DOC_EXTS.contains(f.extension.lowercase())
-                }
-            }
-            .sortedWith(compareByDescending<File> { it.isDirectory }.thenBy { it.name })
-            .map { DocItem(it.name, it.absolutePath, it.isDirectory, it.length()) }
-
-        if (items.isEmpty()) {
-            contentGrid?.addView(makeEmptyView(NativeLocale.t("doc_no_files")))
-            return
-        }
-        buildDocList(items)
-    }
-
-    private fun buildDocList(items: List<DocItem>) {
-        val grid = contentGrid ?: return
-        for (item in items) {
-            val isSelected = if (multiSelectMode) {
-                !item.isDir && item.path in multiSelectedDocPaths
-            } else {
-                !item.isDir && selectedDocPath == item.path
-            }
-            val row = LinearLayout(reactContext).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(12), dp(10), dp(12), dp(10))
-                background = GradientDrawable().apply {
-                    setColor(if (isSelected) Color.parseColor("#F0F0F0") else Color.WHITE)
-                    setStroke(
-                        if (isSelected) dp(2) else dp(1),
-                        if (isSelected) Color.BLACK else Color.parseColor("#E0E0E0")
-                    )
-                    cornerRadius = dp(6).toFloat()
-                }
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                ).apply { bottomMargin = dp(4) }
-                setOnClickListener {
-                    if (item.isDir) {
-                        currentBrowsePath = item.path
-                        chips?.setSelection(null)
-                        chips?.rebuildChips()
-                        refreshContent()
-                    } else if (multiSelectMode) {
-                        if (item.path in multiSelectedDocPaths) multiSelectedDocPaths.remove(item.path)
-                        else multiSelectedDocPaths.add(item.path)
-                        updateMultiSelectUI()
-                        rebuildList()
-                    } else {
-                        selectedDocPath = if (selectedDocPath == item.path) null else item.path
-                        insertBtn?.update(selectedDocPath != null)
-                        updateCheckboxEnabled()
-                        rebuildList()
-                    }
-                }
-            }
-
-            row.addView(TextView(reactContext).apply {
-                text = if (item.isDir) "[DIR]" else getDocIcon(item.name)
-                textSize = sp(if (item.isDir) 12f else 14f)
-                setTextColor(if (item.isDir) Color.parseColor("#666666") else Color.BLACK)
-                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-                gravity = Gravity.CENTER
-                layoutParams = LinearLayout.LayoutParams(dp(42), dp(42)).apply { rightMargin = dp(10) }
-                background = GradientDrawable().apply {
-                    setColor(Color.parseColor("#F5F5F5"))
-                    cornerRadius = dp(4).toFloat()
-                }
-            })
-
-            val infoCol = LinearLayout(reactContext).apply {
-                orientation = LinearLayout.VERTICAL
-                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-            }
-            infoCol.addView(TextView(reactContext).apply {
-                text = item.name; textSize = sp(13f); setTextColor(Color.BLACK)
-                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-                setSingleLine(true); ellipsize = android.text.TextUtils.TruncateAt.END
-            })
-            if (!item.isDir) {
-                infoCol.addView(TextView(reactContext).apply {
-                    text = formatSize(item.size); textSize = sp(10f)
-                    setTextColor(Color.parseColor("#999999"))
-                })
-            }
-            row.addView(infoCol)
-
-            if (isSelected) {
-                row.addView(TextView(reactContext).apply {
-                    text = "✓"; textSize = sp(16f); setTextColor(Color.BLACK)
-                    typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-                    gravity = Gravity.CENTER
-                    layoutParams = LinearLayout.LayoutParams(dp(28), dp(28))
-                })
-            }
-
-            grid.addView(row)
-        }
-        scrollHost?.refreshThumb()
-    }
-
-    private fun rebuildList() {
-        contentGrid?.removeAllViews()
-        loadAndShowDirectory(currentBrowsePath)
-    }
-
-    private fun doInsertLink() {
-        if (multiSelectMode) {
-            if (multiSelectedDocPaths.isEmpty()) return
-            val paths = multiSelectedDocPaths.toList()
-            multiSelectedDocPaths.clear()
-            multiSelectMode = false
-            synchronized(DocLinkPanel::class.java) {
-                docLinkQueue.clear()
-                docLinkQueue.addAll(paths.drop(1))
-            }
-            val firstPath = paths.first()
-            val linkName = File(firstPath).nameWithoutExtension
-            toolbarModule.emitEventPublic("nativeInsertDocLink", Arguments.createMap().apply {
-                putString("path", firstPath)
-                putString("linkName", linkName)
-            })
-        } else {
-            val docPath = selectedDocPath ?: return
-            val linkName = File(docPath).nameWithoutExtension
-            toolbarModule.emitEventPublic("nativeInsertDocLink", Arguments.createMap().apply {
-                putString("path", docPath)
-                putString("linkName", linkName)
-            })
-        }
-        hide()
-        toolbarModule.restoreToolbar()
+    fun onFileReceived() {
+        if (isShowing) listH.refresh()
     }
 
     private fun closeAndRestore() {
@@ -281,40 +100,206 @@ class DocLinkPanel(
         toolbarModule.restoreToolbar()
     }
 
-    private fun toggleMultiSelect() {
-        val canToggle = multiSelectMode || selectedDocPath != null
-        if (!canToggle) return
-        if (multiSelectMode) {
-            multiSelectMode = false
-            multiSelectedDocPaths.clear()
-            selectedDocPath = null
-            insertBtn?.update(false)
-        } else {
-            multiSelectMode = true
-            selectedDocPath?.let { multiSelectedDocPaths.add(it) }
-            selectedDocPath = null
-        }
-        updateMultiSelectUI()
-        rebuildList()
+    private fun refreshList() {
+        selectedDocPath = null
+        insertBtn.enabled = false
+        updateCheckboxEnabled()
+        listH.refresh()
+        listH.scrollTop()
     }
 
-    private fun updateMultiSelectUI() {
-        if (multiSelectMode) {
-            val count = multiSelectedDocPaths.size
-            multiCheckbox?.setChecked(true)
-            multiCheckbox?.setLabel("${NativeLocale.t("multi_select")} ($count)")
-            multiCheckbox?.setActive(true)
-            insertBtn?.update(count > 0)
+    private fun loadItems(): List<DocItem> {
+        val dir = File(currentBrowsePath)
+        if (!dir.exists() || !dir.isDirectory) return emptyList()
+        return (dir.listFiles() ?: emptyArray())
+            .filter { !it.name.startsWith(".") }
+            .filter { f ->
+                if (f.isDirectory) {
+                    if (currentBrowsePath == "/sdcard") ALLOWED_ROOT_FOLDERS.contains(f.name) else true
+                } else {
+                    DOC_EXTS.contains(f.extension.lowercase())
+                }
+            }
+            .sortedWith(compareByDescending<File> { it.isDirectory }.thenBy { it.name })
+            .map { DocItem(it.name, it.absolutePath, it.isDirectory, it.length()) }
+    }
+
+    private var folderBitmap: Bitmap? = null
+
+    private fun getFolderBitmap(host: PanelHost): Bitmap? {
+        folderBitmap?.let { return it }
+        val bmp = VectorAssets.loadBitmapTinted(
+            host.ctx, "icons/ic_folder.xml", host.dp(36), Color.BLACK
+        )
+        folderBitmap = bmp
+        return bmp
+    }
+
+    private fun docRow(host: PanelHost, item: DocItem): View {
+        val isSelected = if (multi.isActive) {
+            !item.isDir && multi.isSelected(item.path)
         } else {
-            multiCheckbox?.setChecked(false)
-            multiCheckbox?.setLabel(NativeLocale.t("multi_select"))
+            !item.isDir && selectedDocPath == item.path
+        }
+
+        val wrapper = LinearLayout(host.ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        }
+
+        val row = LinearLayout(host.ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(if (isSelected) Color.parseColor("#E8E8E8") else Color.WHITE)
+            setOnClickListener {
+                when {
+                    item.isDir -> {
+                        currentBrowsePath = item.path
+                        chipsH.setSelection(null)
+                        refreshList()
+                    }
+                    multi.isActive -> {
+                        multi.toggle(item.path)
+                        updateMultiUI()
+                        listH.refresh()
+                    }
+                    else -> {
+                        selectedDocPath = if (selectedDocPath == item.path) null else item.path
+                        insertBtn.enabled = selectedDocPath != null
+                        updateCheckboxEnabled()
+                        listH.refresh()
+                    }
+                }
+            }
+        }
+
+        val iconAreaSize = host.dp(54)
+        if (item.isDir) {
+            row.addView(android.widget.RelativeLayout(host.ctx).apply {
+                layoutParams = LinearLayout.LayoutParams(iconAreaSize, iconAreaSize)
+                addView(ImageView(host.ctx).apply {
+                    val bmp = getFolderBitmap(host)
+                    if (bmp != null) setImageBitmap(bmp)
+                    scaleType = ImageView.ScaleType.CENTER_INSIDE
+                    layoutParams = android.widget.RelativeLayout.LayoutParams(
+                        host.dp(36), host.dp(42)
+                    ).apply { addRule(android.widget.RelativeLayout.CENTER_IN_PARENT) }
+                })
+            })
+        } else {
+            row.addView(View(host.ctx).apply {
+                layoutParams = LinearLayout.LayoutParams(iconAreaSize, iconAreaSize)
+            })
+        }
+
+        val infoCol = LinearLayout(host.ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        infoCol.addView(TextView(host.ctx).apply {
+            text = item.name; textSize = host.sp(20f); setTextColor(Color.BLACK)
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            setSingleLine(true); ellipsize = android.text.TextUtils.TruncateAt.END
+        })
+        val detail = if (item.isDir) {
+            val count = try {
+                File(item.path).listFiles()?.count { !it.name.startsWith(".") } ?: 0
+            } catch (_: Exception) { 0 }
+            "共${count}项"
+        } else {
+            PanelWidgets.formatSize(item.size)
+        }
+        infoCol.addView(TextView(host.ctx).apply {
+            text = detail; textSize = host.sp(12f)
+            setTextColor(Color.parseColor("#9E9E9E"))
+        })
+        row.addView(infoCol)
+
+        if (isSelected) {
+            row.addView(TextView(host.ctx).apply {
+                text = "✓"; textSize = host.sp(16f); setTextColor(Color.BLACK)
+                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                gravity = Gravity.CENTER
+                layoutParams = LinearLayout.LayoutParams(host.dp(32), host.dp(32)).apply {
+                    rightMargin = host.dp(10)
+                }
+            })
+        } else {
+
+            row.addView(ImageView(host.ctx).apply {
+                layoutParams = LinearLayout.LayoutParams(host.dp(16), LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                    rightMargin = host.dp(10)
+                }
+            })
+        }
+
+        wrapper.addView(row)
+
+        wrapper.addView(View(host.ctx).apply {
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 1)
+            setBackgroundColor(Color.parseColor("#D0D0D0"))
+        })
+        return wrapper
+    }
+
+    private fun toggleMulti() {
+        val canToggle = multi.isActive || selectedDocPath != null
+        if (!canToggle) return
+        if (multi.isActive) {
+            multi.deactivate()
+            selectedDocPath = null
+            insertBtn.enabled = false
+        } else {
+            multi.activate(seed = selectedDocPath)
+            selectedDocPath = null
+        }
+        updateMultiUI()
+        listH.refresh()
+    }
+
+    private fun updateMultiUI() {
+        if (multi.isActive) {
+            multiCheckbox.setChecked(true)
+            multiCheckbox.setLabel("${NativeLocale.t("multi_select")} (${multi.count})")
+            multiCheckbox.setActive(true)
+            insertBtn.enabled = multi.count > 0
+        } else {
+            multiCheckbox.setChecked(false)
+            multiCheckbox.setLabel(NativeLocale.t("multi_select"))
             updateCheckboxEnabled()
         }
     }
 
     private fun updateCheckboxEnabled() {
-        val enabled = multiSelectMode || selectedDocPath != null
-        multiCheckbox?.setActive(enabled)
+        multiCheckbox.setActive(multi.isActive || selectedDocPath != null)
+    }
+
+    private fun doInsertLink() {
+        if (multi.isActive) {
+            if (multi.count == 0) return
+            val paths = multi.selectedPaths
+            multi.clear()
+            synchronized(DocLinkPanel::class.java) {
+                docLinkQueue.clear()
+                docLinkQueue.addAll(paths.drop(1))
+            }
+            val firstPath = paths.first()
+            toolbarModule.emitEventPublic("nativeInsertDocLink", Arguments.createMap().apply {
+                putString("path", firstPath)
+                putString("linkName", File(firstPath).nameWithoutExtension)
+            })
+        } else {
+            val docPath = selectedDocPath ?: return
+            toolbarModule.emitEventPublic("nativeInsertDocLink", Arguments.createMap().apply {
+                putString("path", docPath)
+                putString("linkName", File(docPath).nameWithoutExtension)
+            })
+        }
+        closeAndRestore()
     }
 
     private fun getDocIcon(name: String): String = when (name.substringAfterLast('.').lowercase()) {

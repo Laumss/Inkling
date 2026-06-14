@@ -14,9 +14,9 @@ class InklingPackages : ReactPackage {
         fun tryAdd(name: String, factory: () -> NativeModule) {
             try {
                 modules.add(factory())
-                android.util.Log.i("InklingPackages", "✓ $name")
+                if (BuildConfig.ENABLE_DEBUG) android.util.Log.i("InklingPackages", "✓ $name")
             } catch (e: Exception) {
-                android.util.Log.e("InklingPackages", "✗ $name FAILED: ${e.message}", e)
+                if (BuildConfig.ENABLE_DEBUG) android.util.Log.e("InklingPackages", "✗ $name FAILED: ${e.message}", e)
             }
         }
         tryAdd("FloatingToolbar") { FloatingToolbarModule(reactContext) }
@@ -25,9 +25,9 @@ class InklingPackages : ReactPackage {
         tryAdd("FloatingBubble") { FloatingBubbleModule(reactContext) }
         tryAdd("ScreenshotModule") { ScreenshotModule(reactContext) }
         tryAdd("AiBubble") { AiBubbleModule(reactContext) }
+        tryAdd("PaletteBubble") { PaletteBubbleModule(reactContext) }
         tryAdd("TextLayoutEngine") { TextLayoutEngine(reactContext) }
         tryAdd("TextboxMetrics") { TextboxMetricsModule(reactContext) }
-        tryAdd("WeChatTransferModule") { WeChatTransferModule(reactContext) }
         return modules
     }
 

@@ -1,4 +1,5 @@
 package com.supernote_quicktoolbar.panels
+import com.supernote_quicktoolbar.BuildConfig
 
 import com.supernote_quicktoolbar.*
 
@@ -97,7 +98,7 @@ class StitchPanel(
     }
 
     fun show(session: StitchSessionData, onConfirm: (StitchSessionData) -> Unit, onCancel: () -> Unit) {
-        Log.i(tag, "show() images=${session.images.size} cols=${session.params.cols}")
+        if (BuildConfig.ENABLE_DEBUG) Log.i(tag, "show() images=${session.images.size} cols=${session.params.cols}")
         currentInstance = this
         this.session = session
         this.onConfirm = onConfirm
@@ -222,7 +223,7 @@ class StitchPanel(
         val root = rootView as? FrameLayout ?: return
         toolbarModule.refreshScreenDimensions()
         if (lastBuiltLandscape == isLandscape) return
-        Log.i(tag, "orientation flip → rebuild content (landscape=$isLandscape)")
+        if (BuildConfig.ENABLE_DEBUG) Log.i(tag, "orientation flip → rebuild content (landscape=$isLandscape)")
         stitchView = null
         gridView = null
         root.removeAllViews()
@@ -236,6 +237,22 @@ class StitchPanel(
         populateContent(root)
         return root
     }
+
+    private fun addBar(root: FrameLayout, bar: PanelBar.Handle): Int {
+        val h = bar.heightPx
+        bar.view.layoutParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT, h
+        ).apply { gravity = Gravity.TOP }
+        root.addView(bar.view)
+        return h
+    }
+
+    private fun buildDefaultBar(): PanelBar.Handle = PanelBar.build(
+        ctx = reactContext,
+        style = PanelBar.Style.PAGE_HEADER,
+        left = listOf(PanelBar.IconBtn("icons/ic_arrow_left.xml") { doCancel() }),
+        right = listOf(PanelBar.OutlineBtn(NativeLocale.t("confirm")) { doConfirm() })
+    )
 
     private fun populateContent(root: FrameLayout) {
         val sess = session ?: return
@@ -253,20 +270,9 @@ class StitchPanel(
             }
         }
 
-        val bar = PanelBar.build(
-            ctx = reactContext,
-
-            style = PanelBar.Style.INBOX.copy(rightAlign = true),
-            left = listOf(PanelBar.TextBtn(NativeLocale.t("cancel")) { doCancel() }),
-            right = listOf(PanelBar.TextBtn(NativeLocale.t("confirm")) { doConfirm() })
-        )
-        val headerH = bar.heightPx
-        bar.view.layoutParams = FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT, headerH
-        ).apply { gravity = Gravity.TOP }
-        root.addView(bar.view)
-
         if (isGridMode && isLinearMode(sess)) {
+            val headerH = addBar(root, buildDefaultBar())
+
             val preComp = preCompositeStrip(sess)
             val lastBmp = bitmaps.lastOrNull()
             if (preComp != null && lastBmp != null) {
@@ -309,6 +315,7 @@ class StitchPanel(
                 root.addView(ctrl)
             }
         } else if (isGridMode) {
+            val headerH = addBar(root, buildDefaultBar())
             stripVirtualSession = null
 
             val gv = GridStitchView(reactContext, sess, bitmaps, headerH, ctrlH)
@@ -326,21 +333,51 @@ class StitchPanel(
             root.addView(ctrl)
         } else if (bitmaps.size >= 2 && bitmaps[0] != null && bitmaps[1] != null) {
             stripVirtualSession = null
+            val isHoriz = sess.params.direction == "horizontal"
+            val bar = PanelBar.build(
+                ctx = reactContext,
+                style = PanelBar.Style.PAGE_HEADER,
+                left = listOf(PanelBar.IconBtn("icons/ic_arrow_left.xml") { doCancel() }),
+                center = listOf(PanelBar.TabPair(
+                    NativeLocale.t("horizontal"), NativeLocale.t("vertical")
+                ) { tab ->
+                    val s = session ?: return@TabPair
+                    s.params.direction = if (tab == 0) "horizontal" else "vertical"
+                    s.params.overlap = (s.params.overlap * 0.5).toInt()
+                    applyOrientation(desiredOrientation())
+                    rebuildContent()
+                }),
+                right = listOf(
+                    PanelBar.IconBtn("icons/ic_swap.xml") {
+                        val s = session ?: return@IconBtn
+                        if (s.images.size >= 2) {
+                            val tmp = s.images[0]; s.images[0] = s.images[1]; s.images[1] = tmp
+                            val tmpBmp = bitmaps[0]; bitmaps[0] = bitmaps[1]; bitmaps[1] = tmpBmp
+                            stitchView?.swapBitmaps()
+                            rebuildStitchView()
+                        }
+                    },
+                    PanelBar.IconBtn("icons/ic_layers.xml") {
+                        val s = session ?: return@IconBtn
+                        s.params.topLayerIndex = if (s.params.topLayerIndex == 0) 1 else 0
+                        rebuildStitchView()
+                    },
+                    PanelBar.IconBtn("icons/ic_edit_confirm.xml") { doConfirm() }
+                )
+            )
+            if (!isHoriz) bar.setActiveTab(1)
+            val headerH = addBar(root, bar)
 
-            val sv = StitchView(reactContext, sess, bitmaps[0]!!, bitmaps[1]!!, headerH, ctrlH)
+            val sv = StitchView(reactContext, sess, bitmaps[0]!!, bitmaps[1]!!, headerH, 0)
             sv.layoutParams = FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT
-            ).apply { topMargin = headerH; bottomMargin = ctrlH }
+            ).apply { topMargin = headerH }
             root.addView(sv)
             stitchView = sv
-
-            val ctrl = buildControlPanel(sess, ctrlH)
-            ctrl.layoutParams = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT, ctrlH
-            ).apply { gravity = Gravity.BOTTOM }
-            root.addView(ctrl)
         } else {
+            val headerH = addBar(root, buildDefaultBar())
+
             val waitView = LinearLayout(reactContext).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER

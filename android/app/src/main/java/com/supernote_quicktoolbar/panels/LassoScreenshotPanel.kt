@@ -1,4 +1,5 @@
 package com.supernote_quicktoolbar.panels
+import com.supernote_quicktoolbar.BuildConfig
 import com.supernote_quicktoolbar.*
 import com.supernote_quicktoolbar.overlays.*
 import com.supernote_quicktoolbar.bubbles.*
@@ -60,14 +61,14 @@ class LassoScreenshotPanel(
         toolbarModule.enablePenBlock()
         thread(isDaemon = false) {
             val path = runScreencap() ?: run {
-                Log.e(tag, "screencap failed")
+                if (BuildConfig.ENABLE_DEBUG) Log.e(tag, "screencap failed")
                 handler.post { emitCloseAndRestore() }
                 return@thread
             }
             handler.post {
                 val bmp = BitmapFactory.decodeFile(path)
                 if (bmp == null) {
-                    Log.e(tag, "bitmap decode failed for $path")
+                    if (BuildConfig.ENABLE_DEBUG) Log.e(tag, "bitmap decode failed for $path")
                     emitCloseAndRestore()
                     return@post
                 }
@@ -89,7 +90,7 @@ class LassoScreenshotPanel(
             val f = File(outPath)
             if (exit == 0 && f.exists() && f.length() > 500) outPath else null
         } catch (e: Exception) {
-            Log.e(tag, "screencap EX: ${e.message}", e)
+            if (BuildConfig.ENABLE_DEBUG) Log.e(tag, "screencap EX: ${e.message}", e)
             null
         }
     }
@@ -287,7 +288,7 @@ class LassoScreenshotPanel(
             intArrayOf(minX.roundToInt(), minY.roundToInt(),
                        maxX.roundToInt(), maxY.roundToInt())
         } catch (e: Exception) {
-            Log.e(tag, "stageAndBroadcast failed: ${e.message}", e)
+            if (BuildConfig.ENABLE_DEBUG) Log.e(tag, "stageAndBroadcast failed: ${e.message}", e)
             null
         }
     }
@@ -315,7 +316,7 @@ class LassoScreenshotPanel(
             croppedBmp.recycle()
             outPath
         } catch (e: Exception) {
-            Log.e(tag, "cropToBoundingBox failed: ${e.message}", e)
+            if (BuildConfig.ENABLE_DEBUG) Log.e(tag, "cropToBoundingBox failed: ${e.message}", e)
             null
         }
     }

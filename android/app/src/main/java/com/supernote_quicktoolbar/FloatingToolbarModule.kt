@@ -34,6 +34,9 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
     override fun getName() = "FloatingToolbar"
 
+    override fun getConstants(): MutableMap<String, Any> =
+        mutableMapOf("ENABLE_DEBUG" to BuildConfig.ENABLE_DEBUG)
+
     companion object {
         private const val TAG = "FloatingToolbar"
 
@@ -60,6 +63,17 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         private var dockSide: String = "left"
         @Volatile @JvmStatic
         private var tools: MutableList<ToolItem> = mutableListOf()
+
+        private val LATCHING_ACTIONS: Set<String> = setOf(
+            "insert_text", "text_recv_nospacing", "text_recv_paragraph", "voice_transcribe"
+        )
+        private const val DEFAULT_TOOLS_JSON =
+            "[{\"id\":\"insert_image\",\"action\":\"insert_image\",\"icon\":\"Im\"}," +
+            "{\"id\":\"insert_doc_screenshot\",\"action\":\"insert_doc_screenshot\",\"icon\":\"Sc\"}," +
+            "{\"id\":\"insert_text\",\"action\":\"insert_text\",\"icon\":\"Tx\"}," +
+            "{\"id\":\"send_ai\",\"action\":\"lasso_smart_send\",\"icon\":\"AI\"}," +
+            "{\"id\":\"insert_link\",\"action\":\"insert_link\",\"icon\":\"Lk\"}," +
+            "{\"id\":\"voice_transcribe\",\"action\":\"voice_transcribe\",\"icon\":\"Vc\"}]"
 
         @JvmStatic
         private val activeModeIds: MutableSet<String> =
@@ -195,7 +209,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         try {
             ToolRegistry.init(this, reactApplicationContext)
         } catch (e: Exception) {
-            android.util.Log.e(TAG, "ToolRegistry.init failed: ${e.message}", e)
+            if (BuildConfig.ENABLE_DEBUG) android.util.Log.e(TAG, "ToolRegistry.init failed: ${e.message}", e)
         }
     }
 
@@ -212,10 +226,10 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
     private val longPressRunnable = Runnable {
         longPressTriggered = true
+        if (!BuildConfig.ENABLE_DEBUG) return@Runnable
         hideAllNativePanels()
-        pendingOpenMain = true
-        callShowPluginView()
-        emitEvent("onToolbarOpenMain", Arguments.createMap())
+        removeAll()
+        ConfigPanel.getInstance(reactApplicationContext, this).show()
     }
 
     private val BTN_SIZE_DP = 54
@@ -269,7 +283,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
                 stopForegroundMonitor()
                 startForegroundMonitor()
-            } catch (e: Exception) { Log.e(TAG, "show: ${e.message}", e) }
+            } catch (e: Exception) { if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "show: ${e.message}", e) }
             pendingShow = false
         }
     }
@@ -326,17 +340,34 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun hide() {
-        handler.post { try { removeAll() } catch (e: Exception) { Log.e(TAG, "hide: ${e.message}", e) } }
+        handler.post { try { removeAll() } catch (e: Exception) { if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "hide: ${e.message}", e) } }
     }
 
     @ReactMethod
-    fun updateTools(toolsJson: String) {
+    fun showCurrent() {
         handler.post {
-            parseTools(toolsJson)
-            if (!collapsed && expandedRoot != null) {
-                rebuildButtons()
-            }
+            try {
+                ensureToolsLoaded()
+                isPenLocked = false
+                collapsed = false
+                removeAll()
+                createExpandedToolbar()
+                stopForegroundMonitor()
+                startForegroundMonitor()
+            } catch (e: Exception) { if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "showCurrent: ${e.message}", e) }
         }
+    }
+    private fun ensureToolsLoaded() {
+        if (tools.isNotEmpty()) return
+        val prefs = reactApplicationContext.getSharedPreferences("quicktoolbar_presets", 0)
+        val json = prefs.getString("preset_1", null)
+        if (json != null) {
+            try {
+                val toolsArr = JSONObject(json).optJSONArray("tools")
+                if (toolsArr != null) parseTools(toolsArr.toString())
+            } catch (e: Exception) { if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "ensureToolsLoaded parse prefs: ${e.message}") }
+        }
+        if (tools.isEmpty()) parseTools(DEFAULT_TOOLS_JSON)
     }
 
     @ReactMethod
@@ -402,16 +433,16 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun ackPendingScreen() {
-        Log.i(TAG, "[LASSO-DBG/Kt] ackPendingScreen (was=$pendingScreen)")
+        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[LASSO-DBG/Kt] ackPendingScreen (was=$pendingScreen)")
         pendingScreen = ""
     }
 
     @ReactMethod
     fun openPluginView() {
         handler.post {
-            Log.i(TAG, "[LASSO-DBG/Kt] openPluginView called (pendingScreen=$pendingScreen)")
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[LASSO-DBG/Kt] openPluginView called (pendingScreen=$pendingScreen)")
             try { callShowPluginView() } catch (e: Exception) {
-                Log.e(TAG, "[LASSO-DBG/Kt] openPluginView FAIL: ${e.message}")
+                if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "[LASSO-DBG/Kt] openPluginView FAIL: ${e.message}")
             }
         }
     }
@@ -419,7 +450,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun openPenLockView() {
         handler.post {
-            Log.i(TAG, "openPenLockView: calling showPluginView(1)")
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "openPenLockView: calling showPluginView(1)")
             callShowPluginViewWithType(1)
         }
     }
@@ -427,7 +458,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun openPanel(screen: String) {
         handler.post {
-            Log.i(TAG, "[LASSO-DBG/Kt] openPanel screen=$screen (prev pendingScreen=$pendingScreen)")
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[LASSO-DBG/Kt] openPanel screen=$screen (prev pendingScreen=$pendingScreen)")
             hideAllNativePanels()
 
             if (screen == "nativeSendClipboard") {
@@ -442,20 +473,29 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 return@post
             }
 
+            if (screen == "config" || screen == "main") {
+                if (!BuildConfig.ENABLE_DEBUG) return@post
+                pendingScreen = ""
+                removeAll()
+                emitEvent("onNativePanelOpen", Arguments.createMap().apply { putString("panel", "config") })
+                ConfigPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show()
+                return@post
+            }
+
             pendingScreen = screen ?: ""
             removeAll()
 
             handler.postDelayed({
                 emitEvent("onToolbarOpenMain", Arguments.createMap())
             }, 80)
-            Log.i(TAG, "[LASSO-DBG/Kt] openPanel done, pendingScreen now=$pendingScreen")
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[LASSO-DBG/Kt] openPanel done, pendingScreen now=$pendingScreen")
         }
     }
 
     @ReactMethod
     fun forceClosePluginView() {
         handler.post {
-            Log.i(TAG, "[LASSO-DBG/Kt] forceClosePluginView called")
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[LASSO-DBG/Kt] forceClosePluginView called")
             insertPluginViewClosed = true
             callClosePluginView()
         }
@@ -470,7 +510,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     titleClipFilled[i] = arr.getBoolean(i)
                 }
                 rebuildClipIcons()
-            } catch (e: Exception) { Log.w(TAG, "updateTitleClips: ${e.message}") }
+            } catch (e: Exception) { if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "updateTitleClips: ${e.message}") }
         }
     }
 
@@ -481,7 +521,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             prefs.edit().putString("preset_$num", json).apply()
             promise.resolve(true)
         } catch (e: Exception) {
-            Log.e(TAG, "savePreset: ${e.message}")
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "savePreset: ${e.message}")
             promise.resolve(false)
         }
     }
@@ -493,7 +533,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             val json = prefs.getString("preset_$num", null)
             promise.resolve(json)
         } catch (e: Exception) {
-            Log.e(TAG, "loadPreset: ${e.message}")
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "loadPreset: ${e.message}")
             promise.resolve(null)
         }
     }
@@ -504,7 +544,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             val dir = java.io.File(reactApplicationContext.getExternalFilesDir(null), "stickers")
             promise.resolve(dir.absolutePath)
         } catch (e: Exception) {
-            Log.e(TAG, "getStickerDir: ${e.message}")
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "getStickerDir: ${e.message}")
             promise.resolve(null)
         }
     }
@@ -515,11 +555,11 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             val dir = java.io.File(reactApplicationContext.getExternalFilesDir(null), "stickers")
             if (!dir.exists()) {
                 val ok = dir.mkdirs()
-                Log.i(TAG, "ensureStickerDir: mkdirs=${ok} path=${dir.absolutePath}")
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "ensureStickerDir: mkdirs=${ok} path=${dir.absolutePath}")
             }
             promise.resolve(dir.absolutePath)
         } catch (e: Exception) {
-            Log.e(TAG, "ensureStickerDir: ${e.message}")
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "ensureStickerDir: ${e.message}")
             promise.resolve(null)
         }
     }
@@ -539,14 +579,14 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 DocScreenshotService.unmarkInsertNext(fileName)
                 if (f.exists()) {
                     val deleted = f.delete()
-                    Log.i(TAG, "[INSERT-DBG/Kt] deleteQueueFile: $path → deleted=$deleted")
+                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[INSERT-DBG/Kt] deleteQueueFile: $path → deleted=$deleted")
                     promise.resolve(deleted)
                 } else {
-                    Log.i(TAG, "[INSERT-DBG/Kt] deleteQueueFile: $path already gone")
+                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[INSERT-DBG/Kt] deleteQueueFile: $path already gone")
                     promise.resolve(false)
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "[INSERT-DBG/Kt] deleteQueueFile error: ${e.message}")
+                if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "[INSERT-DBG/Kt] deleteQueueFile error: ${e.message}")
                 promise.reject("DELETE_ERROR", e.message, e)
             }
         }
@@ -565,7 +605,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             reactApplicationContext.startActivity(intent)
             promise.resolve(true)
         } catch (e: Exception) {
-            Log.e(TAG, "launchActivity($pkg/$cls): ${e.message}", e)
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "launchActivity($pkg/$cls): ${e.message}", e)
             promise.reject("LAUNCH_ERROR", e.message, e)
         }
     }
@@ -579,7 +619,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 android.net.Uri.parse("package:${ctx.packageName}")
             ).apply { addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK) })
         } catch (e: Exception) {
-            Log.e(TAG, "requestOverlayPermission: ${e.message}", e)
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "requestOverlayPermission: ${e.message}", e)
             try {
                 reactApplicationContext.startActivity(android.content.Intent(
                     Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
@@ -594,29 +634,29 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         try {
             val catalyst = reactApplicationContext.catalystInstance
             val pm = catalyst.getNativeModule("NativePluginManager") ?: run {
-                Log.w(TAG, "[DUMP] NativePluginManager not found"); return
+                if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "[DUMP] NativePluginManager not found"); return
             }
             val clazz = pm::class.java
-            Log.i(TAG, "[DUMP] NativePluginManager class: ${clazz.name}")
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[DUMP] NativePluginManager class: ${clazz.name}")
             clazz.declaredMethods.sortedBy { it.name }.forEach { m ->
                 val params = m.parameterTypes.joinToString(", ") { it.simpleName }
-                Log.i(TAG, "[DUMP]   ${m.name}($params) -> ${m.returnType.simpleName}")
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[DUMP]   ${m.name}($params) -> ${m.returnType.simpleName}")
             }
-            Log.i(TAG, "[DUMP] --- inherited ---")
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[DUMP] --- inherited ---")
             clazz.methods
                 .filter { it.declaringClass != Object::class.java }
                 .sortedBy { it.name }
                 .forEach { m ->
                     val params = m.parameterTypes.joinToString(", ") { it.simpleName }
-                    Log.i(TAG, "[DUMP]   ${m.declaringClass.simpleName}.${m.name}($params)")
+                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[DUMP]   ${m.declaringClass.simpleName}.${m.name}($params)")
                 }
             clazz.declaredFields.forEach { f ->
                 f.isAccessible = true
                 val v = try { f.get(pm) } catch (_: Exception) { "?" }
-                Log.i(TAG, "[DUMP-FIELD] ${f.name}: ${f.type.simpleName} = ${v?.javaClass?.name ?: "null"}")
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[DUMP-FIELD] ${f.name}: ${f.type.simpleName} = ${v?.javaClass?.name ?: "null"}")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "[DUMP] error: ${e.message}", e)
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "[DUMP] error: ${e.message}", e)
         }
     }
 
@@ -625,52 +665,52 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         try {
             val catalyst = reactApplicationContext.catalystInstance
             val pm = catalyst.getNativeModule("NativePluginManager") ?: run {
-                Log.w(TAG, "[DUMP-PA] NativePluginManager not found"); return
+                if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "[DUMP-PA] NativePluginManager not found"); return
             }
 
             val paField = pm::class.java.declaredFields.firstOrNull { it.name == "pluginApp" } ?: run {
-                Log.w(TAG, "[DUMP-PA] pluginApp field not found"); return
+                if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "[DUMP-PA] pluginApp field not found"); return
             }
             paField.isAccessible = true
-            val pa = paField.get(pm) ?: run { Log.w(TAG, "[DUMP-PA] pluginApp is null"); return }
+            val pa = paField.get(pm) ?: run { if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "[DUMP-PA] pluginApp is null"); return }
 
-            Log.i(TAG, "[DUMP-PA] pluginApp class: ${pa::class.java.name}")
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[DUMP-PA] pluginApp class: ${pa::class.java.name}")
 
             pa::class.java.declaredMethods.sortedBy { it.name }.forEach { m ->
                 val params = m.parameterTypes.joinToString(", ") { it.simpleName }
-                Log.i(TAG, "[DUMP-PA]   method: ${m.name}($params) -> ${m.returnType.simpleName}")
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[DUMP-PA]   method: ${m.name}($params) -> ${m.returnType.simpleName}")
             }
             pa::class.java.methods
                 .filter { it.declaringClass != Object::class.java }
                 .sortedBy { it.name }
                 .forEach { m ->
                     val params = m.parameterTypes.joinToString(", ") { it.simpleName }
-                    Log.i(TAG, "[DUMP-PA]   inherited: ${m.declaringClass.simpleName}.${m.name}($params)")
+                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[DUMP-PA]   inherited: ${m.declaringClass.simpleName}.${m.name}($params)")
                 }
 
-            Log.i(TAG, "[DUMP-PA] --- fields ---")
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[DUMP-PA] --- fields ---")
             pa::class.java.declaredFields.forEach { f ->
                 f.isAccessible = true
                 val v = try { f.get(pa) } catch (_: Exception) { null }
                 val typeName = v?.javaClass?.name ?: f.type.name
-                Log.i(TAG, "[DUMP-PA]   field: ${f.name}: ${f.type.simpleName} = $typeName")
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[DUMP-PA]   field: ${f.name}: ${f.type.simpleName} = $typeName")
 
                 val interesting = listOf("hand", "write", "disable", "area", "draw", "paint", "spaint", "client", "presenter", "note")
                 if (v != null && interesting.any { kw ->
                         f.name.lowercase().contains(kw) || typeName.lowercase().contains(kw)
                     }) {
-                    Log.i(TAG, "[DUMP-PA]   >>> drilling into ${f.name} <<<")
+                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[DUMP-PA]   >>> drilling into ${f.name} <<<")
                     v::class.java.methods
                         .filter { it.declaringClass != Object::class.java }
                         .sortedBy { it.name }
                         .forEach { m ->
                             val params = m.parameterTypes.joinToString(", ") { it.simpleName }
-                            Log.i(TAG, "[DUMP-PA]     ${v::class.java.simpleName}.${m.name}($params)")
+                            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[DUMP-PA]     ${v::class.java.simpleName}.${m.name}($params)")
                         }
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "[DUMP-PA] error: ${e.message}", e)
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "[DUMP-PA] error: ${e.message}", e)
         }
     }
 
@@ -684,10 +724,10 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         val m = pm::class.java.methods.firstOrNull {
             it.name == "setFullAuto" && it.parameterCount == 1 && it.parameterTypes[0] == Boolean::class.java
         } ?: run {
-            Log.w(TAG, "callSetFullAuto: setFullAuto method not found"); return@withNativePluginManager
+            if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "callSetFullAuto: setFullAuto method not found"); return@withNativePluginManager
         }
         m.invoke(pm, enable)
-        Log.i(TAG, "callSetFullAuto($enable) called")
+        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "callSetFullAuto($enable) called")
     }
 
     @ReactMethod fun enablePenBlock() {
@@ -710,26 +750,26 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     private fun callPluginAppShowPluginView(showType: Int, label: String) {
         try {
             val pm = reactApplicationContext.catalystInstance.getNativeModule("NativePluginManager") ?: run {
-                Log.w(TAG, "$label: NativePluginManager not found"); return
+                if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "$label: NativePluginManager not found"); return
             }
             val paField = pm::class.java.declaredFields.firstOrNull { it.name == "pluginApp" } ?: run {
-                Log.w(TAG, "$label: pluginApp field not found"); return
+                if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "$label: pluginApp field not found"); return
             }
             paField.isAccessible = true
             val pa = paField.get(pm) ?: run {
-                Log.w(TAG, "$label: pluginApp is null"); return
+                if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "$label: pluginApp is null"); return
             }
             val showM = pa::class.java.methods.firstOrNull {
                 it.name == "showPluginView" && it.parameterCount == 1 &&
                 (it.parameterTypes[0] == Int::class.javaPrimitiveType ||
                  it.parameterTypes[0] == java.lang.Integer::class.java)
             } ?: run {
-                Log.w(TAG, "$label: PluginApp.showPluginView(int) not found"); return
+                if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "$label: PluginApp.showPluginView(int) not found"); return
             }
             showM.invoke(pa, showType)
-            Log.i(TAG, "$label: PluginApp.showPluginView($showType) called")
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "$label: PluginApp.showPluginView($showType) called")
         } catch (e: Exception) {
-            Log.e(TAG, "$label: ${e.message}", e)
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "$label: ${e.message}", e)
         }
     }
 
@@ -770,10 +810,10 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
         if (intArgMethod != null) {
             intArgMethod.invoke(pm, showType)
-            Log.i(TAG, "callShowPluginViewWithType($showType) called")
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "callShowPluginViewWithType($showType) called")
             return@withNativePluginManager
         }
-        Log.w(TAG, "callShowPluginViewWithType: int-arg variant not found, falling back to no-arg")
+        if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "callShowPluginViewWithType: int-arg variant not found, falling back to no-arg")
         callShowPluginView()
     }
 
@@ -782,11 +822,11 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             val methods = pm::class.java.methods.filter { it.name == name }
             if (methods.isEmpty()) continue
             val noArg = methods.firstOrNull { it.parameterCount == 0 }
-            if (noArg != null) { noArg.invoke(pm); Log.i(TAG, "$name() called"); return@withNativePluginManager }
+            if (noArg != null) { noArg.invoke(pm); if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "$name() called"); return@withNativePluginManager }
             val singleArg = methods.firstOrNull { it.parameterCount == 1 }
-            if (singleArg != null) { singleArg.invoke(pm, PromiseImpl(null, null)); Log.i(TAG, "$name(promise) called"); return@withNativePluginManager }
+            if (singleArg != null) { singleArg.invoke(pm, PromiseImpl(null, null)); if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "$name(promise) called"); return@withNativePluginManager }
         }
-        Log.w(TAG, "callClosePluginView: no suitable method found")
+        if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "callClosePluginView: no suitable method found")
     }
 
     private val autoCollapseRunnable = Runnable { switchToCollapsed() }
@@ -872,7 +912,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         val oldW = screenWidth; val oldH = screenHeight
         refreshScreenDimensions()
         if (oldW == screenWidth && oldH == screenHeight) return
-        Log.i(TAG, "orientation changed: ${oldW}x${oldH} → ${screenWidth}x${screenHeight}")
+        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "orientation changed: ${oldW}x${oldH} → ${screenWidth}x${screenHeight}")
 
         val hadPanelOpen = ToolRegistry.handleRotation()
 
@@ -899,6 +939,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
         FloatingBubbleModule.handleOrientationChange()
         AiBubbleModule.handleOrientationChange()
+        PaletteBubbleModule.handleOrientationChange()
     }
 
     private fun createCollapsedHandle() {
@@ -992,7 +1033,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
         rootView = collapsedRoot
         windowManager?.addView(rootView, layoutParams)
-        Log.i(TAG, "collapsed handle shown, side=$dockSide")
+        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "collapsed handle shown, side=$dockSide")
     }
 
     private fun createExpandedToolbar() {
@@ -1448,12 +1489,12 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         rootView = expandedRoot
         try {
             windowManager?.addView(rootView, layoutParams)
-            Log.i(TAG, "expanded toolbar shown (2-row horizontal), ${tools.size} tools")
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "expanded toolbar shown (2-row horizontal), ${tools.size} tools")
 
             startForegroundMonitor()
         } catch (e: Exception) {
 
-            Log.w(TAG, "addView failed (${e.message}), retrying in 500ms")
+            if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "addView failed (${e.message}), retrying in 500ms")
             rootView = null
             expandedRoot = null; toolContainer = null; layoutParams = null
             handler.postDelayed({ createExpandedToolbar() }, 500)
@@ -1521,7 +1562,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             }
             android.graphics.drawable.BitmapDrawable(reactApplicationContext.resources, bmp)
         } catch (e: Exception) {
-            Log.w(TAG, "loadIconFromAssets $assetName failed: ${e.message}")
+            if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "loadIconFromAssets $assetName failed: ${e.message}")
             null
         }
     }
@@ -1538,13 +1579,15 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         val n = tools.size
 
         fun makeToolButton(idx: Int, tool: ToolItem): View {
-            val isActive = tool.latches && activeModeIds.contains(tool.id)
+
+            val isActive = (tool.latches && activeModeIds.contains(tool.id)) ||
+                activeModeIds.contains(tool.action)
             val activeBg = CLR_BTN_ACT
             val inactiveFg = CLR_BTN_FG
 
             val iconDrawable = loadIconFromAssets(tool.id, btnSz, if (isActive) android.graphics.Color.WHITE else inactiveFg)
             if (idx == 0) {
-                Log.i(TAG, "iconLookup: tool=${tool.id} loaded=${iconDrawable != null}")
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "iconLookup: tool=${tool.id} loaded=${iconDrawable != null}")
             }
 
             val view: View = if (iconDrawable != null) {
@@ -1582,6 +1625,11 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     openDocScreenshotPanel()
                 } else if (tool.action == "lasso_smart_send") {
                     handleSendLongPress()
+                } else if (tool.action == "invert_ink") {
+                    emitEvent("onToolLongPress", Arguments.createMap().apply {
+                        putString("toolId", tool.id); putString("toolName", tool.name)
+                        putString("toolAction", tool.action)
+                    })
                 } else {
                     emitEvent("onToolLongPress", Arguments.createMap().apply {
                         putString("toolId", tool.id); putString("toolName", tool.name)
@@ -1685,6 +1733,11 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             flashCell(view)
         }
 
+        if (tool.action == "invert_ink") {
+            PaletteBubbleModule.toggleStatic()
+            return
+        }
+
         val isNativePanel = tool.action == "lasso_send"
 
         if (isNativePanel) {
@@ -1737,10 +1790,9 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun exitActiveMode() {
-
-        if (activeModeIds.isEmpty()) return
-        activeModeIds.clear()
         UiThreadUtil.runOnUiThread { rebuildButtons() }
+        val changed = activeModeIds.removeAll(LATCHING_ACTIONS)
+        if (changed) UiThreadUtil.runOnUiThread { rebuildButtons() }
     }
 
     @ReactMethod
@@ -1755,12 +1807,24 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         try {
             val arr = org.json.JSONArray(json)
             synchronized(activeModeIds) {
+
+                val keepPalette = activeModeIds.contains("invert_ink")
                 activeModeIds.clear()
                 for (i in 0 until arr.length()) activeModeIds.add(arr.getString(i))
+                if (keepPalette) activeModeIds.add("invert_ink")
             }
             UiThreadUtil.runOnUiThread { rebuildButtons() }
         } catch (e: Exception) {
-            Log.w(TAG, "setActiveModes: ${e.message}")
+            if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "setActiveModes: ${e.message}")
+        }
+    }
+
+    fun setToolActive(toolId: String, active: Boolean) {
+        val changed = if (active) activeModeIds.add(toolId) else activeModeIds.remove(toolId)
+        if (changed) {
+            UiThreadUtil.runOnUiThread {
+                if (!collapsed && toolContainer != null) rebuildButtons()
+            }
         }
     }
 
@@ -1775,7 +1839,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             activeModeIds.clear()
 
             pendingScreen = ""
-            Log.i(TAG, "closeAllForSettings: all overlays cleared")
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "closeAllForSettings: all overlays cleared")
         }
     }
 
@@ -1785,15 +1849,16 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             val arr = JSONArray(json)
             for (i in 0 until arr.length()) {
                 val o = arr.getJSONObject(i)
+                val action = o.optString("action", "")
                 tools.add(ToolItem(
                     o.getString("id"),
                     o.optString("name",""),
                     o.optString("icon","?"),
-                    o.optString("action",""),
-                    o.optBoolean("latches", false)
+                    action,
+                    action in LATCHING_ACTIONS
                 ))
             }
-        } catch (e: Exception) { Log.e(TAG, "parseTools: ${e.message}") }
+        } catch (e: Exception) { if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "parseTools: ${e.message}") }
     }
 
     private fun removeAll() {
@@ -1857,11 +1922,11 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     private inline fun withNativePluginManager(label: String, block: (Any) -> Unit) {
         try {
             val pm = reactApplicationContext.catalystInstance.getNativeModule("NativePluginManager") ?: run {
-                Log.w(TAG, "$label: NativePluginManager not found"); return
+                if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "$label: NativePluginManager not found"); return
             }
             block(pm)
         } catch (e: Exception) {
-            Log.e(TAG, "$label: ${e.message}", e)
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "$label: ${e.message}", e)
         }
     }
 
@@ -1869,23 +1934,23 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         try {
             reactApplicationContext.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
                 .emit(name, params)
-        } catch (e: Exception) { Log.w(TAG, "emitEvent($name): ${e.message}") }
+        } catch (e: Exception) { if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "emitEvent($name): ${e.message}") }
     }
 
     override fun onCatalystInstanceDestroy() {
-        Log.i(TAG, "onCatalystInstanceDestroy — keeping toolbar alive (rootView=${rootView != null})")
+        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "onCatalystInstanceDestroy — keeping toolbar alive (rootView=${rootView != null})")
         super.onCatalystInstanceDestroy()
     }
 
     fun requestInsertImage(path: String) {
-        Log.i(TAG, "[INSERT-DBG/Kt] requestInsertImage: $path (currentInstance=${currentInstance === this})")
+        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[INSERT-DBG/Kt] requestInsertImage: $path (currentInstance=${currentInstance === this})")
         insertPluginViewClosed = false
 
         handler.post {
             val retryDelays = longArrayOf(0, 300, 750)
             for (delay in retryDelays) {
                 handler.postDelayed({
-                    Log.i(TAG, "[INSERT-DBG/Kt] emit nativeInsertImage (delay=${delay}ms)")
+                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[INSERT-DBG/Kt] emit nativeInsertImage (delay=${delay}ms)")
                     emitEvent("nativeInsertImage", Arguments.createMap().apply {
                         putString("path", path)
                         if (insertNextChainActive) putBoolean("fromInsertNext", true)
@@ -1893,7 +1958,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 }, delay)
             }
             handler.postDelayed({
-                Log.i(TAG, "[INSERT-DBG/Kt] safety-net: restoreToolbar (tools=${tools.size})")
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[INSERT-DBG/Kt] safety-net: restoreToolbar (tools=${tools.size})")
                 insertNextChainActive = false
                 restoreToolbar()
 
@@ -1906,7 +1971,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun restoreToolbar() {
         handler.post {
-            Log.i(TAG, "[INSERT-DBG/Kt] restoreToolbar: tools=${tools.size} currentInstance=${currentInstance === this} rootView=${rootView != null}")
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[INSERT-DBG/Kt] restoreToolbar: tools=${tools.size} currentInstance=${currentInstance === this} rootView=${rootView != null}")
             if (tools.isNotEmpty()) {
                 isPenLocked = false
                 collapsed = false
@@ -1914,7 +1979,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 try {
                     createExpandedToolbar()
                 } catch (e: Exception) {
-                    Log.e(TAG, "[INSERT-DBG/Kt] restoreToolbar createExpandedToolbar FAILED: ${e.message}", e)
+                    if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "[INSERT-DBG/Kt] restoreToolbar createExpandedToolbar FAILED: ${e.message}", e)
                 }
             }
         }
@@ -1963,7 +2028,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             if (queue.isEmpty()) return null
             val json = org.json.JSONArray(queue).toString()
             queue.clear()
-            Log.i(TAG, "[QUEUE-DBG] drainImageQueue: drained $json")
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[QUEUE-DBG] drainImageQueue: drained $json")
             return json
         }
     }
@@ -1975,7 +2040,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             if (queue.isEmpty()) return null
             val json = org.json.JSONArray(queue).toString()
             queue.clear()
-            Log.i(TAG, "[QUEUE-DBG] drainDocLinkQueue: drained $json")
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[QUEUE-DBG] drainDocLinkQueue: drained $json")
             return json
         }
     }
@@ -1999,9 +2064,18 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
+    fun showPalettePanel(infoJson: String) {
+        handler.post {
+            removeAll()
+            emitEvent("onNativePanelOpen", Arguments.createMap().apply { putString("panel", "palette") })
+            PalettePanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show(infoJson)
+        }
+    }
+
+    @ReactMethod
     fun handleDocScreenshotCrop() {
         handler.post {
-            Log.i(TAG, "[CROP-DBG/Kt] handleDocScreenshotCrop: starting screencap")
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[CROP-DBG/Kt] handleDocScreenshotCrop: starting screencap")
             removeAll()
             val cacheDir = reactApplicationContext.cacheDir.absolutePath
             kotlin.concurrent.thread(isDaemon = false) {
@@ -2011,9 +2085,9 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     val process = Runtime.getRuntime().exec(arrayOf("screencap", "-p", outPath))
                     val exitCode = process.waitFor()
                     val file = java.io.File(outPath)
-                    Log.i(TAG, "[CROP-DBG/Kt] screencap exit=$exitCode size=${file.length()}")
+                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[CROP-DBG/Kt] screencap exit=$exitCode size=${file.length()}")
                     if (exitCode != 0 || !file.exists() || file.length() <= 500) {
-                        Log.e(TAG, "[CROP-DBG/Kt] screencap failed")
+                        if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "[CROP-DBG/Kt] screencap failed")
                         return@thread
                     }
                     val dims = DocScreenshotService.getImageDimensions(outPath)
@@ -2025,7 +2099,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                         val updated = DocScreenshotService.addImage(outPath, imgW, imgH)
                         if (updated != null && updated.images.size >= 2) {
                             handler.post {
-                                callClosePluginView()
                                 openStitchPanel(updated)
                             }
                             return@thread
@@ -2033,11 +2106,10 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     }
 
                     handler.post {
-                        callClosePluginView()
                         openCropPanelForDoc(outPath, imgW, imgH)
                     }
                 } catch (e: Exception) {
-                    Log.e(TAG, "[CROP-DBG/Kt] screencap error: ${e.message}", e)
+                    if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "[CROP-DBG/Kt] screencap error: ${e.message}", e)
                 }
             }
         }
@@ -2057,7 +2129,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 path = screenshotPath,
                 hasStitchSession = hasStitch,
                 onConfirm = { crop, stayOpen ->
-                    Log.i(TAG, "[CROP-DBG/Kt] crop confirm (insertNext): ${crop.width}x${crop.height} multi=$stayOpen")
+                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[CROP-DBG/Kt] crop confirm (insertNext): ${crop.width}x${crop.height} multi=$stayOpen")
                     kotlin.concurrent.thread(isDaemon = true) {
                         DocScreenshotService.stageToQueue(screenshotPath, crop, insertNext = true)
                         if (fromStitch) DocScreenshotService.clearSession()
@@ -2066,9 +2138,9 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 },
                 onLongScreenshot = {
                     if (fromStitch) {
-                        Log.i(TAG, "[CROP-DBG/Kt] long screenshot: session kept, returning to capture")
+                        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[CROP-DBG/Kt] long screenshot: session kept, returning to capture")
                     } else {
-                        Log.i(TAG, "[CROP-DBG/Kt] long screenshot: saving to stitch session")
+                        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[CROP-DBG/Kt] long screenshot: saving to stitch session")
                         kotlin.concurrent.thread(isDaemon = true) {
                             val existing = DocScreenshotService.loadSession()
                             if (existing != null) {
@@ -2082,7 +2154,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     restoreAfterCropFlow()
                 },
                 onAddToHistory = { crop, stayOpen ->
-                    Log.i(TAG, "[CROP-DBG/Kt] add to history: ${crop.width}x${crop.height} multi=$stayOpen")
+                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[CROP-DBG/Kt] add to history: ${crop.width}x${crop.height} multi=$stayOpen")
                     kotlin.concurrent.thread(isDaemon = true) {
                         DocScreenshotService.saveToHistory(screenshotPath, crop)
                         if (fromStitch) DocScreenshotService.clearSession()
@@ -2090,11 +2162,11 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     if (!stayOpen) restoreAfterCropFlow()
                 },
                 onScreenshotToNote = { crop ->
-                    Log.i(TAG, "[CROP-DBG/Kt] screenshot→note: ${crop.width}x${crop.height} path=$screenshotPath")
+                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[CROP-DBG/Kt] screenshot→note: ${crop.width}x${crop.height} path=$screenshotPath")
                     CropPanel.currentInstance?.hide()
                     kotlin.concurrent.thread(isDaemon = true) {
                         val result = DocScreenshotService.stageToQueue(screenshotPath, crop, insertNext = true)
-                        Log.i(TAG, "[CROP-DBG/Kt] screenshot→note stageToQueue result=$result")
+                        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[CROP-DBG/Kt] screenshot→note stageToQueue result=$result")
                         if (fromStitch) DocScreenshotService.clearSession()
                         handler.post {
                             ScreenshotBubble.reshowIfPending()
@@ -2105,7 +2177,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     }
                 },
                 onCancel = {
-                    Log.i(TAG, "[CROP-DBG/Kt] crop cancel")
+                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[CROP-DBG/Kt] crop cancel")
                     if (fromStitch) kotlin.concurrent.thread(isDaemon = true) { DocScreenshotService.clearSession() }
                     restoreAfterCropFlow()
                 }
@@ -2120,7 +2192,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             }
             reactApplicationContext.startActivity(intent)
         } catch (e: Exception) {
-            Log.e(TAG, "returnToNoteApp failed: ${e.message}", e)
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "returnToNoteApp failed: ${e.message}", e)
         }
     }
 
@@ -2129,7 +2201,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             .show(
                 session = session,
                 onConfirm = { finalSession ->
-                    Log.i(TAG, "[CROP-DBG/Kt] stitch confirm: compositing ${finalSession.images.size} images...")
+                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[CROP-DBG/Kt] stitch confirm: compositing ${finalSession.images.size} images...")
                     kotlin.concurrent.thread(isDaemon = false) {
                         try {
                             val nativeParams = org.json.JSONObject().apply {
@@ -2165,17 +2237,17 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                                     openCropPanelForDoc(compositePath, compW, compH, fromStitch = true)
                                 }
                             } else {
-                                Log.e(TAG, "[CROP-DBG/Kt] composite returned null")
+                                if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "[CROP-DBG/Kt] composite returned null")
                                 handler.post { StitchPanel.currentInstance?.hide(); restoreAfterCropFlow() }
                             }
                         } catch (e: Exception) {
-                            Log.e(TAG, "[CROP-DBG/Kt] composite error: ${e.message}", e)
+                            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "[CROP-DBG/Kt] composite error: ${e.message}", e)
                             handler.post { StitchPanel.currentInstance?.hide(); restoreAfterCropFlow() }
                         }
                     }
                 },
                 onCancel = {
-                    Log.i(TAG, "[CROP-DBG/Kt] stitch cancel: clearing session")
+                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[CROP-DBG/Kt] stitch cancel: clearing session")
                     kotlin.concurrent.thread(isDaemon = true) {
                         DocScreenshotService.clearSession()
                     }
@@ -2364,19 +2436,18 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 handler.post {
                     if (nextFile != null) {
                         val path = nextFile.absolutePath
-                        Log.i(TAG, "[INSERT-DBG/Kt] handleDocScreenshot: insertNext=$path")
+                        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[INSERT-DBG/Kt] handleDocScreenshot: insertNext=$path")
                         insertNextChainActive = true
                         kotlin.concurrent.thread(isDaemon = true) {
                             ImagePanel.saveToInsertCacheStatic(path, lastNotePath, lastPageNum)
                         }
                         handler.postDelayed({
                             try { requestInsertImage(path) }
-                            catch (e: Exception) { Log.e(TAG, "requestInsertImage failed: ${e.message}"); insertNextChainActive = false; restoreToolbar() }
+                            catch (e: Exception) { if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "requestInsertImage failed: ${e.message}"); insertNextChainActive = false; restoreToolbar() }
                         }, 500)
                     } else {
                         insertNextChainActive = false
-                        Log.i(TAG, "[INSERT-DBG/Kt] handleDocScreenshot: no insertNext, opening panel")
-                        callClosePluginView()
+                        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[INSERT-DBG/Kt] handleDocScreenshot: no insertNext, opening panel")
                         emitEvent("onNativePanelOpen", Arguments.createMap().apply { putString("panel", "screenshot") })
                         DocScreenshotPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show("queue")
                     }
@@ -2396,11 +2467,17 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     private fun handleSendLongPress() {
         handler.post {
             if (!isWifiConnected()) {
-                emitEvent("showTip", Arguments.createMap().apply { putString("key", "no_wifi") })
+                com.supernote_quicktoolbar.ui_common.Dialog.tip(
+                    reactApplicationContext, NativeLocale.t("no_wifi"))
                 return@post
             }
             if (!LocalSendModule.staticIsRunning) {
-                emitEvent("showConfirmStartLocalSend", Arguments.createMap())
+                com.supernote_quicktoolbar.ui_common.Dialog.confirm(
+                    reactApplicationContext, NativeLocale.t("localsend_ask_enable")
+                ) {
+                    emitEvent("startLocalSendFromNative",
+                        Arguments.createMap().apply { putBoolean("openClipboardSync", true) })
+                }
                 return@post
             }
             openSendPanelClipboardSync()
@@ -2410,9 +2487,8 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun openSendPanelClipboardSync() {
         handler.post {
-            Log.i(TAG, "openSendPanelClipboardSync")
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "openSendPanelClipboardSync")
             removeAll()
-            callClosePluginView()
             emitEvent("onNativePanelOpen", Arguments.createMap().apply { putString("panel", "send") })
             SendPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show(syncClipboard = true)
         }
@@ -2421,7 +2497,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     fun openDocScreenshotPanel() {
         handler.post {
             removeAll()
-            callClosePluginView()
             emitEvent("onNativePanelOpen", Arguments.createMap().apply { putString("panel", "screenshot") })
             DocScreenshotPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show("queue")
         }
@@ -2438,7 +2513,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun showSendPanelFromBubble() {
         handler.post {
-            Log.i(TAG, "showSendPanelFromBubble")
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "showSendPanelFromBubble")
             pendingScreen = "nativeSendHelper"
             emitEvent("onNativePanelOpen", Arguments.createMap().apply { putString("panel", "send") })
             SendPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show(fromBubble = true)
@@ -2452,7 +2527,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun showLassoScreenshotPanelFromBubble() {
         handler.post {
-            Log.i(TAG, "showLassoScreenshotPanelFromBubble")
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "showLassoScreenshotPanelFromBubble")
             removeAll()
             FloatingBubbleModule.hideStatic()
             AiBubbleModule.hideStatic()
@@ -2465,7 +2540,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun showLassoScreenshotPanelForSendFromBubble() {
         handler.post {
-            Log.i(TAG, "showLassoScreenshotPanelForSendFromBubble")
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "showLassoScreenshotPanelForSendFromBubble")
             removeAll()
             FloatingBubbleModule.hideStatic()
             AiBubbleModule.hideStatic()
@@ -2511,7 +2586,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
     fun destroyAll() {
         handler.post {
-            Log.i(TAG, "destroyAll: removing all overlays + closing plugin")
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "destroyAll: removing all overlays + closing plugin")
 
             emitEvent("onToolbarDestroyAll", Arguments.createMap())
 
@@ -2519,6 +2594,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             pendingScreen = ""
             pendingOpenMain = false
             activeModeIds.clear()
+            tools.clear()
 
             removeAll()
 
@@ -2527,7 +2603,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             ScreenshotBubble.hide()
 
             callClosePluginView()
-            Log.i(TAG, "destroyAll: done")
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "destroyAll: done")
         }
     }
 
@@ -2569,9 +2645,11 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 null
             }
             tv.setOnClickListener {
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[CLIP-DBG] onTitleClipTap slot=$slot filled=$filled")
                 emitEvent("onTitleClipTap", Arguments.createMap().apply { putString("slot", slot.toString()) })
             }
             tv.setOnLongClickListener {
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[CLIP-DBG] onTitleClipLongPress slot=$slot")
                 emitEvent("onTitleClipLongPress", Arguments.createMap().apply { putString("slot", slot.toString()) })
                 true
             }
@@ -2591,12 +2669,12 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
         if (fgPkg == SETTINGS_PACKAGE) {
             if (ScreenshotBubble.isShowing) {
-                Log.i(TAG, "foreground monitor: in ratta settings, hiding ScreenshotBubble")
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "foreground monitor: in ratta settings, hiding ScreenshotBubble")
                 monitorHandler.post { ScreenshotBubble.hideForSettings() }
             }
         } else if (ScreenshotBubble.hiddenBySettings) {
 
-            Log.i(TAG, "foreground monitor: left ratta settings, restoring ScreenshotBubble")
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "foreground monitor: left ratta settings, restoring ScreenshotBubble")
             monitorHandler.post { ScreenshotBubble.reshowIfHiddenBySettings() }
         }
 
@@ -2604,17 +2682,17 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         if (inNote != isInNoteApp) {
             isInNoteApp = inNote
             if (!inNote) {
-                Log.i(TAG, "foreground monitor: left note app, hiding overlays")
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "foreground monitor: left note app, hiding overlays")
                 wasVisibleBeforeBackground = rootView != null
                 monitorHandler.post {
                     removeAll()
                     suspendAllNativePanels()
                     FloatingBubbleModule.hideStatic()
                     AiBubbleModule.hideStatic()
-
+                    PaletteBubbleModule.hideStatic()
                 }
             } else {
-                Log.i(TAG, "foreground monitor: returned to note app")
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "foreground monitor: returned to note app")
                 monitorHandler.post {
                     resumeAllNativePanels()
                     val anyPanelOpen = ImagePanel.currentInstance != null
@@ -2629,6 +2707,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                         }
                         FloatingBubbleModule.reshowLast(reactApplicationContext)
                         AiBubbleModule.reshowLast(reactApplicationContext)
+                        PaletteBubbleModule.reshowLast(reactApplicationContext)
                     }
                 }
             }
@@ -2642,7 +2721,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
         monitorHandler.removeCallbacks(staticMonitorRunnable)
         monitorHandler.postDelayed(staticMonitorRunnable, MONITOR_INTERVAL_MS)
-        Log.i(TAG, "foreground monitor started")
+        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "foreground monitor started")
     }
 
     fun stopForegroundMonitor() {
@@ -2661,24 +2740,20 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 for (line in lines) {
                     if ("mResumedActivity" in line) {
                         matched = resumedActivityRegex.find(line)
-                        break
                     }
                 }
             }
             proc.waitFor()
             if (matched != null) {
                 val pkg = matched!!.groupValues[1]
-                val cls = matched!!.groupValues[2].let {
-                    if (it.startsWith(".")) pkg + it else it
-                }
-                Log.d(TAG, "foreground: $pkg/$cls")
+                if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "foreground: $pkg")
                 pkg
             } else {
-                Log.w(TAG, "foregroundPackage: no mResumedActivity found")
+                if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "foregroundPackage: no mResumedActivity found")
                 null
             }
         } catch (e: Exception) {
-            Log.w(TAG, "foregroundPackage: ${e.message}")
+            if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "foregroundPackage: ${e.message}")
             null
         }
     }
@@ -2713,7 +2788,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     )
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "showPenLassoOverlay failed: ${e.message}", e)
+                if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "showPenLassoOverlay failed: ${e.message}", e)
                 emitEvent("onPenLassoCancel", Arguments.createMap())
             }
         }
@@ -2758,7 +2833,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     )
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "showStrokeEraserOverlay failed: ${e.message}", e)
+                if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "showStrokeEraserOverlay failed: ${e.message}", e)
                 emitEvent("onStrokeEraserCancel", Arguments.createMap())
             }
         }
@@ -2792,7 +2867,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         insertTimerInterval = ms.toLong().coerceAtLeast(100L)
         insertTimerRunning = true
         handler.postDelayed(insertTimerRunnable, insertTimerInterval)
-        Log.i(TAG, "startInsertTimer intervalMs=$insertTimerInterval")
+        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "startInsertTimer intervalMs=$insertTimerInterval")
     }
 
     @ReactMethod

@@ -1,4 +1,5 @@
 package com.supernote_quicktoolbar.panels
+import com.supernote_quicktoolbar.BuildConfig
 import com.supernote_quicktoolbar.*
 import com.supernote_quicktoolbar.overlays.*
 import com.supernote_quicktoolbar.bubbles.*
@@ -11,6 +12,8 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.os.FileObserver
+import android.os.Handler
+import android.os.Looper
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.util.Log
@@ -23,8 +26,8 @@ import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.modules.core.DeviceEventManagerModule
 import com.supernote_quicktoolbar.ui_common.PanelBase
-import com.supernote_quicktoolbar.ui_common.PanelHeader
 import com.supernote_quicktoolbar.ui_common.PanelScrollHost
+import com.supernote_quicktoolbar.ui_common.PanelWidgets
 import java.io.*
 import java.net.*
 import java.security.*
@@ -143,74 +146,86 @@ class SendPanel(
     }
 
     override fun buildContent(root: LinearLayout) {
-        root.addView(PanelHeader.create(reactContext, NativeLocale.t("send_title")))
+        renderDsl(root) {
+            header(NativeLocale.t("send_title"))
 
-        val statusBar = LinearLayout(reactContext).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(12), dp(16), dp(12))
-        }
-        statusTextView = TextView(reactContext).apply {
-            text = NativeLocale.t("extracting")
-            textSize = sp(13f); setTextColor(Color.parseColor("#666666"))
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-        }
-        previewTextView = TextView(reactContext).apply {
-            textSize = sp(12f); setTextColor(Color.parseColor("#999999"))
-            maxLines = 3; visibility = View.GONE
-            setPadding(0, dp(6), 0, 0)
-            setLineSpacing(dp(2).toFloat(), 1f)
-        }
-        statusBar.addView(statusTextView)
-        statusBar.addView(previewTextView)
-        statusBar.addView(View(reactContext).apply {
-            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1)).apply {
-                topMargin = dp(12)
+            custom { host ->
+                LinearLayout(host.ctx).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(host.dp(16), host.dp(12), host.dp(16), host.dp(12))
+                    statusTextView = TextView(host.ctx).apply {
+                        text = NativeLocale.t("extracting")
+                        textSize = host.sp(13f); setTextColor(Color.parseColor("#666666"))
+                        typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                    }
+                    previewTextView = TextView(host.ctx).apply {
+                        textSize = host.sp(12f); setTextColor(Color.parseColor("#999999"))
+                        maxLines = 3; visibility = View.GONE
+                        setPadding(0, host.dp(6), 0, 0)
+                        setLineSpacing(host.dp(2).toFloat(), 1f)
+                    }
+                    addView(statusTextView)
+                    addView(previewTextView)
+                    addView(View(host.ctx).apply {
+                        layoutParams = LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.MATCH_PARENT, host.dp(1)
+                        ).apply { topMargin = host.dp(12) }
+                        setBackgroundColor(Color.parseColor("#D8D8D8"))
+                    })
+                }
             }
-            setBackgroundColor(Color.parseColor("#D8D8D8"))
-        })
-        root.addView(statusBar)
 
-        scrollHost = PanelScrollHost(reactContext, overlayScrollbar = true)
-        peerContainer = scrollHost!!.content.apply {
-            setPadding(dp(5), dp(5), dp(5), dp(5))
-        }
-        root.addView(scrollHost!!.view)
-        refreshPeerList()
+            custom { host ->
+                val sh = PanelScrollHost(host.ctx, overlayScrollbar = true)
+                scrollHost = sh
+                peerContainer = sh.content.apply {
+                    setPadding(host.dp(5), host.dp(5), host.dp(5), host.dp(5))
+                }
+                refreshPeerList()
+                sh.view
+            }
 
-        root.addView(createBottomBar())
-    }
+            custom { host ->
+                fileButtonsContainer = LinearLayout(host.ctx).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                }
+                val fileScroll = HorizontalScrollView(host.ctx).apply {
+                    isHorizontalScrollBarEnabled = false
+                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                    addView(fileButtonsContainer)
+                }
 
-    private fun createBottomBar(): LinearLayout {
+                val rescanBtn = PanelWidgets.outlinedButton(host, NativeLocale.t("rescan")) {
+                    statusTextView?.text = NativeLocale.t("peers_scanning")
+                    selectedPeer = null
+                    refreshPeerList()
+                    thread(isDaemon = true) {
+                        LocalSendModule.triggerScan()
+                        android.os.Handler(android.os.Looper.getMainLooper()).post { refreshPeerList() }
+                    }
+                }
+                cancelBtn = PanelWidgets.outlinedButton(host, NativeLocale.t("cancel")) { closeAndRestore() }
+                sendTextBtn = PanelWidgets.filledButton(host,
+                    if (clipboardSyncMode) NativeLocale.t("sync_clipboard_btn") else NativeLocale.t("send_text_btn")
+                ) { if (clipboardSyncMode) handleSyncClipboard() else handleSendText() }
+                updateSendBtnState()
 
-        fileButtonsContainer = LinearLayout(reactContext).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        val fileScroll = HorizontalScrollView(reactContext).apply {
-            isHorizontalScrollBarEnabled = false
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-            addView(fileButtonsContainer)
-        }
-
-        val rescanBtn = makeOutlinedBtn(NativeLocale.t("rescan")) {
-            statusTextView?.text = NativeLocale.t("peers_scanning")
-            selectedPeer = null
-            refreshPeerList()
-            thread(isDaemon = true) {
-                LocalSendModule.triggerScan()
-                android.os.Handler(android.os.Looper.getMainLooper()).post { refreshPeerList() }
+                val wrapper = LinearLayout(host.ctx).apply { orientation = LinearLayout.VERTICAL }
+                wrapper.addView(PanelWidgets.divider(host))
+                val bar = LinearLayout(host.ctx).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(host.dp(28), host.dp(28), host.dp(28), host.dp(28))
+                }
+                bar.addView(fileScroll)
+                bar.addView(rescanBtn)
+                bar.addView(cancelBtn!!)
+                bar.addView(sendTextBtn!!)
+                wrapper.addView(bar)
+                wrapper
             }
         }
-        cancelBtn = makeOutlinedBtn(NativeLocale.t("cancel")) { closeAndRestore() }
-        sendTextBtn = makeFilledBtn(
-            if (clipboardSyncMode) NativeLocale.t("sync_clipboard_btn") else NativeLocale.t("send_text_btn")
-        ) { if (clipboardSyncMode) handleSyncClipboard() else handleSendText() }
-        updateSendBtnState()
-
-        return makeBottomBar(
-            leftFlex = fileScroll,
-            rightButtons = listOf(rescanBtn, cancelBtn!!, sendTextBtn!!)
-        )
     }
 
     private fun refreshPeerList() {
@@ -388,31 +403,36 @@ class SendPanel(
     private fun packageClipboard(): String? {
         val prefs = reactContext.getSharedPreferences("quicktoolbar_presets", 0)
         val clipsJson = prefs.getString("preset_99", null) ?: return null
+        if (BuildConfig.ENABLE_DEBUG) Log.i(tag, "[SYNC-DBG] packageClipboard raw preset_99: $clipsJson")
         val clips = JSONObject(clipsJson)
-        val stickerDir = "/sdcard/MyStyle/Sticker"
-        var hasAny = false
+
+        val filteredClips = JSONObject()
         val keys = clips.keys()
         while (keys.hasNext()) {
             val slot = keys.next()
+            val rawVal = clips.opt(slot)
             val path = clips.optString(slot, "")
-            if (path.isNotEmpty() && File(path).exists()) { hasAny = true; break }
+            val fileExists = path.isNotEmpty() && File(path).exists()
+            if (BuildConfig.ENABLE_DEBUG) Log.i(tag, "[SYNC-DBG] packageClipboard slot=$slot raw=$rawVal path='$path' exists=$fileExists")
+            if (fileExists) {
+                filteredClips.put(slot, path)
+            }
         }
-        if (!hasAny) return null
+        if (BuildConfig.ENABLE_DEBUG) Log.i(tag, "[SYNC-DBG] packageClipboard filtered: $filteredClips (${filteredClips.length()} slots)")
+        if (filteredClips.length() == 0) return null
 
         val cacheDir = reactContext.cacheDir
         val zipFile = File(cacheDir, "clipboard_sync_${System.currentTimeMillis()}.zip")
         ZipOutputStream(zipFile.outputStream().buffered()).use { zos ->
+
             zos.putNextEntry(ZipEntry("clips.json"))
-            zos.write(clipsJson.toByteArray(Charsets.UTF_8))
+            zos.write(filteredClips.toString().toByteArray(Charsets.UTF_8))
             zos.closeEntry()
 
-            val keys2 = clips.keys()
+            val keys2 = filteredClips.keys()
             while (keys2.hasNext()) {
                 val slot = keys2.next()
-                val path = clips.optString(slot, "")
-                if (path.isEmpty()) continue
-                val f = File(path)
-                if (!f.exists()) continue
+                val f = File(filteredClips.getString(slot))
                 zos.putNextEntry(ZipEntry("stickers/${f.name}"))
                 f.inputStream().buffered().use { it.copyTo(zos) }
                 zos.closeEntry()
@@ -518,7 +538,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
         val cb = object : ConnectivityManager.NetworkCallback() {
             override fun onLost(network: Network) {
                 if (!staticIsRunning) return
-                Log.i(TAG, "WiFi network lost – stopping LocalSend server")
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "WiFi network lost – stopping LocalSend server")
                 forceCloseAll()
                 sendEvent("onLocalSendStopped", Arguments.createMap())
             }
@@ -529,9 +549,9 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                 .build()
             cm.registerNetworkCallback(req, cb)
             networkCallback = cb
-            Log.i(TAG, "WiFi network callback registered")
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "WiFi network callback registered")
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to register network callback: ${e.message}")
+            if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "Failed to register network callback: ${e.message}")
         }
     }
 
@@ -540,6 +560,14 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             .getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
         networkCallback?.let { try { cm?.unregisterNetworkCallback(it) } catch (_: Exception) {} }
         networkCallback = null
+
+        isRunning = false
+        try { serverSocket?.close() } catch (_: Exception) {}
+        try { multicastSocket?.close() } catch (_: Exception) {}
+        serverSocket = null
+        multicastSocket = null
+        forceCloseAll()
+        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "onCatalystInstanceDestroy: LocalSend server stopped")
     }
 
     companion object {
@@ -652,7 +680,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                 }
             }
             inboxObserver!!.startWatching()
-            Log.i(TAG, "INBOX watcher started: $INBOX_DIR")
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "INBOX watcher started: $INBOX_DIR")
         }
 
         @JvmStatic
@@ -819,33 +847,33 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                 val prepareResp: String
                 if (useTls) {
                     val baseUrl = "https://$ip:$port$API_BASE"
-                    Log.i(TAG, "[SEND-DBG] doUploadDirect HTTPS baseUrl=$baseUrl")
+                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SEND-DBG] doUploadDirect HTTPS baseUrl=$baseUrl")
                     prepareResp = staticHttpPostJson("$baseUrl/prepare-upload", prepareBody.toString())
                 } else {
-                    Log.i(TAG, "[SEND-DBG] doUploadDirect raw-socket HTTP to $ip:$port")
+                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SEND-DBG] doUploadDirect raw-socket HTTP to $ip:$port")
                     prepareResp = staticRawSocketPostJson(ip, port,
                         "$API_BASE/prepare-upload", prepareBody.toString())
                 }
-                Log.i(TAG, "[SEND-DBG] prepare-upload response: $prepareResp")
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SEND-DBG] prepare-upload response: $prepareResp")
                 val prepareJson = JSONObject(prepareResp)
                 val sessionId = prepareJson.optString("sessionId", "")
                 val tokenMap = prepareJson.optJSONObject("files")
-                if (sessionId.isEmpty()) { Log.i(TAG, "[SEND-DBG] auto-accepted"); return "auto" }
+                if (sessionId.isEmpty()) { if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SEND-DBG] auto-accepted"); return "auto" }
                 for ((fileId, data) in fileData) {
                     val token = tokenMap?.optString(fileId, "") ?: ""
                     if (token.isEmpty()) continue
                     val path = "$API_BASE/upload?sessionId=$sessionId&fileId=$fileId&token=$token"
-                    Log.i(TAG, "[SEND-DBG] uploading $fileId size=${data.size}")
+                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SEND-DBG] uploading $fileId size=${data.size}")
                     if (useTls) {
                         staticHttpPostBinary("https://$ip:$port$path", data)
                     } else {
                         staticRawSocketPostBinary(ip, port, path, data)
                     }
-                    Log.i(TAG, "[SEND-DBG] upload $fileId done")
+                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SEND-DBG] upload $fileId done")
                 }
                 return sessionId
             } catch (e: Exception) {
-                Log.e(TAG, "[SEND-DBG] doUploadDirect FAILED: ${e.javaClass.simpleName}: ${e.message}")
+                if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "[SEND-DBG] doUploadDirect FAILED: ${e.javaClass.simpleName}: ${e.message}")
                 throw e
             }
         }
@@ -912,7 +940,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                     executor.shutdown()
                     executor.awaitTermination(6, TimeUnit.SECONDS)
                 } catch (e: Exception) {
-                    Log.e(TAG, "triggerScan error", e)
+                    if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "triggerScan error", e)
                 } finally {
                     scanRunningStatic = false
                 }
@@ -938,7 +966,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
         }
 
         private fun probeHostStatic(ip: String, port: Int) {
-            // HTTPS first (official LocalSend clients)
+
             try {
                 val conn = staticOpenConn("https://$ip:$port$API_BASE/info", 1500, 1500)
                 conn.requestMethod = "GET"
@@ -951,7 +979,6 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                 conn.disconnect()
             } catch (_: Exception) {}
 
-            // Raw socket HTTP (bypasses Android cleartext traffic policy)
             try {
                 val sock = Socket()
                 sock.connect(InetSocketAddress(ip, port), 1500)
@@ -1051,7 +1078,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             }
 
             val localIp = getLocalIp()
-            Log.i(TAG, "LocalSend server started on $localIp:$serverPort")
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "LocalSend server started on $localIp:$serverPort")
             sendEvent("onServerStarted", Arguments.createMap().apply {
                 putString("ip", localIp)
                 putInt("port", serverPort)
@@ -1059,7 +1086,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             })
             promise.resolve("started")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to start server", e)
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "Failed to start server", e)
             isRunning = false
             promise.reject("START_FAILED", e.message)
         }
@@ -1072,7 +1099,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             serverSocket?.close()
             multicastSocket?.close()
         } catch (e: Exception) {
-            Log.w(TAG, "Error closing sockets", e)
+            if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "Error closing sockets", e)
         }
         serverSocket = null
         multicastSocket = null
@@ -1157,7 +1184,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun scanForPeers(promise: Promise) {
         if (scanRunning) {
-            Log.d(TAG, "scanForPeers: already running, skipping")
+            if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "scanForPeers: already running, skipping")
             promise.resolve("scan_already_running")
             return
         }
@@ -1166,9 +1193,9 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             discoveredPeers.clear()
             try {
                 val localIp = getLocalIp()
-                Log.i(TAG, "scanForPeers: localIp=$localIp")
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "scanForPeers: localIp=$localIp")
                 if (localIp == "0.0.0.0") {
-                    Log.w(TAG, "scanForPeers: no network, aborting")
+                    if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "scanForPeers: no network, aborting")
                     promise.resolve("no_network")
                     return@thread
                 }
@@ -1178,13 +1205,13 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                 val executor = Executors.newFixedThreadPool(50)
 
                 val knownCopy = synchronized(knownSenderIps) { knownSenderIps.toList() }
-                Log.i(TAG, "scanForPeers: phase1 known IPs: $knownCopy")
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "scanForPeers: phase1 known IPs: $knownCopy")
                 for (ip in knownCopy) {
                     executor.submit { probeHost(ip, DEFAULT_PORT) }
                 }
 
                 val skipIps = knownCopy.toSet() + localIp
-                Log.i(TAG, "scanForPeers: phase2 scanning subnet $subnet.1-254 (skipping ${skipIps.size} IPs)")
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "scanForPeers: phase2 scanning subnet $subnet.1-254 (skipping ${skipIps.size} IPs)")
                 for (i in 1..254) {
                     val ip = "$subnet.$i"
                     if (ip in skipIps) continue
@@ -1197,10 +1224,10 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
 
                     executor.awaitTermination(4, TimeUnit.SECONDS)
                 }
-                Log.i(TAG, "scanForPeers: done (allFinished=$finished), discovered ${discoveredPeers.size} peers total")
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "scanForPeers: done (allFinished=$finished), discovered ${discoveredPeers.size} peers total")
                 promise.resolve("scan_done")
             } catch (e: Exception) {
-                Log.e(TAG, "scanForPeers error", e)
+                if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "scanForPeers error", e)
                 promise.reject("SCAN_ERROR", e.message)
             } finally {
                 scanRunning = false
@@ -1209,14 +1236,14 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
     }
 
     private fun probeHost(ip: String, port: Int) {
-        // HTTPS first (official LocalSend clients)
+
         try {
             val url = "https://$ip:$port$API_BASE/info"
-            Log.d(TAG, "probeHost: trying $url")
+            if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "probeHost: trying $url")
             val conn = openConn(url, connectTimeout = 500, readTimeout = 500)
             conn.requestMethod = "GET"
             val code = conn.responseCode
-            Log.d(TAG, "probeHost: $url → HTTP $code")
+            if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "probeHost: $url → HTTP $code")
             if (code == 200) {
                 val body = conn.inputStream.bufferedReader().readText()
                 conn.disconnect()
@@ -1225,10 +1252,9 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             }
             conn.disconnect()
         } catch (e: Exception) {
-            Log.d(TAG, "probeHost: https://$ip:$port failed: ${e.javaClass.simpleName}: ${e.message}")
+            if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "probeHost: https://$ip:$port failed: ${e.javaClass.simpleName}: ${e.message}")
         }
 
-        // Raw socket HTTP fallback (other Supernote devices)
         try {
             val sock = Socket()
             sock.connect(InetSocketAddress(ip, port), 500)
@@ -1243,22 +1269,22 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             while (true) { if ((reader.readLine() ?: break).isEmpty()) break }
             val body = reader.readText()
             sock.close()
-            Log.d(TAG, "probeHost: http://$ip:$port (raw) → 200")
+            if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "probeHost: http://$ip:$port (raw) → 200")
             registerPeerFromProbe(body, ip, port, useTls = false)
         } catch (e: Exception) {
-            Log.d(TAG, "probeHost: http://$ip:$port (raw) failed: ${e.javaClass.simpleName}: ${e.message}")
+            if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "probeHost: http://$ip:$port (raw) failed: ${e.javaClass.simpleName}: ${e.message}")
         }
     }
 
     private fun registerPeerFromProbe(body: String, ip: String, port: Int, useTls: Boolean = true) {
-        Log.d(TAG, "probeHost: $ip response body: $body")
+        if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "probeHost: $ip response body: $body")
         val data = JSONObject(body)
         val fp = data.optString("fingerprint", "")
         if (fp.isNotEmpty() && fp != deviceFingerprint) {
             val peerAlias = data.optString("alias", "Unknown")
             val peerPort = data.optInt("port", port)
             val peerDeviceType = data.optString("deviceType", "desktop")
-            Log.i(TAG, "probeHost: FOUND peer $peerAlias @ $ip:$peerPort (tls=$useTls)")
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "probeHost: FOUND peer $peerAlias @ $ip:$peerPort (tls=$useTls)")
             discoveredPeers[fp] = DiscoveredPeer(
                 alias = peerAlias, ip = ip, port = peerPort,
                 deviceType = peerDeviceType, fingerprint = fp,
@@ -1287,7 +1313,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                 val result = doLocalSendUpload(ip, port, filesJson, mapOf(fileId to textBytes))
                 promise.resolve(result)
             } catch (e: Exception) {
-                Log.e(TAG, "sendText failed", e)
+                if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "sendText failed", e)
                 sendEvent("onSendError", Arguments.createMap().apply {
                     putString("error", e.message ?: "Unknown error")
                 })
@@ -1315,7 +1341,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                 val result = doLocalSendUpload(ip, port, filesJson, mapOf(fileId to fileBytes))
                 promise.resolve(result)
             } catch (e: Exception) {
-                Log.e(TAG, "sendFile failed", e)
+                if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "sendFile failed", e)
                 sendEvent("onSendError", Arguments.createMap().apply {
                     putString("error", e.message ?: "Unknown error")
                 })
@@ -1335,14 +1361,14 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                 putString("fileName", pt.fileName)
             })
         }
-        Log.i(TAG, "flushPendingTexts: returning ${pending.size} unacked text(s)")
+        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "flushPendingTexts: returning ${pending.size} unacked text(s)")
         promise.resolve(result)
     }
 
     @ReactMethod
     fun ackPendingText(id: String) {
         Companion.ackPendingText(id)
-        Log.d(TAG, "ackPendingText: id=$id, remaining=${pendingTexts.size}")
+        if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "ackPendingText: id=$id, remaining=${pendingTexts.size}")
     }
 
     private fun doLocalSendUpload(
@@ -1366,24 +1392,24 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             put("files", filesJson)
         }
 
-        Log.i(TAG, "doLocalSendUpload: target=$baseUrl")
-        Log.d(TAG, "doLocalSendUpload: prepareBody=${prepareBody.toString().take(500)}")
+        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "doLocalSendUpload: target=$baseUrl")
+        if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "doLocalSendUpload: prepareBody=${prepareBody.toString().take(500)}")
         val prepareResp = httpPostJson("$baseUrl/prepare-upload", prepareBody.toString())
-        Log.d(TAG, "doLocalSendUpload: prepareResp=$prepareResp")
+        if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "doLocalSendUpload: prepareResp=$prepareResp")
         val prepareJson = JSONObject(prepareResp)
 
         val sessionId = prepareJson.optString("sessionId", "")
         val tokenMap = prepareJson.optJSONObject("files")
 
         if (sessionId.isEmpty()) {
-            Log.i(TAG, "doLocalSendUpload: receiver auto-accepted (no sessionId), transfer complete")
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "doLocalSendUpload: receiver auto-accepted (no sessionId), transfer complete")
             sendEvent("onSendComplete", Arguments.createMap().apply {
                 putString("sessionId", "auto")
             })
             return "auto"
         }
 
-        Log.i(TAG, "Got sessionId=$sessionId, uploading ${fileData.size} file(s)")
+        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Got sessionId=$sessionId, uploading ${fileData.size} file(s)")
         sendEvent("onSendStarted", Arguments.createMap().apply {
             putString("sessionId", sessionId)
             putInt("fileCount", fileData.size)
@@ -1393,12 +1419,12 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
         for ((fileId, data) in fileData) {
             val token = tokenMap?.optString(fileId, "") ?: ""
             if (token.isEmpty()) {
-                Log.d(TAG, "doLocalSendUpload: no token for $fileId, skipping upload")
+                if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "doLocalSendUpload: no token for $fileId, skipping upload")
                 continue
             }
 
             val uploadUrl = "$baseUrl/upload?sessionId=$sessionId&fileId=$fileId&token=$token"
-            Log.i(TAG, "Uploading fileId=$fileId (${data.size} bytes)")
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Uploading fileId=$fileId (${data.size} bytes)")
             httpPostBinary(uploadUrl, data)
 
             val fileInfo = filesJson.optJSONObject(fileId)
@@ -1409,7 +1435,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             })
         }
 
-        Log.i(TAG, "Send complete for session $sessionId")
+        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Send complete for session $sessionId")
         sendEvent("onSendComplete", Arguments.createMap().apply {
             putString("sessionId", sessionId)
         })
@@ -1438,7 +1464,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                     bindOk = true
                     break
                 } catch (e: java.net.BindException) {
-                    Log.w(TAG, "Port $tryPort unavailable (${e.message}), trying next...")
+                    if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "Port $tryPort unavailable (${e.message}), trying next...")
                 }
             }
             if (!bindOk) {
@@ -1447,7 +1473,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             }
             serverPort = boundPort
             serverSocket = sock
-            Log.i(TAG, "HTTP server listening on port $serverPort")
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "HTTP server listening on port $serverPort")
 
             while (isRunning) {
                 try {
@@ -1456,11 +1482,11 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                         handleClient(client)
                     }
                 } catch (e: SocketException) {
-                    if (isRunning) Log.e(TAG, "Socket accept error", e)
+                    if (isRunning) if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "Socket accept error", e)
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "HTTP server error", e)
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "HTTP server error", e)
             sendEvent("onServerError", Arguments.createMap().apply {
                 putString("error", e.message ?: "Unknown error")
             })
@@ -1477,13 +1503,13 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                 input = BufferedInputStream(socket.inputStream)
                 output = BufferedOutputStream(socket.outputStream)
             } catch (e: SSLException) {
-                Log.d(TAG, "[RECV-DBG] TLS handshake failed from $remoteIp (non-TLS client?), ignoring")
+                if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "[RECV-DBG] TLS handshake failed from $remoteIp (non-TLS client?), ignoring")
                 try { socket.close() } catch (_: Exception) {}
                 return
             }
 
             val requestLine = readLine(input) ?: return
-            Log.d(TAG, "[RECV-DBG] request: $requestLine from $remoteIp")
+            if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "[RECV-DBG] request: $requestLine from $remoteIp")
             val parts = requestLine.split(" ")
             if (parts.size < 3) return
 
@@ -1532,9 +1558,9 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                     sendHttpResponse(output, 404, """{"error":"Not found"}""")
             }
         } catch (e: SSLException) {
-            Log.d(TAG, "[RECV-DBG] TLS error from client (non-TLS?), ignoring: ${e.message}")
+            if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "[RECV-DBG] TLS error from client (non-TLS?), ignoring: ${e.message}")
         } catch (e: Exception) {
-            Log.e(TAG, "Client handler error", e)
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "Client handler error", e)
         } finally {
             try { socket.close() } catch (_: Exception) {}
         }
@@ -1579,7 +1605,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             )
 
             if (isNew || isChanged) {
-                Log.i(TAG, "Device registered: $peerAlias from $remoteIp")
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Device registered: $peerAlias from $remoteIp")
                 sendEvent("onPeerFound", Arguments.createMap().apply {
                     putString("alias", peerAlias)
                     putString("ip", remoteIp)
@@ -1588,7 +1614,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                     putString("fingerprint", peerFingerprint)
                 })
             } else {
-                Log.d(TAG, "Device re-registered (no change): $peerAlias from $remoteIp")
+                if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "Device re-registered (no change): $peerAlias from $remoteIp")
             }
 
             val response = JSONObject().apply {
@@ -1611,7 +1637,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
         output: BufferedOutputStream, body: String,
         remoteIp: String, params: Map<String, String>
     ) {
-        Log.i(TAG, "[RECV-DBG] handlePrepareUpload from $remoteIp body=${body.take(200)}")
+        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[RECV-DBG] handlePrepareUpload from $remoteIp body=${body.take(200)}")
 
         if (pin.isNotEmpty()) {
             val pinParam = params["pin"] ?: ""
@@ -1657,7 +1683,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                 }
             }
             if (allPreviews.isNotEmpty() && allPreviews.size == files.length()) {
-                Log.i(TAG, "Text message(s) from [$senderAlias] via preview field: ${allPreviews.size}")
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Text message(s) from [$senderAlias] via preview field: ${allPreviews.size}")
                 val combined = allPreviews.joinToString("\n")
                 sendTextViaBroadcast(combined)
 
@@ -1701,27 +1727,20 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                 val latch = java.util.concurrent.CountDownLatch(1)
                 var accepted = false
                 val msg = NativeLocale.t("sync_clipboard_ask").replace("%s", senderAlias)
-                val activity = currentActivity
-                if (activity != null) {
-                    android.os.Handler(android.os.Looper.getMainLooper()).post {
-                        Log.i(TAG, "[SYNC-DBG] showRattaDialog for prepare-upload confirm")
-                        com.ratta.supernote.pluginlib.api.HostUIAPI.getInstance().showRattaDialog(
-                            activity, msg,
-                            NativeLocale.t("cancel"), NativeLocale.t("confirm"), false,
-                            object : com.ratta.supernote.pluginlib.callback.RattaDialogListener {
-                                override fun onConfirm() { accepted = true; latch.countDown() }
-                                override fun onCancel() { accepted = false; latch.countDown() }
-                            }
-                        )
-                    }
-                } else {
-                    Log.w(TAG, "[SYNC-DBG] no activity for clipboard sync confirm, auto-accepting")
-                    accepted = true
-                    latch.countDown()
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SYNC-DBG] showRattaDialog for prepare-upload confirm")
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    com.ratta.supernote.pluginlib.api.HostUIAPI.getInstance().showRattaDialog(
+                        reactApplicationContext.currentActivity, msg,
+                        NativeLocale.t("cancel"), NativeLocale.t("confirm"), false,
+                        object : com.ratta.supernote.pluginlib.callback.RattaDialogListener {
+                            override fun onConfirm() { accepted = true; latch.countDown() }
+                            override fun onCancel() { accepted = false; latch.countDown() }
+                        }
+                    )
                 }
                 latch.await(30, TimeUnit.SECONDS)
                 if (!accepted) {
-                    Log.i(TAG, "Clipboard sync rejected by user from [$senderAlias]")
+                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Clipboard sync rejected by user from [$senderAlias]")
                     sendHttpResponse(output, 403, """{"error":"Rejected by user"}""")
                     return
                 }
@@ -1730,8 +1749,8 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             uploadSessions[sessionId] = session
             activeUploadSession = sessionId
 
-            Log.i(TAG, "Accepted transfer from [$senderAlias]: ${fileNames.size} files")
-            fileNames.forEach { Log.i(TAG, "  - $it") }
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Accepted transfer from [$senderAlias]: ${fileNames.size} files")
+            fileNames.forEach { if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "  - $it") }
 
             sendEvent("onTransferStarted", Arguments.createMap().apply {
                 putString("sender", senderAlias)
@@ -1748,7 +1767,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             }
             sendHttpResponse(output, 200, response.toString())
         } catch (e: Exception) {
-            Log.e(TAG, "prepare-upload error", e)
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "prepare-upload error", e)
             sendHttpResponse(output, 400, """{"error":"Invalid body"}""")
         }
     }
@@ -1790,7 +1809,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
         dir.mkdirs()
         val destFile = safeFileName(fileInfo.fileName, dir)
 
-        Log.i(TAG, "Receiving file: ${fileInfo.fileName} -> $destFile")
+        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Receiving file: ${fileInfo.fileName} -> $destFile")
 
         try {
             var received = 0L
@@ -1822,12 +1841,12 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             if (fileInfo.sha256.isNotEmpty()) {
                 val computed = sha.digest().joinToString("") { "%02x".format(it) }
                 if (!computed.equals(fileInfo.sha256, ignoreCase = true)) {
-                    Log.w(TAG, "SHA256 mismatch for ${fileInfo.fileName}")
+                    if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "SHA256 mismatch for ${fileInfo.fileName}")
                 }
             }
 
             session.received[fileId] = true
-            Log.i(TAG, "File received: ${fileInfo.fileName} -> $destFile ($received bytes)")
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "File received: ${fileInfo.fileName} -> $destFile ($received bytes)")
 
             if (fileInfo.fileName.startsWith("clipboard_sync_") && fileInfo.fileName.endsWith(".zip")) {
                 handleClipboardSyncReceive(destFile, session.senderAlias ?: remoteIp)
@@ -1841,7 +1860,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                         fileInfo.fileName, destFile.absolutePath,
                         received, destFile.lastModified(), true
                     ))
-                    Log.i(TAG, "Added to session received: ${destFile.absolutePath}, total=${getReceivedImageFiles().size}")
+                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Added to session received: ${destFile.absolutePath}, total=${getReceivedImageFiles().size}")
                     ImagePanel.currentInstance?.onFileReceived()
                 }
                 if (DocLinkPanel.DOC_EXTS.contains(fileInfo.fileName.substringAfterLast('.', "").lowercase())) {
@@ -1856,7 +1875,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             }
 
             if (session.received.values.all { it }) {
-                Log.i(TAG, "Session $sessionId complete!")
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Session $sessionId complete!")
                 activeUploadSession = null
                 sendEvent("onTransferComplete", Arguments.createMap().apply {
                     putString("sessionId", sessionId)
@@ -1865,7 +1884,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
 
             sendHttpResponse(output, 200, "")
         } catch (e: Exception) {
-            Log.e(TAG, "File receive error", e)
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "File receive error", e)
             if (destFile.exists()) destFile.delete()
             sendHttpResponse(output, 500, """{"error":"Unknown error by receiver"}""")
         }
@@ -1878,7 +1897,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             if (activeUploadSession == sessionId) {
                 activeUploadSession = null
             }
-            Log.i(TAG, "Session cancelled: $sessionId")
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Session cancelled: $sessionId")
         }
         sendHttpResponse(output, 200, "")
     }
@@ -1892,7 +1911,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                 joinGroup(group)
             }
 
-            Log.i(TAG, "Multicast announce started on $MULTICAST_ADDR:$MULTICAST_PORT")
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Multicast announce started on $MULTICAST_ADDR:$MULTICAST_PORT")
 
             while (isRunning) {
                 try {
@@ -1911,17 +1930,17 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                     val packet = DatagramPacket(data, data.size, group, MULTICAST_PORT)
                     multicastSocket?.send(packet)
                 } catch (e: Exception) {
-                    if (isRunning) Log.d(TAG, "Announce error: ${e.message}")
+                    if (isRunning) if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "Announce error: ${e.message}")
                 }
                 Thread.sleep(5000)
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Multicast announce error", e)
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "Multicast announce error", e)
         }
     }
 
     private fun sendTextViaBroadcast(text: String) {
-        Log.i(TAG, "sendTextViaBroadcast: len=${text.length}")
+        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "sendTextViaBroadcast: len=${text.length}")
         val intent = Intent("com.dictation.TEXT_TO_PLUGIN").apply {
             putExtra("text", text)
         }
@@ -1934,12 +1953,12 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             val text = params.getString("text") ?: ""
             val fileName = params.getString("fileName") ?: "message.txt"
             val pt = addPendingText(text, fileName)
-            Log.d(TAG, "sendEvent → $eventName buffered id=${pt.id}, trying emit")
+            if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "sendEvent → $eventName buffered id=${pt.id}, trying emit")
             params.putString("_pendingId", pt.id)
         }
 
         if (!reactApplicationContext.hasActiveCatalystInstance()) {
-            Log.w(TAG, "sendEvent → $eventName: bridge unavailable, will flush on next activation")
+            if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "sendEvent → $eventName: bridge unavailable, will flush on next activation")
             return
         }
 
@@ -1947,9 +1966,9 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             reactApplicationContext
                 .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
                 .emit(eventName, params)
-            Log.d(TAG, "sendEvent → $eventName OK")
+            if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "sendEvent → $eventName OK")
         } catch (e: Exception) {
-            Log.w(TAG, "sendEvent → $eventName FAILED (bridge transition): ${e.message}")
+            if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "sendEvent → $eventName FAILED (bridge transition): ${e.message}")
         }
 
     }
@@ -2047,7 +2066,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
     }
 
     private fun handleClipboardSyncReceive(zipFile: File, senderAlias: String) {
-        Log.i(TAG, "Clipboard sync received from [$senderAlias], importing (user already confirmed in prepare-upload)")
+        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Clipboard sync received from [$senderAlias], importing (user already confirmed in prepare-upload)")
         thread(isDaemon = true) { doImportClipboardSync(zipFile) }
     }
 
@@ -2056,42 +2075,58 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             val stickerDir = File("/sdcard/MyStyle/Sticker")
             stickerDir.mkdirs()
             var clipsJson: String? = null
+            val extractedFiles = mutableListOf<String>()
             ZipInputStream(zipFile.inputStream().buffered()).use { zis ->
                 var entry = zis.nextEntry
                 while (entry != null) {
                     if (entry.name == "clips.json") {
                         clipsJson = zis.readBytes().toString(Charsets.UTF_8)
+                        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SYNC-DBG] clips.json raw: $clipsJson")
                     } else if (entry.name.startsWith("stickers/")) {
                         val name = entry.name.removePrefix("stickers/")
                         if (name.isNotEmpty()) {
-                            File(stickerDir, name).outputStream().buffered().use { out -> zis.copyTo(out) }
+                            val dest = File(stickerDir, name)
+                            dest.outputStream().buffered().use { out -> zis.copyTo(out) }
+                            extractedFiles.add(dest.absolutePath)
+                            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SYNC-DBG] extracted: ${dest.absolutePath} (${dest.length()} bytes)")
                         }
                     }
                     zis.closeEntry()
                     entry = zis.nextEntry
                 }
             }
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SYNC-DBG] extracted ${extractedFiles.size} sticker files")
+
             if (clipsJson != null) {
+                val parsed = JSONObject(clipsJson!!)
+                for (i in 1..6) {
+                    val slotKey = i.toString()
+                    val raw = parsed.opt(slotKey)
+                    val path = parsed.optString(slotKey, "")
+                    val exists = path.isNotEmpty() && File(path).exists()
+                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SYNC-DBG] slot $i: raw=$raw path='$path' exists=$exists")
+                }
+
                 reactApplicationContext.getSharedPreferences("quicktoolbar_presets", 0)
                     .edit().putString("preset_99", clipsJson).apply()
-                Log.i(TAG, "Clipboard sync imported, clips updated")
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Clipboard sync imported, clips updated")
             }
             zipFile.delete()
-            val activity = currentActivity
-            if (activity != null) {
-                android.os.Handler(android.os.Looper.getMainLooper()).post {
+            Handler(Looper.getMainLooper()).post {
+                try {
                     com.ratta.supernote.pluginlib.api.HostUIAPI.getInstance().showTipDialog(
-                        activity, true, NativeLocale.t("sync_clipboard_ok"),
+                        reactApplicationContext.currentActivity, true, NativeLocale.t("sync_clipboard_ok"),
                         object : com.ratta.supernote.pluginlib.callback.RattaDialogListener {
                             override fun onConfirm() {}
                             override fun onCancel() {}
                         }
                     )
-                }
+                } catch (_: Exception) {}
+                refreshToolbarClipIcons()
+                sendEvent("clipsChanged", Arguments.createMap())
             }
-            refreshToolbarClipIcons()
         } catch (e: Exception) {
-            Log.e(TAG, "doImportClipboardSync failed", e)
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "doImportClipboardSync failed", e)
         }
     }
 
@@ -2102,11 +2137,15 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             val obj = JSONObject(clipsJson)
             val filled = JSONArray()
             for (i in 1..6) {
-                filled.put(obj.optString(i.toString(), "").isNotEmpty())
+                val path = obj.optString(i.toString(), "")
+                val fileExists = path.isNotEmpty() && File(path).exists()
+                filled.put(fileExists)
+                if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "[SYNC-DBG] refreshClipIcons slot $i: path='$path' exists=$fileExists")
             }
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SYNC-DBG] refreshClipIcons sending: $filled")
             FloatingToolbarModule.currentInstance?.updateTitleClips(filled.toString())
         } catch (e: Exception) {
-            Log.w(TAG, "refreshToolbarClipIcons: ${e.message}")
+            if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "refreshToolbarClipIcons: ${e.message}")
         }
     }
 
@@ -2125,11 +2164,13 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                     while (entry != null) {
                         if (entry.name == "clips.json") {
                             clipsJson = zis.readBytes().toString(Charsets.UTF_8)
+                            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SYNC-DBG] importClipboardSync clips.json: $clipsJson")
                         } else if (entry.name.startsWith("stickers/")) {
                             val name = entry.name.removePrefix("stickers/")
                             if (name.isNotEmpty()) {
                                 val dest = File(stickerDir, name)
                                 dest.outputStream().buffered().use { out -> zis.copyTo(out) }
+                                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SYNC-DBG] importClipboardSync extracted: ${dest.absolutePath}")
                             }
                         }
                         zis.closeEntry()
@@ -2140,13 +2181,15 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                 if (clipsJson != null) {
                     val prefs = reactApplicationContext.getSharedPreferences("quicktoolbar_presets", 0)
                     prefs.edit().putString("preset_99", clipsJson).apply()
-                    Log.i(TAG, "Clipboard sync imported, clips updated")
+                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Clipboard sync imported, clips updated")
                 }
 
                 zipFile.delete()
+                refreshToolbarClipIcons()
+                sendEvent("clipsChanged", Arguments.createMap())
                 promise.resolve(true)
             } catch (e: Exception) {
-                Log.e(TAG, "importClipboardSync failed", e)
+                if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "importClipboardSync failed", e)
                 promise.resolve(false)
             }
         }

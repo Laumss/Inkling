@@ -1,4 +1,5 @@
 package com.supernote_quicktoolbar.panels
+import com.supernote_quicktoolbar.BuildConfig
 
 import com.supernote_quicktoolbar.*
 
@@ -68,14 +69,17 @@ class CropPanel(
     private var onFooterCancel: (() -> Unit)? = null
 
     private var actionBar: PanelBar.Handle? = null
+    private var opacity: Int = 100
+    private var opacityLabel: TextView? = null
 
     data class CropResult(
         val offsetX: Int, val offsetY: Int,
-        val width: Int, val height: Int
+        val width: Int, val height: Int,
+        val opacity: Int = 100
     )
 
     fun show(path: String, onConfirm: (CropResult) -> Unit) {
-        Log.i(tag, "show() path=$path")
+        if (BuildConfig.ENABLE_DEBUG) Log.i(tag, "show() path=$path")
         currentInstance = this
         imagePath = path
         onCropConfirm = onConfirm
@@ -92,7 +96,7 @@ class CropPanel(
         onScreenshotToNote: (CropResult) -> Unit,
         onCancel: () -> Unit
     ) {
-        Log.i(tag, "showWithFooter() path=$path stitch=$hasStitchSession")
+        if (BuildConfig.ENABLE_DEBUG) Log.i(tag, "showWithFooter() path=$path stitch=$hasStitchSession")
         currentInstance = this
         imagePath = path
         this.hasStitchSession = hasStitchSession
@@ -125,6 +129,8 @@ class CropPanel(
         onAddToHistory = null
         onFooterCancel = null
         actionBar = null
+        opacity = 100
+        opacityLabel = null
         currentInstance = null
     }
 
@@ -175,15 +181,24 @@ class CropPanel(
                 actionBar?.setChecked(multiMode)
             })
         } else {
-
             listOf(PanelBar.TextBtn(NativeLocale.t("confirm")) { doConfirm() })
+        }
+
+        val left: List<PanelBar.Cell> = if (showFooter) {
+            listOf(PanelBar.TextBtn(NativeLocale.t("cancel")) { closeAndRestore() })
+        } else {
+            listOf(PanelBar.IconBtn("icons/ic_arrow_left.xml") { closeAndRestore() })
+        }
+
+        val centerCells: List<PanelBar.Cell> = if (showFooter) center else {
+            listOf(PanelBar.Title(NativeLocale.t("cropper_title")))
         }
 
         val bar = PanelBar.build(
             ctx = reactContext,
-            style = PanelBar.Style.INBOX,
-            left = listOf(PanelBar.TextBtn(NativeLocale.t("cancel")) { closeAndRestore() }),
-            center = center,
+            style = if (showFooter) PanelBar.Style.INBOX else PanelBar.Style.PAGE_HEADER,
+            left = left,
+            center = centerCells,
             right = right
         )
         actionBar = bar
@@ -193,12 +208,14 @@ class CropPanel(
         ).apply { gravity = Gravity.TOP }
         root.addView(bar.view)
 
+        val bottomH = if (!showFooter) buildOpacityBar(root) else 0
+
         if (bmp != null) {
             val cropView = CropView(reactContext, bmp, headerH)
             cropView.layoutParams = FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT
-            ).apply { topMargin = headerH }
+            ).apply { topMargin = headerH; bottomMargin = bottomH }
             root.addView(cropView)
             this.cropView = cropView
         }
@@ -233,6 +250,84 @@ class CropPanel(
             hide()
         }
         if (!hasFooter) toolbarModule.restoreToolbar()
+    }
+
+    private fun buildOpacityBar(root: FrameLayout): Int {
+        val contentH = dp(60)
+        val dividerH = dp(1)
+        val totalH = contentH + dividerH
+
+        val wrapper = LinearLayout(reactContext).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.WHITE)
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, totalH
+            ).apply { gravity = Gravity.BOTTOM }
+        }
+        wrapper.addView(View(reactContext).apply {
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dividerH)
+            setBackgroundColor(Color.BLACK)
+        })
+
+        val bar = LinearLayout(reactContext).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(dp(20), 0, dp(20), 0)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, contentH
+            )
+        }
+
+        bar.addView(TextView(reactContext).apply {
+            text = NativeLocale.t("opacity"); textSize = sp(15f); setTextColor(Color.BLACK)
+            setPadding(0, 0, dp(12), 0)
+        })
+
+        opacityLabel = TextView(reactContext).apply {
+            text = "100%"; textSize = sp(15f); setTextColor(Color.BLACK)
+            setPadding(0, 0, dp(16), 0)
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+        }
+        bar.addView(opacityLabel)
+
+        for (pct in listOf(100, 75, 50, 25)) {
+            bar.addView(TextView(reactContext).apply {
+                text = "$pct%"; textSize = sp(14f)
+                setTextColor(if (pct == 100) Color.WHITE else Color.BLACK)
+                gravity = Gravity.CENTER
+                setPadding(dp(12), dp(6), dp(12), dp(6))
+                background = GradientDrawable().apply {
+                    setColor(if (pct == 100) Color.BLACK else Color.WHITE)
+                    setStroke(dp(1), Color.BLACK)
+                }
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { marginEnd = dp(8) }
+                setOnClickListener {
+                    opacity = pct
+                    opacityLabel?.text = "$pct%"
+                    updateOpacityBtnHighlights(bar, pct)
+                }
+            })
+        }
+
+        wrapper.addView(bar)
+        root.addView(wrapper)
+        return totalH
+    }
+
+    private fun updateOpacityBtnHighlights(bar: LinearLayout, activePct: Int) {
+        for (pct in listOf(100, 75, 50, 25)) {
+            val idx = listOf(100, 75, 50, 25).indexOf(pct) + 2
+            val btn = bar.getChildAt(idx) as? TextView ?: continue
+            val isActive = pct == activePct
+            btn.setTextColor(if (isActive) Color.WHITE else Color.BLACK)
+            btn.background = GradientDrawable().apply {
+                setColor(if (isActive) Color.BLACK else Color.WHITE)
+                setStroke(dp(1), Color.BLACK)
+            }
+        }
     }
 
     private fun closeAndRestore() {
@@ -463,7 +558,7 @@ class CropPanel(
             val oy = max(0, (relY * scaleY).roundToInt())
             val cw = min(origW - ox, (cropBox.width() * scaleX).roundToInt())
             val ch = min(origH - oy, (cropBox.height() * scaleY).roundToInt())
-            return CropResult(ox, oy, max(1, cw), max(1, ch))
+            return CropResult(ox, oy, max(1, cw), max(1, ch), opacity)
         }
     }
 }

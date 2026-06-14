@@ -22,6 +22,8 @@ object ToolRegistry {
         panelFactories["docScreenshot"] = { DocScreenshotPanel.getInstance(ctx, module) }
         panelFactories["send"] = { SendPanel.getInstance(ctx, module) }
         panelFactories["lassoScreenshot"] = { LassoScreenshotPanel.getInstance(ctx, module) }
+        panelFactories["config"] = { ConfigPanel.getInstance(ctx, module) }
+        panelFactories["palette"] = { PalettePanel.getInstance(ctx, module) }
     }
 
     fun registerPanel(id: String, factory: () -> PanelBase) {
@@ -36,8 +38,11 @@ object ToolRegistry {
         SendPanel.currentInstance?.hide()
         LassoScreenshotPanel.currentInstance?.hide()
         DocScreenshotPanel.currentInstance?.hide()
+        ConfigPanel.currentInstance?.hide()
+        PalettePanel.currentInstance?.hide()
         FloatingBubbleModule.hideStatic()
         AiBubbleModule.hideStatic()
+        PaletteBubbleModule.hideStatic()
     }
 
     fun handleRotation(): Boolean {
@@ -52,6 +57,8 @@ object ToolRegistry {
         SendPanel.currentInstance?.suspendVisibility()
         LassoScreenshotPanel.currentInstance?.suspendVisibility()
         DocScreenshotPanel.currentInstance?.suspendVisibility()
+        ConfigPanel.currentInstance?.suspendVisibility()
+        PalettePanel.currentInstance?.suspendVisibility()
     }
 
     fun resumeAll() {
@@ -60,6 +67,8 @@ object ToolRegistry {
         SendPanel.currentInstance?.resumeVisibility()
         LassoScreenshotPanel.currentInstance?.resumeVisibility()
         DocScreenshotPanel.currentInstance?.resumeVisibility()
+        ConfigPanel.currentInstance?.resumeVisibility()
+        PalettePanel.currentInstance?.resumeVisibility()
     }
 
     fun destroyAll() {

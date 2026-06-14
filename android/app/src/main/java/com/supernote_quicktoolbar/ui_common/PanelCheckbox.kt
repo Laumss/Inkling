@@ -8,17 +8,14 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.facebook.react.bridge.ReactApplicationContext
-import kotlin.math.roundToInt
 
 class PanelCheckbox(
-    ctx: ReactApplicationContext,
+    private val ctx: ReactApplicationContext,
     label: String,
     onClick: () -> Unit
 ) {
-    private val density = ctx.resources.displayMetrics.density
-    private val scale = ScreenScale.factor(ctx)
-    private fun dp(v: Int) = (v * density * scale).roundToInt()
-    private fun sp(v: Float) = v * scale
+    private fun dp(v: Int) = ScreenScale.dp(ctx, v)
+    private fun sp(v: Float) = ScreenScale.sp(ctx, v)
 
     private val gray = Color.parseColor("#999999")
 

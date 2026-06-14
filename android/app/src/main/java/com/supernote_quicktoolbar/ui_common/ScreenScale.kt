@@ -20,4 +20,16 @@ object ScreenScale {
     }
 
     fun textPx(ctx: Context, designPx: Number): Float = px(ctx, designPx).toFloat()
+
+    fun dp(ctx: Context, v: Int): Int {
+        val dm = ctx.resources.displayMetrics
+        return (v * dm.density * factor(ctx)).roundToInt()
+    }
+
+    fun dp(ctx: Context, v: Float): Int {
+        val dm = ctx.resources.displayMetrics
+        return (v * dm.density * factor(ctx)).roundToInt()
+    }
+
+    fun sp(ctx: Context, v: Float): Float = v * factor(ctx)
 }

@@ -1,4 +1,5 @@
 package com.supernote_quicktoolbar.ui_common
+import com.supernote_quicktoolbar.BuildConfig
 
 import android.graphics.Color
 import android.graphics.PixelFormat
@@ -38,6 +39,8 @@ abstract class PanelBase(
 
     open val heightRatio: Double = 0.81
 
+    open val cornerRadiusDp: Int = 12
+
     open val windowFlags: Int = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
 
     open val forcedOrientation: Int? = null
@@ -70,16 +73,15 @@ abstract class PanelBase(
         val ratio = if (screenLong >= 2560) 0.76 else heightRatio
         return (screenH * ratio).toInt()
     }
-    private val _scaleFactor: Float by lazy { ScreenScale.factor(reactContext) }
-    protected fun dp(v: Int) = (v * density * _scaleFactor).roundToInt()
-    protected fun dp(v: Float) = (v * density * _scaleFactor).roundToInt()
-    protected fun sp(v: Float) = v * _scaleFactor
+    protected fun dp(v: Int) = ScreenScale.dp(reactContext, v)
+    protected fun dp(v: Float) = ScreenScale.dp(reactContext, v)
+    protected fun sp(v: Float) = ScreenScale.sp(reactContext, v)
 
     protected fun showPanel() {
         handler.post {
             if (rootView != null) return@post
             if (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(reactContext)) {
-                Log.e(tag, "no overlay permission")
+                if (BuildConfig.ENABLE_DEBUG) Log.e(tag, "no overlay permission")
                 return@post
             }
 
@@ -107,23 +109,26 @@ abstract class PanelBase(
                 rootView = root
                 try {
                     windowManager?.addView(root, lp)
-                    Log.i(tag, "full-screen panel shown")
+                    if (BuildConfig.ENABLE_DEBUG) Log.i(tag, "full-screen panel shown")
                 } catch (e: Exception) {
-                    Log.e(tag, "addView failed: ${e.message}", e)
+                    if (BuildConfig.ENABLE_DEBUG) Log.e(tag, "addView failed: ${e.message}", e)
                     rootView = null; windowManager = null
                 }
             } else {
+                val cr = dp(cornerRadiusDp).toFloat()
                 val root = TouchSinkLayout(reactContext).apply {
                     orientation = LinearLayout.VERTICAL
                     background = GradientDrawable().apply {
                         setColor(Color.WHITE)
                         setStroke(dp(1), Color.BLACK)
-                        cornerRadius = dp(12).toFloat()
+                        cornerRadius = cr
                     }
-                    clipToOutline = true
-                    outlineProvider = object : ViewOutlineProvider() {
-                        override fun getOutline(v: View, o: android.graphics.Outline) {
-                            o.setRoundRect(0, 0, v.width, v.height, dp(12).toFloat())
+                    if (cr > 0f) {
+                        clipToOutline = true
+                        outlineProvider = object : ViewOutlineProvider() {
+                            override fun getOutline(v: View, o: android.graphics.Outline) {
+                                o.setRoundRect(0, 0, v.width, v.height, cr)
+                            }
                         }
                     }
                 }
@@ -140,7 +145,7 @@ abstract class PanelBase(
                 layoutParams = lp
                 rootView = root
                 windowManager?.addView(root, lp)
-                Log.i(tag, "panel shown ${winW}x$winH screen=${screenW}x${screenH} landscape=$isLandscape")
+                if (BuildConfig.ENABLE_DEBUG) Log.i(tag, "panel shown ${winW}x$winH screen=${screenW}x${screenH} landscape=$isLandscape")
             }
         }
     }
@@ -152,6 +157,7 @@ abstract class PanelBase(
             windowManager = null
             layoutParams = null
             onHide()
+            runDslDisposers()
             toolbarModule.disablePenBlock()
             emitCloseEvent()
         }
@@ -164,6 +170,7 @@ abstract class PanelBase(
             windowManager = null
             layoutParams = null
             onHide()
+            runDslDisposers()
             emitCloseEvent()
         }
     }
@@ -243,7 +250,7 @@ abstract class PanelBase(
             setPadding(dp(16), 0, dp(16), 0)
             background = GradientDrawable().apply {
                 setColor(Color.WHITE); setStroke(dp(1), Color.BLACK)
-                cornerRadius = dp(2).toFloat()
+                cornerRadius = 0f
             }
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -262,7 +269,7 @@ abstract class PanelBase(
             setPadding(dp(16), 0, dp(16), 0)
             background = GradientDrawable().apply {
                 setColor(Color.BLACK)
-                cornerRadius = dp(2).toFloat()
+                cornerRadius = 0f
             }
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -272,10 +279,32 @@ abstract class PanelBase(
         }
     }
 
-    protected fun formatSize(size: Long): String = when {
-        size < 1024 -> "$size B"
-        size < 1024 * 1024 -> "${"%.1f".format(size / 1024.0)} KB"
-        else -> "${"%.1f".format(size / (1024.0 * 1024.0))} MB"
+    protected fun formatSize(size: Long): String = PanelWidgets.formatSize(size)
+
+    private val dslDisposers = mutableListOf<() -> Unit>()
+
+    protected val dslHost: PanelHost = object : PanelHost {
+        override val ctx: ReactApplicationContext get() = reactContext
+        override fun dp(v: Int): Int = this@PanelBase.dp(v)
+        override fun dp(v: Float): Int = this@PanelBase.dp(v)
+        override fun sp(v: Float): Float = this@PanelBase.sp(v)
+        override fun close() { hide(); toolbarModule.restoreToolbar() }
+        override fun onDispose(block: () -> Unit) { dslDisposers.add(block) }
+        override val panelW: Int get() = winW
+        override val screenW: Int get() = this@PanelBase.screenW
+        override fun emitEvent(name: String, data: com.facebook.react.bridge.WritableMap) {
+            toolbarModule.emitEventPublic(name, data)
+        }
+    }
+
+    protected fun renderDsl(root: LinearLayout, build: PanelScope.() -> Unit) {
+        val scope = PanelScope().apply(build)
+        scope.components.forEach { root.addView(it.build(dslHost)) }
+    }
+
+    private fun runDslDisposers() {
+        dslDisposers.forEach { runCatching { it() } }
+        dslDisposers.clear()
     }
 
     protected fun makeBottomBar(

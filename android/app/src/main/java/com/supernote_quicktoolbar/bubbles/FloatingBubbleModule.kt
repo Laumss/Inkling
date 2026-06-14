@@ -1,4 +1,5 @@
 package com.supernote_quicktoolbar.bubbles
+import com.supernote_quicktoolbar.BuildConfig
 import com.supernote_quicktoolbar.*
 import com.supernote_quicktoolbar.overlays.*
 import com.supernote_quicktoolbar.panels.*
@@ -61,7 +62,7 @@ class FloatingBubbleModule(reactContext: ReactApplicationContext) :
                     val inst = currentInstance
                         ?: try { ctx.getNativeModule(FloatingBubbleModule::class.java) } catch (_: Exception) { null }
                     inst?.createBubble(lastShownText)
-                } catch (e: Exception) { Log.w("FloatingBubble", "reshowLast: ${e.message}") }
+                } catch (e: Exception) { if (BuildConfig.ENABLE_DEBUG) Log.w("FloatingBubble", "reshowLast: ${e.message}") }
             }
         }
 
@@ -103,7 +104,7 @@ class FloatingBubbleModule(reactContext: ReactApplicationContext) :
             try {
                 if (bubbleView != null) return@post
                 createBubble(text)
-            } catch (e: Exception) { Log.e(TAG, "show: ${e.message}", e) }
+            } catch (e: Exception) { if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "show: ${e.message}", e) }
         }
     }
 
@@ -117,16 +118,16 @@ class FloatingBubbleModule(reactContext: ReactApplicationContext) :
                 screenWidth = dm.widthPixels
                 pendingInitX = if (pageWidth > 0) (pageX.toFloat() * screenWidth / pageWidth).toInt() else pageX
                 pendingInitY = if (pageHeight > 0) (pageY.toFloat() * screenHeight / pageHeight).toInt() else pageY
-                Log.i(TAG, "showAt page=($pageX,$pageY) -> screen=($pendingInitX,$pendingInitY)")
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "showAt page=($pageX,$pageY) -> screen=($pendingInitX,$pendingInitY)")
                 createBubble(text)
-            } catch (e: Exception) { Log.e(TAG, "showAt: ${e.message}", e) }
+            } catch (e: Exception) { if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "showAt: ${e.message}", e) }
         }
     }
 
     @ReactMethod fun hide() {
         lastShownText = ""
         lastShownMode = ""
-        handler.post { try { removeBubble() } catch (e: Exception) { Log.e(TAG, "hide: ${e.message}", e) } }
+        handler.post { try { removeBubble() } catch (e: Exception) { if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "hide: ${e.message}", e) } }
     }
 
     @ReactMethod fun updateText(text: String) {  }
@@ -139,7 +140,7 @@ class FloatingBubbleModule(reactContext: ReactApplicationContext) :
     @ReactMethod fun setScreenWidth(width: Int) { screenWidth = width }
 
     @ReactMethod fun setPositionY(pageY: Int) {
-        Log.d(TAG, "setPositionY($pageY) ignored — bubble position is sticky")
+        if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "setPositionY($pageY) ignored — bubble position is sticky")
     }
 
     @ReactMethod fun isShowing(promise: Promise) { promise.resolve(bubbleView != null) }
@@ -156,7 +157,7 @@ class FloatingBubbleModule(reactContext: ReactApplicationContext) :
                     android.net.Uri.parse("package:${reactApplicationContext.packageName}"))
                     .apply { addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK) })
         } catch (e: Exception) {
-            Log.e(TAG, "requestOverlayPermission: ${e.message}", e)
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "requestOverlayPermission: ${e.message}", e)
             try {
                 reactApplicationContext.startActivity(
                     android.content.Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
@@ -176,7 +177,7 @@ class FloatingBubbleModule(reactContext: ReactApplicationContext) :
                 ?: methods.first()
             if (m.parameterCount == 0) m.invoke(pm)
             else m.invoke(pm, PromiseImpl(null, null))
-        } catch (e: Exception) { Log.e(TAG, "callShowPluginView: ${e.message}", e) }
+        } catch (e: Exception) { if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "callShowPluginView: ${e.message}", e) }
     }
 
     private fun createBubble(text: String) {
@@ -248,7 +249,7 @@ class FloatingBubbleModule(reactContext: ReactApplicationContext) :
         }
 
         windowManager?.addView(bubbleView, layoutParams)
-        Log.i(TAG, "bubble shown: '$text'")
+        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "bubble shown: '$text'")
 
         bubbleView?.post {
             val lp = layoutParams ?: return@post
@@ -265,7 +266,7 @@ class FloatingBubbleModule(reactContext: ReactApplicationContext) :
         val sBottom = sy + bubbleH.toFloat()
         val ry = if (screenHeight > 0) pageHeight.toFloat() / screenHeight.toFloat() else 1f
         val rx = if (screenWidth > 0) pageWidth.toFloat() / screenWidth.toFloat() else 1f
-        Log.i(TAG, "[COORD] $eventName sx=$sx sy=$sy bubbleH=$bubbleH bubbleW=$bubbleW" +
+        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[COORD] $eventName sx=$sx sy=$sy bubbleH=$bubbleH bubbleW=$bubbleW" +
                 " sBottom=$sBottom ry=$ry rx=$rx pageY=${(sy*ry).toInt()} pageBottomY=${(sBottom*ry).toInt()}")
         emitEvent(eventName, Arguments.createMap().apply {
             putDouble("screenY", sy.toDouble())
@@ -283,18 +284,18 @@ class FloatingBubbleModule(reactContext: ReactApplicationContext) :
 
     private fun removeBubble() {
         if (bubbleView != null) {
-            try { windowManager?.removeView(bubbleView) } catch (e: Exception) { Log.w(TAG, "removeView: ${e.message}") }
+            try { windowManager?.removeView(bubbleView) } catch (e: Exception) { if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "removeView: ${e.message}") }
             bubbleView = null; layoutParams = null
         }
     }
 
     private fun emitEvent(name: String, params: WritableMap) {
         try { reactApplicationContext.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java).emit(name, params) }
-        catch (e: Exception) { Log.w(TAG, "emitEvent($name): ${e.message}") }
+        catch (e: Exception) { if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "emitEvent($name): ${e.message}") }
     }
 
     override fun onCatalystInstanceDestroy() {
-        Log.i(TAG, "onCatalystInstanceDestroy — keeping bubble alive")
+        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "onCatalystInstanceDestroy — keeping bubble alive")
         super.onCatalystInstanceDestroy()
     }
 

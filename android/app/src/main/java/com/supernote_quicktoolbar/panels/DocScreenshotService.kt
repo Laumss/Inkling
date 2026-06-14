@@ -1,4 +1,5 @@
 package com.supernote_quicktoolbar.panels
+import com.supernote_quicktoolbar.BuildConfig
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -31,7 +32,7 @@ object DocScreenshotService {
             bmp.recycle()
             true
         } catch (e: Exception) {
-            Log.e(TAG, "cropAndSave failed: ${e.message}", e)
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "cropAndSave failed: ${e.message}", e)
             false
         }
     }
@@ -170,7 +171,7 @@ object DocScreenshotService {
             )
             StitchSessionData(imageList, params, json.optLong("createdAt", 0))
         } catch (e: Exception) {
-            Log.e(TAG, "loadSession failed: ${e.message}")
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "loadSession failed: ${e.message}")
             null
         }
     }

@@ -6,18 +6,33 @@ import { name as appName } from './app.json';
 import { PluginManager, NativeUIUtils } from 'sn-plugin-lib';
 import { ensureInit, stopAllModes, startLocalSend, stopLocalSend, isLocalSendRunning } from './components/BackgroundService';
 import { setPendingButton, isAppMounted } from './pendingButton';
-import { warmupCache, getCachedConfig, getCachedClips, injectClipStatus, loadClips } from './components/ToolPresets';
-import FloatingToolbarBridge from './components/FloatingToolbarBridge';
+import { loadClips } from './components/ToolPresets';
+import FloatingToolbarBridge, { ENABLE_DEBUG } from './components/FloatingToolbarBridge';
 import LocalSendBridge from './components/LocalSendBridge';
 import { executeAction } from './components/ToolActions';
 import { setLocale, t } from './components/i18n';
 import { PenLasso } from './components/PenTools';
 
+if (!ENABLE_DEBUG) {
+  console.log = () => {};
+  console.warn = () => {};
+  console.info = () => {};
+  console.debug = () => {};
+}
+
 AppRegistry.registerComponent(appName, () => App);
 
 PluginManager.init();
 ensureInit();
-warmupCache();
+async function refreshTitleClips() {
+  try {
+    const clips = await loadClips();
+    const filled = [1, 2, 3, 4, 5, 6].map(n => !!clips[String(n)]);
+    FloatingToolbarBridge.updateTitleClips(filled);
+  } catch (e) {
+    console.warn('[index]: refreshTitleClips failed:', e);
+  }
+}
 
 PluginManager.registerLangListener({
   onMsg(msg) {
@@ -29,63 +44,36 @@ PluginManager.registerLangListener({
 
 const localSendButtonIcon = Image.resolveAssetSource(require('./assets/toolbar_icon.png')).uri;
 
+// Button name is fixed; don't encode toggle state in it. The host persists
+// registrations in its DB sorted by recentUsedTime, so a mutable name leaves
+// stale labels after restart. Toggle state is shown via post-tap tip instead.
 function registerLocalSendButton() {
-  const running = isLocalSendRunning();
-  const name = running ? t('localsend_btn_on') : t('localsend_btn_off');
   PluginManager.registerButton(1, ['NOTE'], {
     id: 200,
-    name: JSON.stringify({ en: name, zh_CN: name }),
+    name: JSON.stringify({ en: 'LocalSend', zh_CN: 'LocalSend' }),
     icon: localSendButtonIcon,
     showType: 0,
   });
 }
 
-DeviceEventEmitter.addListener('localSendStateChanged', ({ running }) => {
-  console.log('[index]: localSendStateChanged running=', running);
-  registerLocalSendButton();
-});
-
-DeviceEventEmitter.addListener('startLocalSendFromNative', async () => {
+DeviceEventEmitter.addListener('startLocalSendFromNative', async (evt) => {
   console.log('[index]: startLocalSendFromNative');
-  await startLocalSend();
-});
-
-DeviceEventEmitter.addListener('showTip', ({ key }) => {
-  NativeUIUtils.showErrorTipDialog(t(key));
-});
-
-DeviceEventEmitter.addListener('showClipboardSyncConfirm', async ({ senderAlias }) => {
-  try {
-    const msg = t('sync_clipboard_ask').replace('%s', senderAlias);
-    const confirmed = await NativeUIUtils.showRattaDialog(msg, t('btn_cancel'), t('btn_confirm'), false);
-    LocalSendBridge.respondClipboardSync(confirmed);
-  } catch (e) {
-    console.error('[index]: showClipboardSyncConfirm error:', e);
-    LocalSendBridge.respondClipboardSync(true);
-  }
-});
-
-DeviceEventEmitter.addListener('showConfirmStartLocalSend', async () => {
-  try {
-    const confirmed = await NativeUIUtils.showRattaDialog(
-      t('localsend_ask_enable'), t('btn_cancel'), t('btn_confirm'), false
-    );
-    if (confirmed) {
-      await startLocalSend();
-      FloatingToolbarBridge.openSendPanelClipboardSync();
-    }
-  } catch (e) {
-    console.error('[index]: showConfirmStartLocalSend error:', e);
+  const ok = await startLocalSend();
+  if (ok && evt && evt.openClipboardSync) {
+    FloatingToolbarBridge.openSendPanelClipboardSync();
   }
 });
 
 DeviceEventEmitter.addListener('clipboardChanged', async () => {
-  console.log('[index]: clipboardChanged → refreshing toolbar');
-  const newClips = await loadClips();
-  const config = getCachedConfig();
-  if (config && FloatingToolbarBridge.isShowingSync()) {
-    FloatingToolbarBridge.updateTools(injectClipStatus(config.tools, newClips, null));
+  console.log('[index]: clipboardChanged → refresh title clips');
+  if (FloatingToolbarBridge.isShowingSync()) {
+    await refreshTitleClips();
   }
+});
+
+DeviceEventEmitter.addListener('clipsChanged', async () => {
+  console.log('[index]: clipsChanged (from native sync) → refresh title clips');
+  await refreshTitleClips();
 });
 
 FloatingToolbarBridge.onTitlePenLassoAction(() => {
@@ -125,11 +113,7 @@ FloatingToolbarBridge.onToolTap(async ({ toolAction }) => {
 
   if (typeof result === 'string' &&
       (result.startsWith('Saved to clip') || (result.startsWith('Clip') && result.endsWith('cleared')))) {
-    const newClips = await loadClips();
-    const config = getCachedConfig();
-    if (config) {
-      FloatingToolbarBridge.updateTools(injectClipStatus(config.tools, newClips, null));
-    }
+    await refreshTitleClips();
   }
 });
 
@@ -137,11 +121,7 @@ FloatingToolbarBridge.onToolLongPress(async ({ toolId }) => {
   if (toolId.startsWith('clip_')) {
     const slot = toolId.split('_')[1];
     await executeAction(`clip_clear_${slot}`);
-    const newClips = await loadClips();
-    const config = getCachedConfig();
-    if (config) {
-      FloatingToolbarBridge.updateTools(injectClipStatus(config.tools, newClips, null));
-    }
+    await refreshTitleClips();
   }
 });
 
@@ -161,6 +141,10 @@ PluginManager.registerButtonListener({
     }
 
     if (event.id === 200) {
+      // Mark this wake-up as coming from the LocalSend button: the host calls
+      // showPluginView even with showType=0, so App uses this to silently close
+      // instead of falling through to the default openMainPanel.
+      setPendingButton(200);
       (async () => {
         try {
           if (isLocalSendRunning()) {
@@ -193,23 +177,9 @@ PluginManager.registerButtonListener({
       }
 
       setPendingButton(event.id);
-      const config = getCachedConfig();
-      const clips = getCachedClips();
-      console.log('[index]: id=100 show path, config=', !!config, 'clips=', !!clips, 'FloatingToolbar=', !!require('react-native').NativeModules.FloatingToolbar);
-      if (config && clips) {
-        FloatingToolbarBridge.show(injectClipStatus(config.tools, clips, null));
-      } else {
-        const { getAvailableTools } = require('./components/ToolPresets');
-        const defaultClips = { '1': null, '2': null, '3': null, '4': null, '5': null, '6': null };
-        console.log('[index]: using default tools, count=', getAvailableTools().slice(0, 8).length);
-        FloatingToolbarBridge.show(injectClipStatus(getAvailableTools().slice(0, 8), defaultClips, null));
-        warmupCache().then(() => {
-          const c = getCachedConfig();
-          const cl = getCachedClips();
-          if (!c || !cl) return;
-          FloatingToolbarBridge.updateTools(injectClipStatus(c.tools, cl, null));
-        });
-      }
+      console.log('[index]: id=100 show path → showCurrent (native owns tool list)');
+      FloatingToolbarBridge.showCurrent();
+      refreshTitleClips();
       return;
     }
     setPendingButton(event.id);
@@ -226,10 +196,31 @@ PluginManager.registerButton(1, ['NOTE'], {
 
 registerLocalSendButton();
 
+// On startup, reconcile with native server: if the previous JS context's server
+// is still running (defensive; normally stopped in onCatalystInstanceDestroy),
+// adopt it to sync the _localSendStarted flag.
+LocalSendBridge.getServerStatus().then(st => {
+  if (st && st.running) {
+    console.log('[index]: adopting already-running LocalSend server');
+    startLocalSend();
+  }
+}).catch(() => {});
+
 PluginManager.registerButton(1, ['DOC'], {
   id: 300,
   name: JSON.stringify({ en: 'Screenshot Crop', zh_CN: '截图裁切' }),
   icon: Image.resolveAssetSource(require('./assets/toolbar_icon.png')).uri,
   showType: 0,
 });
+
+if (ENABLE_DEBUG) {
+  PluginManager.registerConfigButton();
+  PluginManager.registerConfigButtonListener({
+    onClick() {
+      console.log('[index]: config button clicked → opening main panel');
+      setPendingButton(999);
+      DeviceEventEmitter.emit('quickToolbarButton', { id: 999 });
+    },
+  });
+}
 
