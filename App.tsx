@@ -4,6 +4,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View, StyleSheet, StatusBar,
   DeviceEventEmitter, AppState, AppStateStatus,
+  NativeModules,
 } from 'react-native';
 import { PluginManager, PluginNoteAPI, PluginFileAPI, PluginCommAPI, NativeUIUtils } from 'sn-plugin-lib';
 
@@ -212,21 +213,25 @@ function App(): React.JSX.Element {
         setClips(newClips);
       } else if (toolId === 'invert_ink') {
         try {
+          console.log('[PLT/longPress] checking lasso type counts…');
           const cntRes = await (PluginCommAPI as any).getLassoElementTypeCounts?.();
           const c = cntRes?.result;
+          console.log('[PLT/longPress] typeCounts:', JSON.stringify(c));
           const nonInk =
             (c?.titleNum ?? 0) +
             (c?.textLinkNum ?? 0) + (c?.trailLinkNum ?? 0) + (c?.todoLinkNum ?? 0) +
             (c?.normalTextBoxNum ?? 0) + (c?.digestTextBoxNum ?? 0) + (c?.digestTextBoxEditableNum ?? 0) +
             (c?.bitmapNum ?? 0);
           if (nonInk > 0) {
+            console.warn(`[PLT/longPress] rejected: nonInk=${nonInk}`);
             NativeUIUtils.showErrorTipDialog(t('palette_ink_only'));
             return;
           }
           const info = await getPaletteLassoInfo();
+          console.log(`[PLT/longPress] info ready, nums=${info?.elementNums?.length ?? 0}`);
           FloatingToolbarBridge.showPalettePanel(JSON.stringify(info ?? {}));
         } catch (e) {
-          console.warn('[App] palette long-press failed:', e);
+          console.error('[PLT/longPress] CRASH:', e);
         }
       }
     });
@@ -563,98 +568,181 @@ function App(): React.JSX.Element {
       PluginManager.closePluginView();
     });
 
+    let paletteInFlight = false;
+
     async function doPalette(
       elementNums: number[],
       penColor: number | null,
       thickness: number | null,
       penType: number | null,
       tag: string,
+      prefetchedEls?: any[],
+      hasMarker?: boolean,
     ): Promise<void> {
-      if (elementNums.length === 0) return;
+      if (elementNums.length === 0) { console.log(`[PLT/${tag}] skip: empty elementNums`); return; }
       const wantColorOrThickness = penColor !== null || thickness !== null;
       const wantPenType = penType !== null;
-      if (!wantColorOrThickness && !wantPenType) return;
+      if (!wantColorOrThickness && !wantPenType) { console.log(`[PLT/${tag}] skip: nothing to change`); return; }
 
-      await PluginNoteAPI.saveCurrentNote();
-      await PluginCommAPI.reloadFile();
+      if (paletteInFlight) {
+        console.warn(`[PLT/${tag}] BLOCKED: another doPalette is running`);
+        return;
+      }
+      paletteInFlight = true;
+      let prefetchConsumed = false;
+      const t0 = Date.now();
+      console.log(`[PLT/${tag}] START nums=${elementNums.length} color=${penColor} thick=${thickness} pt=${penType} prefetch=${!!prefetchedEls} marker=${!!hasMarker}`);
 
-      const fpRes: any = await PluginCommAPI.getCurrentFilePath();
-      const pgRes: any = await PluginCommAPI.getCurrentPageNum();
-      if (!fpRes?.success || !pgRes?.success) return;
-      const filePath = fpRes.result;
-      const pageNum = pgRes.result;
+      try {
+        // Marker strokes (penType 11) carry extra internal data (markPenDirection …) that
+        // is NOT fully materialized in a live lasso/getElements read. Modifying them in that
+        // state makes the host rebuild the page empty → strokes vanish. The committed build
+        // avoided this by solidifying first. So when the selection contains markers, restore
+        // that proven path: saveCurrentNote + reloadFile commits them to disk before modify.
+        // Non-marker selections keep the fast path (no save).
+        if (hasMarker || wantPenType && penType === 11) {
+          if (prefetchedEls) {
+            for (const el of prefetchedEls) { try { el?.recycle?.(); } catch (_) {} }
+            prefetchConsumed = true;
+          }
+          console.log(`[PLT/${tag}] marker present → solidify`);
+          await PluginNoteAPI.saveCurrentNote();
+          console.log(`[PLT/${tag}] saveCurrentNote +${Date.now() - t0}ms`);
+          await PluginCommAPI.reloadFile();
+          console.log(`[PLT/${tag}] reloadFile +${Date.now() - t0}ms`);
+        }
 
-      // ── Pass 1: color / thickness (must NOT touch stroke.penType) ──
-      if (wantColorOrThickness) {
-        const elRes: any = await PluginFileAPI.getElements(pageNum, filePath);
-        if (!elRes?.success || !Array.isArray(elRes.result)) return;
-        const allElements: any[] = elRes.result;
-        try {
-          const numSet = new Set(elementNums);
-          const targets = allElements.filter(
-            (el: any) => el?.numInPage != null && numSet.has(el.numInPage) && (el.type === 0 || el.type === 700)
-          );
-          if (targets.length === 0) { console.log(`[App] ${tag}: no matching elements`); return; }
+        const fpRes: any = await PluginCommAPI.getCurrentFilePath();
+        const pgRes: any = await PluginCommAPI.getCurrentPageNum();
+        if (!fpRes?.success || !pgRes?.success) {
+          console.warn(`[PLT/${tag}] ABORT: filePath.ok=${fpRes?.success} pageNum.ok=${pgRes?.success}`);
+          return;
+        }
+        const filePath = fpRes.result;
+        const pageNum = pgRes.result;
+        console.log(`[PLT/${tag}] file="${filePath}" page=${pageNum} +${Date.now() - t0}ms`);
 
-          for (const el of targets) {
-            if (penColor !== null) {
-              if (el.type === 0 && el.stroke) el.stroke.penColor = penColor;
-              if (el.type === 700 && el.geometry) el.geometry.penColor = penColor;
+        // NOTE: do NOT recycle prefetchedEls / clearElementCache here (non-marker path). The
+        // prefetched lasso elements share uuids with the page strokes; recycling them or
+        // clearing the cache before the getElements+modifyElements below poisons the host's
+        // point-data resolution → the host rebuilds the page with 0 trails → DATA LOSS.
+        // They are recycled in the outer finally, after all modify passes complete.
+
+        const numSet = new Set(elementNums);
+
+        // ── Pass 1: color + thickness (must NOT touch penType) ──
+        if (wantColorOrThickness) {
+          console.log(`[PLT/${tag}] P1 getElements…`);
+          const elRes: any = await PluginFileAPI.getElements(pageNum, filePath);
+          if (!elRes?.success || !Array.isArray(elRes.result)) {
+            console.warn(`[PLT/${tag}] P1 getElements FAIL ok=${elRes?.success}`);
+            return;
+          }
+          const allEls: any[] = elRes.result;
+          console.log(`[PLT/${tag}] P1 got ${allEls.length} els +${Date.now() - t0}ms`);
+          try {
+            const targets = allEls.filter(
+              (el: any) => el?.numInPage != null && numSet.has(el.numInPage) && (el.type === 0 || el.type === 700)
+            );
+            if (targets.length === 0) { console.log(`[PLT/${tag}] P1 no match`); return; }
+            console.log(`[PLT/${tag}] P1 matched ${targets.length} of ${allEls.length}`);
+
+            for (const el of targets) {
+              if (penColor !== null) {
+                if (el.type === 0 && el.stroke) el.stroke.penColor = penColor;
+                if (el.type === 700 && el.geometry) el.geometry.penColor = penColor;
+              }
+              if (thickness !== null) {
+                if (el.type === 0) el.thickness = Math.max(10, thickness);
+                if (el.type === 700 && el.geometry) el.geometry.penWidth = Math.max(10, thickness);
+              }
             }
-            if (thickness !== null) {
-              if (el.type === 0) el.thickness = Math.max(10, thickness);
-              if (el.type === 700 && el.geometry) el.geometry.penWidth = Math.max(10, thickness);
+
+            console.log(`[PLT/${tag}] P1 modifyElements n=${targets.length}…`);
+            const modRes: any = await NativeModules.NativePluginAPI.modifyElements(filePath, pageNum, targets);
+            const modCount = Array.isArray(modRes?.result) ? modRes.result.length : -1;
+            console.log(`[PLT/${tag}] P1 ok=${modRes?.success} code=${modRes?.code} modified=${modCount}/${targets.length} +${Date.now() - t0}ms`);
+            if (modCount >= 0 && modCount < targets.length) {
+              const got = new Set(modRes.result);
+              const skipped = targets.filter((el: any) => !got.has(el.numInPage)).map((el: any) => el.numInPage);
+              console.warn(`[PLT/${tag}] P1 host SKIPPED ${skipped.length} strokes (likely markers): nums=${JSON.stringify(skipped)}`);
+            }
+            if (wantPenType) {
+              await PluginCommAPI.reloadFile();
+              console.log(`[PLT/${tag}] P1 reloadFile (for P2) +${Date.now() - t0}ms`);
+            }
+          } finally {
+            for (const el of allEls) { try { el?.recycle?.(); } catch (_) {} }
+            try { (PluginCommAPI as any).clearElementCache?.(); } catch (_) {}
+          }
+        }
+
+        // ── Pass 2: penType (separate call — mixing with color/thickness breaks marker strokes) ──
+        if (wantPenType) {
+          const apiPenType = penType!;
+          console.log(`[PLT/${tag}] P2 getElements for pt=${apiPenType}…`);
+          const elRes2: any = await PluginFileAPI.getElements(pageNum, filePath);
+          if (!elRes2?.success || !Array.isArray(elRes2.result)) {
+            console.warn(`[PLT/${tag}] P2 getElements FAIL ok=${elRes2?.success}`);
+          } else {
+            const allEls2: any[] = elRes2.result;
+            console.log(`[PLT/${tag}] P2 got ${allEls2.length} els +${Date.now() - t0}ms`);
+            try {
+              const strokes2 = allEls2.filter(
+                (el: any) => el?.numInPage != null && numSet.has(el.numInPage) && el.type === 0
+              );
+              if (strokes2.length === 0) {
+                console.log(`[PLT/${tag}] P2 no stroke targets`);
+              } else {
+                console.log(`[PLT/${tag}] P2 matched ${strokes2.length} strokes`);
+                for (const el of strokes2) { if (el.stroke) el.stroke.penType = apiPenType; }
+                const modRes2: any = await NativeModules.NativePluginAPI.modifyElements(filePath, pageNum, strokes2);
+                const modCount2 = Array.isArray(modRes2?.result) ? modRes2.result.length : -1;
+                console.log(`[PLT/${tag}] P2 ok=${modRes2?.success} code=${modRes2?.code} modified=${modCount2}/${strokes2.length} +${Date.now() - t0}ms`);
+                if (modCount2 >= 0 && modCount2 < strokes2.length) {
+                  const got2 = new Set(modRes2.result);
+                  const skipped2 = strokes2.filter((el: any) => !got2.has(el.numInPage)).map((el: any) => el.numInPage);
+                  console.warn(`[PLT/${tag}] P2 host SKIPPED ${skipped2.length} strokes (likely markers): nums=${JSON.stringify(skipped2)}`);
+                }
+              }
+            } finally {
+              for (const el of allEls2) { try { el?.recycle?.(); } catch (_) {} }
+              try { (PluginCommAPI as any).clearElementCache?.(); } catch (_) {}
             }
           }
-
-          const modRes: any = await (PluginFileAPI as any).modifyElements(filePath, pageNum, targets);
-          console.log(`[App] ${tag} color/thickness:`, modRes?.success, targets.length, 'els');
-          await PluginCommAPI.reloadFile();
-        } finally {
-          for (const el of allElements) { try { el?.recycle?.(); } catch (_) {} }
-          try { (PluginCommAPI as any).clearElementCache?.(); } catch (_) {}
         }
-      }
 
-      // ── Pass 2: penType (separate call — mixing with color/thickness causes code 302) ──
-      if (wantPenType) {
-        const apiPenType = penType!;
-        const elRes2: any = await PluginFileAPI.getElements(pageNum, filePath);
-        if (!elRes2?.success || !Array.isArray(elRes2.result)) return;
-        const allElements2: any[] = elRes2.result;
-        try {
-          const numSet = new Set(elementNums);
-          const targets2 = allElements2.filter(
-            (el: any) => el?.numInPage != null && numSet.has(el.numInPage) && el.type === 0
-          );
-          if (targets2.length === 0) { console.log(`[App] ${tag}: no stroke elements for penType`); return; }
-
-          for (const el of targets2) {
-            if (el.stroke) el.stroke.penType = apiPenType;
-          }
-
-          const modRes2: any = await (PluginFileAPI as any).modifyElements(filePath, pageNum, targets2);
-          console.log(`[App] ${tag} penType(${apiPenType}):`, modRes2?.success, targets2.length, 'els');
-          await PluginCommAPI.reloadFile();
-        } finally {
-          for (const el of allElements2) { try { el?.recycle?.(); } catch (_) {} }
-          try { (PluginCommAPI as any).clearElementCache?.(); } catch (_) {}
+        await PluginCommAPI.reloadFile();
+        console.log(`[PLT/${tag}] DONE ${Date.now() - t0}ms`);
+      } catch (e) {
+        console.error(`[PLT/${tag}] CRASH:`, e);
+        throw e;
+      } finally {
+        if (prefetchedEls && !prefetchConsumed) {
+          for (const el of prefetchedEls) { try { el?.recycle?.(); } catch (_) {} }
         }
+        paletteInFlight = false;
       }
-
-      console.log(`[App] ${tag} done`);
     }
 
     const paletteApplySub = DeviceEventEmitter.addListener('paletteApply', async (evt: any) => {
-      console.log('[App] paletteApply:', evt);
+      console.log('[PLT/apply] event:', JSON.stringify(evt));
       try {
         const penColor = evt.penColor != null ? evt.penColor : null;
         const thickness = evt.thickness != null ? evt.thickness : null;
         const penType = evt.penType != null ? evt.penType : null;
-        const elementNums: number[] = evt.elementNums ? JSON.parse(evt.elementNums) : [];
-        await doPalette(elementNums, penColor, thickness, penType, 'paletteApply');
+        let elementNums: number[] = [];
+        try {
+          elementNums = evt.elementNums ? JSON.parse(evt.elementNums) : [];
+        } catch (pe) {
+          console.error('[PLT/apply] elementNums parse FAIL:', pe, 'raw=', evt.elementNums);
+          return;
+        }
+        const hasMarker = evt.hasMarkerStroke === true;
+        console.log(`[PLT/apply] nums=${elementNums.length} c=${penColor} t=${thickness} pt=${penType} marker=${hasMarker}`);
+        await doPalette(elementNums, penColor, thickness, penType, 'apply', undefined, hasMarker);
       } catch (e) {
-        console.error('[App] paletteApply error:', e);
+        console.error('[PLT/apply] CRASH:', e);
       }
     });
 
@@ -662,26 +750,31 @@ function App(): React.JSX.Element {
     let cachedPaletteNums: number[] = [];
 
     const paletteBubbleSlotSub = PaletteBubbleBridge.onSlotTap(async ({ color, thickness, penType }) => {
+      console.log(`[PLT/bubble] slotTap color=${color} thick=${thickness} pt=${penType}`);
       try {
         const cntRes = await (PluginCommAPI as any).getLassoElementTypeCounts?.();
         const c = cntRes?.result;
+        console.log('[PLT/bubble] typeCounts:', JSON.stringify(c));
         const nonInk =
           (c?.titleNum ?? 0) +
           (c?.textLinkNum ?? 0) + (c?.trailLinkNum ?? 0) + (c?.todoLinkNum ?? 0) +
           (c?.normalTextBoxNum ?? 0) + (c?.digestTextBoxNum ?? 0) + (c?.digestTextBoxEditableNum ?? 0) +
           (c?.bitmapNum ?? 0);
         if (nonInk > 0) {
+          console.warn(`[PLT/bubble] rejected: nonInk=${nonInk}`);
           NativeUIUtils.showErrorTipDialog(t('palette_ink_only'));
           return;
         }
-        const info = await getPaletteLassoInfo();
+        const info = await getPaletteLassoInfo(true);
+        const fromCache = !info?.elementNums;
         const elementNums: number[] = info?.elementNums ?? cachedPaletteNums;
-        if (elementNums.length === 0) { console.log('[App] palette bubble: no selection'); return; }
+        if (elementNums.length === 0) { console.log('[PLT/bubble] no selection (info=null, cache empty)'); return; }
+        console.log(`[PLT/bubble] nums=${elementNums.length} fromCache=${fromCache} prevCache=${cachedPaletteNums.length}`);
         cachedPaletteNums = elementNums;
         const penColor = COLOR_MAP[color] ?? null;
-        await doPalette(elementNums, penColor, thickness, penType, 'paletteBubble');
+        await doPalette(elementNums, penColor, thickness, penType, 'bubble', info?.elements, info?.hasMarkerStroke === true);
       } catch (e) {
-        console.error('[App] palette bubble slot tap error:', e);
+        console.error('[PLT/bubble] CRASH:', e);
       }
     });
 

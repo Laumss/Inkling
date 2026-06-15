@@ -1211,6 +1211,9 @@ class PalettePanel(
             if (thicknessChanged) putInt("thickness", thickness)
             if (penTypeChanged()) putInt("penType", effectivePenType()!!)
             putString("elementNums", JSONArray(elementNums).toString())
+            // Source selection contains marker strokes → RN must solidify (saveCurrentNote)
+            // before modify, else marker internal data is incomplete and the host wipes them.
+            putBoolean("hasMarkerStroke", hasMarkerStroke)
         }
         toolbarModule.emitEventPublic("paletteApply", map)
         hide()

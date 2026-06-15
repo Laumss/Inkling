@@ -288,7 +288,13 @@ class PaletteBubbleModule(reactContext: ReactApplicationContext) :
             }
         }
 
-        windowManager?.addView(bubbleView, layoutParams)
+        try {
+            windowManager?.addView(bubbleView, layoutParams)
+        } catch (e: Exception) {
+            Log.e(TAG, "addView FAILED: ${e.message}", e)
+            bubbleView = null; layoutParams = null
+            return
+        }
         if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "palette bubble shown (${ROWS}x${activeCols}, ${activeCols * ROWS} slots)")
         notifyToolbarHighlight()
     }

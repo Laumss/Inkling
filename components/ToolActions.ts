@@ -590,14 +590,37 @@ async function clipSave(slot: string): Promise<string> {
     return `Save clip ${slot} failed (no elements)`;
   }
 
+  // The sticker render must use the NOTE's coordinate system (file machine type),
+  // not the running device. They usually match, but the file type is authoritative —
+  // a note drawn on device A keeps A's EMR range even when opened on device B.
   const deviceType = await PluginManager.getDeviceType();
-  console.log('[CLIP-DBG] convertElement2Sticker elements=', elemRes.result.length, 'machineType=', deviceType);
+  let fileType: number | null = null;
+  try {
+    const fpRes: any = await PluginCommAPI.getCurrentFilePath();
+    if (fpRes?.success && fpRes.result) {
+      const ftRes: any = await (PluginFileAPI as any).getFileMachineType(fpRes.result);
+      if (ftRes?.success && typeof ftRes.result === 'number') fileType = ftRes.result;
+    }
+  } catch (e) { console.warn('[CLIP-DBG] getFileMachineType failed:', e); }
+
+  const machineType = fileType != null ? fileType : deviceType;
+  console.log('[CLIP-DBG] convertElement2Sticker elements=', elemRes.result.length,
+    'machineType=', machineType, '(device=', deviceType, 'file=', fileType, ')');
   const convertRes: any = await NativeModules.NativePluginAPI.convertElement2Sticker({
-    machineType: deviceType,
+    machineType,
     elements: elemRes.result,
     stickerPath: path,
   });
   console.log('[CLIP-DBG] convertElement2Sticker result:', JSON.stringify(convertRes));
+
+  // Diagnostic: measure the saved sticker vs the lasso bbox to localize any width
+  // halving — if stickerSize.width ≈ lassoRect.width/2, the SAVE step is the culprit.
+  try {
+    const szRes: any = await PluginCommAPI.getStickerSize(path);
+    const rectRes: any = await (PluginCommAPI as any).getLassoRect?.();
+    console.log('[CLIP-DBG] stickerSize=', JSON.stringify(szRes?.result),
+      'lassoRect=', JSON.stringify(rectRes?.result));
+  } catch (e) { console.warn('[CLIP-DBG] size diag failed:', e); }
 
   if (!convertRes?.success || convertRes.result === false) {
     console.warn('[CLIP-DBG] convertElement2Sticker FAILED', JSON.stringify(convertRes));
@@ -735,22 +758,30 @@ export interface PaletteLassoInfo {
   hasMarkerStroke: boolean;
   dominantPenType: number | null;
   dominantPenColor: number | null;
+  elements?: any[];
 }
 
 const PEN_TYPE_MARKER = 11;
 
-export async function getPaletteLassoInfo(): Promise<PaletteLassoInfo | null> {
+export async function getPaletteLassoInfo(retainElements?: boolean): Promise<PaletteLassoInfo | null> {
+  const t0 = Date.now();
+  console.log('[PLT/stats] START');
   const elemRes = await PluginCommAPI.getLassoElements() as any;
   if (!elemRes?.success || !Array.isArray(elemRes.result) || elemRes.result.length === 0) {
+    console.log(`[PLT/stats] getLassoElements empty ok=${elemRes?.success} n=${elemRes?.result?.length ?? 0} +${Date.now() - t0}ms`);
     return null;
   }
   const els: any[] = elemRes.result;
+  console.log(`[PLT/stats] ${els.length} raw elements +${Date.now() - t0}ms`);
+  let shouldRecycle = true;
   try {
     const strokes = els.filter((el: any) => el?.type === 0);
     const geoms   = els.filter((el: any) => el?.type === 700);
+    const skipped = els.length - strokes.length - geoms.length;
     const elementNums = [...strokes, ...geoms]
       .map((el: any) => el?.numInPage)
       .filter((n: any): n is number => typeof n === 'number');
+    console.log(`[PLT/stats] strokes=${strokes.length} geoms=${geoms.length} skip=${skipped} validNums=${elementNums.length}`);
     if (elementNums.length === 0) return null;
 
     const thicknessVals: number[] = [];
@@ -765,8 +796,9 @@ export async function getPaletteLassoInfo(): Promise<PaletteLassoInfo | null> {
       try {
         const pi = await PluginCommAPI.getPenInfo();
         if (pi?.success && pi.result != null) resolvedDefaultPenType = pi.result.type ?? null;
+        console.log(`[PLT/stats] resolvedDefaultPenType=${resolvedDefaultPenType}`);
       } catch (e) {
-        console.warn('[ToolActions] getPaletteLassoInfo getPenInfo failed:', e);
+        console.warn('[PLT/stats] getPenInfo failed:', e);
       }
     }
 
@@ -789,7 +821,7 @@ export async function getPaletteLassoInfo(): Promise<PaletteLassoInfo | null> {
       return best;
     };
 
-    return {
+    const info: PaletteLassoInfo = {
       elementNums,
       strokeCount: strokes.length,
       geometryCount: geoms.length,
@@ -798,8 +830,17 @@ export async function getPaletteLassoInfo(): Promise<PaletteLassoInfo | null> {
       dominantPenType: dominant(penTypeCount),
       dominantPenColor: dominant(penColorCount),
     };
+    if (retainElements) {
+      info.elements = els;
+      shouldRecycle = false;
+    }
+    console.log(`[PLT/stats] result: s=${info.strokeCount} g=${info.geometryCount} avgT=${info.avgThickness} domPT=${info.dominantPenType} domPC=${info.dominantPenColor} marker=${info.hasMarkerStroke} retain=${!!retainElements} +${Date.now() - t0}ms`);
+    return info;
   } finally {
-    for (const el of els) { try { el?.recycle?.(); } catch (_) {} }
+    if (shouldRecycle) {
+      for (const el of els) { try { el?.recycle?.(); } catch (_) {} }
+      console.log(`[PLT/stats] recycled ${els.length} +${Date.now() - t0}ms`);
+    }
   }
 }
 
