@@ -23,9 +23,6 @@ const TOP_MARGIN_BASE     = 150;
 
 const BASE_PAGE_HEIGHT    = 1872;
 
-const CHAR_WIDTH_FACTOR_CJK = 1.15;
-
-const CHAR_WIDTH_FACTOR_LATIN = 0.65;
 const FONT_SIZE         = 36;
 const INTERVAL_MS       = 200;
 
@@ -477,32 +474,6 @@ export class TextInserter {
     } catch (e) {
       console.warn('[TextInserter]: _refreshOccupiedRanges failed:', e);
     }
-  }
-
-  private _skipOccupiedArea(candidateTop: number, boxH: number, gap: number): number {
-    let top = candidateTop;
-
-    let iterations = 0;
-    while (iterations < 50) {
-      iterations++;
-      let collision = false;
-      for (const range of this._occupiedRanges) {
-
-        if (top < range.bottom && (top + boxH) > range.top) {
-
-          const newTop = range.bottom + gap;
-          console.log('[TextInserter]: collision at top=', top,
-            'with existing [', range.top, ',', range.bottom, '] → skip to', newTop);
-          FileLogger.logEvent('CollisionSkip',
-            `top=${top} boxH=${boxH} existing=[${range.top},${range.bottom}] newTop=${newTop}`);
-          top = newTop;
-          collision = true;
-          break;
-        }
-      }
-      if (!collision) break;
-    }
-    return top;
   }
 
   private _addToOccupied(top: number, bottom: number): void {

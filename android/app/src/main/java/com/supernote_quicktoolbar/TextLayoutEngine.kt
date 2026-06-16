@@ -182,18 +182,6 @@ class TextLayoutEngine(reactContext: ReactApplicationContext) :
         }
     }
 
-    @ReactMethod
-    fun preprocessText(text: String, promise: Promise) {
-        try {
-            var result = text.replace(Regex("^(\\d+)\\.", RegexOption.MULTILINE), "$1​.")
-            result = result.replace("*", "")
-            result = result.split("\n").filter { it.trim().isNotEmpty() }.joinToString("\n")
-            promise.resolve(result)
-        } catch (e: Exception) {
-            promise.reject("PREPROCESS_ERROR", e.message, e)
-        }
-    }
-
     private fun parseOccupiedRanges(array: ReadableArray?): List<Pair<Int, Int>> {
         if (array == null) return emptyList()
         val ranges = mutableListOf<Pair<Int, Int>>()
