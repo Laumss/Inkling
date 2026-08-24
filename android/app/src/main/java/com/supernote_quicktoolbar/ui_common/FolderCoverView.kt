@@ -1,7 +1,6 @@
 package com.supernote_quicktoolbar.ui_common
 
 import android.content.Context
-import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.drawable.BitmapDrawable
@@ -86,15 +85,5 @@ class FolderCoverView(context: Context) : FrameLayout(context) {
 
         (gridRoot.layoutParams as LayoutParams).topMargin = topOffset
         requestLayout()
-    }
-
-    fun setChildBitmap(index: Int, bmp: Bitmap?) {
-        val v = when (index) { 0 -> child1; 1 -> child2; 2 -> child3; else -> child4 }
-        if (bmp == null) {
-            v.visibility = INVISIBLE
-        } else {
-            v.setImageBitmap(bmp)
-            v.visibility = VISIBLE
-        }
     }
 }

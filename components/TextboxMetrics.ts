@@ -70,46 +70,6 @@ function getRequestedWidth(width: number, calibration: TextboxMeasurementCalibra
   return Math.max(24, width - calibration.widthAdjustment);
 }
 
-export async function measureTextLayout(
-  text: string,
-  width: number,
-  fontSize: number,
-  calibration: TextboxMeasurementCalibration = DEFAULT_CALIBRATION,
-): Promise<NativeTextMeasurement | null> {
-  if (!TextboxMetrics?.measureTextLayout) return null;
-  try {
-    return await TextboxMetrics.measureTextLayout({
-      text,
-      width: getRequestedWidth(width, calibration),
-      fontSize,
-      includePad: true,
-    });
-  } catch (e) {
-    console.warn('[TextboxMetrics]: measureTextLayout failed:', e);
-    return null;
-  }
-}
-
-export async function measureDetailedTextLayout(
-  text: string,
-  width: number,
-  fontSize: number,
-  calibration: TextboxMeasurementCalibration = DEFAULT_CALIBRATION,
-): Promise<NativeDetailedMeasurement | null> {
-  if (!TextboxMetrics?.measureTextLayoutDetailed) return null;
-  try {
-    return await TextboxMetrics.measureTextLayoutDetailed({
-      text,
-      width: getRequestedWidth(width, calibration),
-      fontSize,
-      includePad: true,
-    });
-  } catch (e) {
-    console.warn('[TextboxMetrics]: measureDetailedTextLayout failed:', e);
-    return null;
-  }
-}
-
 export async function splitTextForHeight(
   text: string,
   width: number,

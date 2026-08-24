@@ -9,6 +9,7 @@ import android.view.View
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
 import com.supernote_quicktoolbar.ui_common.VectorAssets
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.ReactApplicationContext
@@ -25,7 +26,7 @@ import java.io.File
 
 class DocLinkPanel(
     ctx: ReactApplicationContext,
-    toolbar: FloatingToolbarModule
+    private val toolbar: FloatingToolbarModule
 ) : PanelBase(ctx, toolbar) {
 
     override val tag = "NativeDocPanel"
@@ -41,7 +42,7 @@ class DocLinkPanel(
             return inst
         }
 
-        val DOC_EXTS = setOf("epub", "pdf", "cbz", "doc", "docx", "txt", "djvu", "mobi", "fb2")
+        val DOC_EXTS = setOf("epub", "pdf", "cbz", "doc", "docx", "note", "mobi", "fb2")
         private val ALLOWED_ROOT_FOLDERS = setOf(
             "Document", "EXPORT", "INBOX", "LocalSend", "Export", "MyStyle", "Note", "SCREENSHOT", "Books", "Download"
         )
@@ -51,17 +52,22 @@ class DocLinkPanel(
 
     private var currentBrowsePath = "/sdcard/Document"
     private var selectedDocPath: String? = null
+    private var currentNotePath: String? = null
     private val multi = MultiSelectState()
+    private var fileReadPermissionRequestPending = false
+    private var lastFilePermissionToastAt = 0L
 
     private lateinit var chipsH: ChipsHandle
     private lateinit var listH: ListHandle
     private lateinit var insertBtn: ButtonHandle
     private lateinit var multiCheckbox: CheckboxHandle
 
-    fun show() {
+    fun show(currentFilePath: String?) {
         currentInstance = this
         selectedDocPath = null
+        currentNotePath = currentFilePath?.let(::normalizePath)
         multi.clear()
+        fileReadPermissionRequestPending = false
         currentBrowsePath = "/sdcard/Document"
         showPanel()
     }
@@ -108,20 +114,75 @@ class DocLinkPanel(
         listH.scrollTop()
     }
 
+    private fun normalizePath(path: String): String = try {
+        File(path).canonicalPath
+    } catch (_: Exception) {
+        path.replace("/sdcard/", "/storage/emulated/0/")
+    }
+
     private fun loadItems(): List<DocItem> {
         val dir = File(currentBrowsePath)
-        if (!dir.exists() || !dir.isDirectory) return emptyList()
-        return (dir.listFiles() ?: emptyArray())
-            .filter { !it.name.startsWith(".") }
-            .filter { f ->
-                if (f.isDirectory) {
-                    if (currentBrowsePath == "/sdcard") ALLOWED_ROOT_FOLDERS.contains(f.name) else true
-                } else {
-                    DOC_EXTS.contains(f.extension.lowercase())
-                }
+        try {
+            if (!dir.exists() || !dir.isDirectory) return emptyList()
+            val files = try {
+                dir.listFiles() ?: emptyArray()
+            } catch (e: SecurityException) {
+                handleFileReadBlocked(currentBrowsePath, e)
+                return emptyList()
             }
-            .sortedWith(compareByDescending<File> { it.isDirectory }.thenBy { it.name })
-            .map { DocItem(it.name, it.absolutePath, it.isDirectory, it.length()) }
+            return files
+                .filter { !it.name.startsWith(".") }
+                .filter { f ->
+                    try {
+                        if (f.isDirectory) {
+                            if (currentBrowsePath == "/sdcard") ALLOWED_ROOT_FOLDERS.contains(f.name) else true
+                        } else {
+                            DOC_EXTS.contains(f.extension.lowercase()) &&
+                                (currentNotePath == null || normalizePath(f.absolutePath) != currentNotePath)
+                        }
+                    } catch (e: SecurityException) {
+                        handleFileReadBlocked(f.absolutePath, e, showToast = false)
+                        false
+                    }
+                }
+                .sortedWith(compareByDescending<File> { try { it.isDirectory } catch (_: SecurityException) { false } }.thenBy { it.name })
+                .map {
+                    DocItem(
+                        it.name,
+                        it.absolutePath,
+                        try { it.isDirectory } catch (_: SecurityException) { false },
+                        try { it.length() } catch (_: SecurityException) { 0L }
+                    )
+                }
+        } catch (e: SecurityException) {
+            handleFileReadBlocked(currentBrowsePath, e)
+            return emptyList()
+        }
+    }
+
+    private fun handleFileReadBlocked(path: String, e: SecurityException, showToast: Boolean = true) {
+        if (BuildConfig.ENABLE_DEBUG) android.util.Log.w(tag, "file read blocked for $path: ${e.message}")
+        requestFileReadPermissionOnce()
+        if (showToast) {
+            val now = System.currentTimeMillis()
+            if (now - lastFilePermissionToastAt > 2500L) {
+                lastFilePermissionToastAt = now
+                Toast.makeText(reactContext, NativeLocale.t("file_read_permission_needed"), Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun requestFileReadPermissionOnce() {
+        if (fileReadPermissionRequestPending) return
+        fileReadPermissionRequestPending = true
+        toolbar.requestPluginFileReadPermission { granted ->
+            fileReadPermissionRequestPending = false
+            if (granted && rootView != null) {
+                refreshList()
+            } else if (!granted) {
+                toolbar.openPluginSettingsAfterFileReadDenied()
+            }
+        }
     }
 
     private var folderBitmap: Bitmap? = null
@@ -209,7 +270,7 @@ class DocLinkPanel(
             val count = try {
                 File(item.path).listFiles()?.count { !it.name.startsWith(".") } ?: 0
             } catch (_: Exception) { 0 }
-            "共${count}项"
+            NativeLocale.itemCount(count)
         } else {
             PanelWidgets.formatSize(item.size)
         }
@@ -288,13 +349,13 @@ class DocLinkPanel(
                 docLinkQueue.addAll(paths.drop(1))
             }
             val firstPath = paths.first()
-            toolbarModule.emitEventPublic("nativeInsertDocLink", Arguments.createMap().apply {
+            toolbarModule.emitEvent("nativeInsertDocLink", Arguments.createMap().apply {
                 putString("path", firstPath)
                 putString("linkName", File(firstPath).nameWithoutExtension)
             })
         } else {
             val docPath = selectedDocPath ?: return
-            toolbarModule.emitEventPublic("nativeInsertDocLink", Arguments.createMap().apply {
+            toolbarModule.emitEvent("nativeInsertDocLink", Arguments.createMap().apply {
                 putString("path", docPath)
                 putString("linkName", File(docPath).nameWithoutExtension)
             })
@@ -304,8 +365,8 @@ class DocLinkPanel(
 
     private fun getDocIcon(name: String): String = when (name.substringAfterLast('.').lowercase()) {
         "pdf" -> "PDF"; "epub" -> "EPB"; "cbz" -> "CBZ"
-        "doc", "docx" -> "DOC"; "txt" -> "TXT"
-        "djvu" -> "DJV"; "mobi" -> "MOB"; "fb2" -> "FB2"
+        "doc", "docx" -> "DOC"; "note" -> "NOTE"
+        "mobi" -> "MOB"; "fb2" -> "FB2"
         else -> "DOC"
     }
 }

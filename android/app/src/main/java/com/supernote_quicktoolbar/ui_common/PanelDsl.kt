@@ -14,10 +14,12 @@ interface PanelHost {
     fun dp(v: Int): Int
     fun dp(v: Float): Int
     fun sp(v: Float): Float
+    fun gridSp(v: Float): Float
     fun close()
     fun onDispose(block: () -> Unit)
     val panelW: Int
     val screenW: Int
+    val screenH: Int
     fun emitEvent(name: String, data: WritableMap)
 }
 
@@ -177,7 +179,7 @@ class PanelScope internal constructor() {
                 if (items.isEmpty()) {
                     scroll.content.addView(PanelWidgets.emptyView(h, emptyText))
                 } else {
-                    PanelGrid.build(h.ctx, scroll, h.screenW, h.panelW, items) { item, colW ->
+                    PanelGrid.build(h.ctx, scroll, h.screenW, h.screenH, h.panelW, items) { item, colW ->
                         cell(h, item, colW)
                     }
                 }
@@ -194,10 +196,7 @@ class PanelScope internal constructor() {
         components += PanelComponent { h ->
             LinearLayout(h.ctx).apply {
                 orientation = LinearLayout.VERTICAL
-                addView(View(h.ctx).apply {
-                    layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 1)
-                    setBackgroundColor(Color.parseColor("#D8D8D8"))
-                })
+                addView(PanelWidgets.divider(h, dark = false))
                 addView(TextView(h.ctx).apply {
                     text = title
                     textSize = h.sp(14f)
@@ -220,24 +219,11 @@ class PanelScope internal constructor() {
     fun bottomBar(build: BottomBarScope.() -> Unit) {
         val scope = BottomBarScope().apply(build)
         components += PanelComponent { h ->
-            val wrapper = LinearLayout(h.ctx).apply { orientation = LinearLayout.VERTICAL }
-            wrapper.addView(PanelWidgets.divider(h))
-            val bar = LinearLayout(h.ctx).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(h.dp(28), h.dp(28), h.dp(28), h.dp(28))
-            }
-            val flex = scope.leftFlex
-            if (flex != null) {
-                bar.addView(flex.build(h))
-            } else {
-                bar.addView(View(h.ctx).apply {
-                    layoutParams = LinearLayout.LayoutParams(0, 1, 1f)
-                })
-            }
-            scope.rightItems.forEach { bar.addView(it.build(h)) }
-            wrapper.addView(bar)
-            wrapper
+            PanelWidgets.bottomBar(
+                h,
+                leftFlex = scope.leftFlex?.build(h),
+                rightButtons = scope.rightItems.map { it.build(h) }
+            )
         }
     }
 }

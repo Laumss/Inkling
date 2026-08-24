@@ -56,6 +56,9 @@ class StitchPanel(
         private const val DRAG_EDGE = 0
         private const val DRAG_BOTH = 1
         private const val DRAG_OVERLAP = 2
+
+        private const val PREFS_NAME = "screenshot_state"
+        private const val PREF_LAST_COLS = "stitch_last_cols"
     }
 
     private var session: StitchSessionData? = null
@@ -75,6 +78,12 @@ class StitchPanel(
     private var stripVirtualSession: StitchSessionData? = null
 
     private val isGridMode: Boolean get() = (session?.images?.size ?: 0) > 2
+
+    private fun overlapText(px: Int) = NativeLocale.t("stitch_overlap", px)
+    private fun stripLabel(vertical: Boolean) =
+        (if (vertical) "↕ " else "↔ ") + NativeLocale.t("stitch_strip")
+    private fun dirArrowLabel(vertical: Boolean) =
+        (if (vertical) "↕ " else "↔ ") + NativeLocale.t(if (vertical) "vertical" else "horizontal")
 
     private fun desiredOrientation(): Int {
         val s = session ?: return ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
@@ -97,7 +106,12 @@ class StitchPanel(
                else ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
     }
 
-    fun show(session: StitchSessionData, onConfirm: (StitchSessionData) -> Unit, onCancel: () -> Unit) {
+    fun show(
+        session: StitchSessionData,
+        onConfirm: (StitchSessionData) -> Unit,
+        onCancel: () -> Unit,
+        onShowResult: ((Boolean) -> Unit)? = null
+    ) {
         if (BuildConfig.ENABLE_DEBUG) Log.i(tag, "show() images=${session.images.size} cols=${session.params.cols}")
         currentInstance = this
         this.session = session
@@ -106,13 +120,33 @@ class StitchPanel(
         isCompositing = false
         applyDefaultDirection(session)
         registerConfigCallback()
-        showPanel()
+        showPanel(onShowResult)
+    }
+
+    private fun saveLastCols(cols: Int) {
+        try {
+            reactContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit().putInt(PREF_LAST_COLS, cols).apply()
+        } catch (_: Exception) {}
+    }
+
+    private fun loadLastCols(): Int {
+        return try {
+            reactContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getInt(PREF_LAST_COLS, 0)
+        } catch (_: Exception) { 0 }
     }
 
     private fun applyDefaultDirection(session: StitchSessionData) {
         toolbarModule.refreshScreenDimensions()
         if (session.images.size > 2) {
-            session.params.cols = if (session.params.direction == "vertical") 1 else session.images.size
+            val saved = loadLastCols()
+            session.params.cols = when {
+                saved <= 0 -> if (session.params.direction == "vertical") 1 else session.images.size
+                saved == 1 -> 1
+                saved >= session.images.size -> session.images.size
+                else -> saved
+            }
         } else {
             val wantHorizontal = !isLandscape
             session.params.direction = if (wantHorizontal) "horizontal" else "vertical"
@@ -426,14 +460,15 @@ class StitchPanel(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { topMargin = dp(6); bottomMargin = dp(6) }
         }
-        val dirLabel = if (session?.params?.direction == "vertical") "↕ Strip" else "↔ Strip"
+        val dirLabel = stripLabel(session?.params?.direction == "vertical")
         val stripBtn = makeCtrlBtn(dirLabel) {}
         stripBtn.background = GradientDrawable().apply { setColor(Color.BLACK); setStroke(dp(1), Color.BLACK) }
         stripBtn.setTextColor(Color.WHITE)
         modeRow.addView(stripBtn)
-        modeRow.addView(makeCtrlBtn("⊞ Grid") {
+        modeRow.addView(makeCtrlBtn(NativeLocale.t("stitch_grid")) {
             val s = session ?: return@makeCtrlBtn
             s.params.cols = 2
+            saveLastCols(2)
             applyOrientation(desiredOrientation())
             rebuildContent()
         })
@@ -445,7 +480,7 @@ class StitchPanel(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { bottomMargin = dp(4) }
         }
-        row2.addView(makeSmallBtn("⇅ Swap") {
+        row2.addView(makeSmallBtn("⇅ ${NativeLocale.t("stitch_swap")}") {
             stitchView?.swapBitmaps()
             val tmp = vSess.images[0]
             vSess.images[0] = vSess.images[1]
@@ -465,7 +500,7 @@ class StitchPanel(
             )
         }
         overlapLabel = TextView(reactContext).apply {
-            text = "Overlap: ${vSess.params.overlap}px"
+            text = overlapText(vSess.params.overlap)
             textSize = sp(15f); setTextColor(Color.BLACK)
             setPadding(0, 0, dp(8), 0)
         }
@@ -514,16 +549,18 @@ class StitchPanel(
             ).apply { topMargin = dp(6); bottomMargin = dp(6) }
         }
 
-        val dirLabel = if (sess.params.direction == "vertical") "↕ Strip" else "↔ Strip"
+        val dirLabel = stripLabel(sess.params.direction == "vertical")
         row1.addView(makeCtrlBtn(dirLabel) {
             val s = session ?: return@makeCtrlBtn
-            s.params.cols = if (s.params.direction == "vertical") 1 else s.images.size
+            val newCols = if (s.params.direction == "vertical") 1 else s.images.size
+            s.params.cols = newCols
+            saveLastCols(newCols)
             applyOrientation(desiredOrientation())
             rebuildContent()
         })
 
         colsLabel = TextView(reactContext).apply {
-            text = "⊞ Grid"
+            text = NativeLocale.t("stitch_grid")
             textSize = sp(15f); setTextColor(Color.BLACK)
             setPadding(0, 0, dp(12), 0)
         }
@@ -535,6 +572,7 @@ class StitchPanel(
             val btn = makeCtrlBtn(label) {
                 val s = session ?: return@makeCtrlBtn
                 s.params.cols = c
+                saveLastCols(c)
                 updateColHighlights(c)
                 updateOverlapRowVisibility(s)
                 updateGridOrderVisibility(s)
@@ -575,7 +613,7 @@ class StitchPanel(
             visibility = if (isLinearMode(sess)) View.VISIBLE else View.GONE
         }
         gridOverlapLabel = TextView(reactContext).apply {
-            text = "Overlap: ${sess.params.overlap}px"
+            text = overlapText(sess.params.overlap)
             textSize = sp(15f); setTextColor(Color.BLACK)
             setPadding(0, 0, dp(8), 0)
         }
@@ -595,7 +633,7 @@ class StitchPanel(
                 LinearLayout.LayoutParams.WRAP_CONTENT
             )
         }
-        row3.addView(makeSmallBtn("⇅ Swap last") {
+        row3.addView(makeSmallBtn("⇅ ${NativeLocale.t("stitch_swap_last")}") {
             val s = session ?: return@makeSmallBtn
             val n = s.images.size
             if (n >= 2) {
@@ -615,7 +653,7 @@ class StitchPanel(
                 try { java.io.File(last.path).delete() } catch (_: Exception) {}
                 bitmaps.removeAt(bitmaps.size - 1)?.recycle()
                 if (s.images.size <= 2) s.params.cols = 0
-                colsLabel?.text = "${s.images.size} images"
+                colsLabel?.text = NativeLocale.t("stitch_images", s.images.size)
                 applyOrientation(desiredOrientation())
                 gridView?.updateSession(s)
             }
@@ -636,7 +674,7 @@ class StitchPanel(
         }
         val maxOvl = (dim * 0.8f).toInt()
         s.params.overlap = max(0, min(maxOvl, s.params.overlap + delta))
-        gridOverlapLabel?.text = "Overlap: ${s.params.overlap}px"
+        gridOverlapLabel?.text = overlapText(s.params.overlap)
         gridView?.updateSession(s)
     }
 
@@ -692,14 +730,14 @@ class StitchPanel(
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { topMargin = dp(6); bottomMargin = dp(6) }
         }
-        val dirBtn = makeCtrlBtn(if (sess.params.direction == "vertical") "↕ Vertical" else "↔ Horizontal") {
+        val dirBtn = makeCtrlBtn(dirArrowLabel(sess.params.direction == "vertical")) {
             val s = session ?: return@makeCtrlBtn
             s.params.direction = if (s.params.direction == "vertical") "horizontal" else "vertical"
             s.params.overlap = (s.params.overlap * 0.5).toInt()
             applyOrientation(desiredOrientation())
             rebuildStitchView()
         }
-        val swapBtn = makeCtrlBtn("⇅ Swap") {
+        val swapBtn = makeCtrlBtn("⇅ ${NativeLocale.t("stitch_swap")}") {
             val s = session ?: return@makeCtrlBtn
             if (s.images.size >= 2) {
                 val tmp = s.images[0]
@@ -729,7 +767,7 @@ class StitchPanel(
             )
         }
         overlapLabel = TextView(reactContext).apply {
-            text = "Overlap: ${sess.params.overlap}px"
+            text = overlapText(sess.params.overlap)
             textSize = sp(15f); setTextColor(Color.BLACK)
             setPadding(0, 0, dp(8), 0)
             layoutParams = LinearLayout.LayoutParams(
@@ -761,14 +799,14 @@ class StitchPanel(
                    else imgs[1].width * (1 - imgs[1].cropLeft - imgs[1].cropRight)
         val maxOvl = (min(dim0, dim1) * 0.8f).toInt()
         s.params.overlap = max(0, min(maxOvl, s.params.overlap + delta))
-        overlapLabel?.text = "Overlap: ${s.params.overlap}px"
+        overlapLabel?.text = overlapText(s.params.overlap)
         stitchView?.updateSession(s)
     }
 
     private fun rebuildStitchView() {
         val s = stripVirtualSession ?: session ?: return
         stitchView?.updateSession(s)
-        overlapLabel?.text = "Overlap: ${s.params.overlap}px"
+        overlapLabel?.text = overlapText(s.params.overlap)
     }
 
     private fun doConfirm() {
@@ -1179,7 +1217,7 @@ class StitchPanel(
                             val dim1 = if (isVert) eff1H else eff1W
                             val maxOvl = (min(dim0, dim1) * 0.8f).toInt()
                             sess.params.overlap = max(0, min(maxOvl, dragOverlapStart + imgDelta.roundToInt()))
-                            overlapLabel?.text = "Overlap: ${sess.params.overlap}px"
+                            overlapLabel?.text = overlapText(sess.params.overlap)
                         }
                         DRAG_EDGE -> {
                             val isVertAxis = dragCropKey == "cropTop" || dragCropKey == "cropBottom"

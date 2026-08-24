@@ -15,13 +15,15 @@ const FloatingBubbleBridge = {
   isAvailable: !!FloatingBubble,
 
   show(statusText: string, mode?: string): void {
+    console.log('[BUBBLE-DBG/JS] bridge.show statusText=', statusText, 'mode=', mode, 'nativeAvailable=', !!FloatingBubble);
     try { FloatingBubble?.show(statusText, mode ?? ''); } catch (e) {
       console.warn('[FloatingBubbleBridge]: show failed:', e);
     }
   },
 
   showAt(statusText: string, pageX: number, pageY: number, mode?: string): void {
-    try { FloatingBubble?.showAt(statusText, Math.round(pageX), Math.round(pageY)); } catch (e) {
+    console.log('[BUBBLE-DBG/JS] bridge.showAt statusText=', statusText, 'page=', pageX, pageY, 'mode=', mode, 'nativeAvailable=', !!FloatingBubble);
+    try { FloatingBubble?.showAt(statusText, Math.round(pageX), Math.round(pageY), mode ?? ''); } catch (e) {
       console.warn('[FloatingBubbleBridge]: showAt failed:', e);
     }
   },
@@ -32,58 +34,43 @@ const FloatingBubbleBridge = {
     }
   },
 
-  updateText(text: string): void {
-    try { FloatingBubble?.updateText(text); } catch (e) {
-      console.warn('[FloatingBubbleBridge]: updateText failed:', e);
-    }
+  /** Toggle the "text card waiting to be inserted" texture on the receiver bubble. */
+  setPending(pending: boolean): void {
+    try { FloatingBubble?.setPending(pending); } catch (_) {}
   },
 
   setPageHeight(height: number): void {
     try { FloatingBubble?.setPageHeight(height); } catch (_) {}
   },
 
-  setScreenHeight(height: number): void {
-    try { FloatingBubble?.setScreenHeight(height); } catch (_) {}
-  },
-
   setPageWidth(width: number): void {
     try { FloatingBubble?.setPageWidth(width); } catch (_) {}
   },
 
-  setScreenWidth(width: number): void {
-    try { FloatingBubble?.setScreenWidth(width); } catch (_) {}
-  },
-
-  setPositionY(pageY: number): void {
-    try { FloatingBubble?.setPositionY(pageY); } catch (e) {
-      console.warn('[FloatingBubbleBridge]: setPositionY failed:', e);
-    }
-  },
-
-  async isShowing(): Promise<boolean> {
-    try { return await FloatingBubble?.isShowing() ?? false; } catch { return false; }
-  },
-
-  async checkPermission(): Promise<boolean> {
-    try { return await FloatingBubble?.checkOverlayPermission() ?? false; } catch { return false; }
-  },
-
-  requestPermission(): void {
-    try { FloatingBubble?.requestOverlayPermission(); } catch (e) {
-      console.warn('[FloatingBubbleBridge]: requestPermission failed:', e);
-    }
-  },
-
-  setActionButtons(buttons: { id: string; icon: string; label: string }[]): void {
-    try { FloatingBubble?.setActionButtons(JSON.stringify(buttons)); } catch (e) {
-      console.warn('[FloatingBubbleBridge]: setActionButtons failed:', e);
-    }
-  },
-
-  onTap(callback: () => void): { remove(): void } {
+  onTap(callback: (data: {
+    screenY: number; pageY: number;
+    screenX: number; pageX: number;
+    screenBottomY: number; pageBottomY: number;
+    bubbleHeight: number;
+  }) => void): { remove(): void } {
     const em = getBubbleEmitter();
     if (!em) return { remove() {} };
-    return em.addListener('onBubbleTap', () => callback());
+    return em.addListener('onBubbleTap', (event) => {
+      const bh = event?.bubbleHeight ?? 0;
+      const pageY = event?.pageY ?? 0;
+      const pbY = (typeof event?.pageBottomY === 'number' && event.pageBottomY > pageY)
+        ? event.pageBottomY
+        : pageY + bh;
+      callback({
+        screenY: event?.screenY ?? 0,
+        pageY,
+        screenX: event?.screenX ?? 0,
+        pageX: event?.pageX ?? 0,
+        screenBottomY: event?.screenBottomY ?? event?.screenY ?? 0,
+        pageBottomY: pbY,
+        bubbleHeight: bh,
+      });
+    });
   },
 
   onDragEnd(callback: (data: {
@@ -139,17 +126,6 @@ const FloatingBubbleBridge = {
     });
   },
 
-  onPermissionDenied(callback: () => void): { remove(): void } {
-    const em = getBubbleEmitter();
-    if (!em) return { remove() {} };
-    return em.addListener('onBubblePermissionDenied', () => callback());
-  },
-
-  onBubbleAction(callback: (data: { actionId: string }) => void): { remove(): void } {
-    const em = getBubbleEmitter();
-    if (!em) return { remove() {} };
-    return em.addListener('onBubbleAction', callback);
-  },
 };
 
 const { AiBubble } = NativeModules;
@@ -172,6 +148,13 @@ const AiBubbleBridge = {
     }
   },
 
+  /** Open the AI entry as the collected single-button form (does not start AIRelay). */
+  showCollapsed(statusText: string): void {
+    try { AiBubble?.showCollapsed(statusText); } catch (e) {
+      console.warn('[AiBubbleBridge]: showCollapsed failed:', e);
+    }
+  },
+
   hide(): void {
     try { AiBubble?.hide(); } catch (e) {
       console.warn('[AiBubbleBridge]: hide failed:', e);
@@ -184,30 +167,8 @@ const AiBubbleBridge = {
     }
   },
 
-  updateSubText(text: string): void {
-    try { AiBubble?.updateSubText(text); } catch (e) {
-      console.warn('[AiBubbleBridge]: updateSubText failed:', e);
-    }
-  },
-
-  updateTime(text: string): void {
-    try { AiBubble?.updateTime(text); } catch (e) {
-      console.warn('[AiBubbleBridge]: updateTime failed:', e);
-    }
-  },
-
-  setMode(mode: AiBubbleMode): void {
-    try { AiBubble?.setMode(mode); } catch (e) {
-      console.warn('[AiBubbleBridge]: setMode failed:', e);
-    }
-  },
-
   setPageHeight(height: number): void {
     try { AiBubble?.setPageHeight(height); } catch (_) {}
-  },
-
-  setScreenHeight(height: number): void {
-    try { AiBubble?.setScreenHeight(height); } catch (_) {}
   },
 
   setActionButtons(buttons: { id: string; icon: string; label: string }[]): void {
@@ -216,40 +177,36 @@ const AiBubbleBridge = {
     }
   },
 
-  async isShowing(): Promise<boolean> {
-    try { return await AiBubble?.isShowing() ?? false; } catch (_) { return false; }
-  },
-
-  isShowingSync(): boolean {
-    try { return AiBubble?.isShowingSync() ?? false; } catch (_) { return false; }
-  },
-
-  async checkPermission(): Promise<boolean> {
-    try { return await AiBubble?.checkOverlayPermission() ?? false; } catch (_) { return false; }
-  },
-
-  requestPermission(): void {
-    try { AiBubble?.requestOverlayPermission(); } catch (_) {}
-  },
-
-  onTap(cb: () => void): { remove(): void } {
-    return getAiEmitter()?.addListener('onAiBubbleTap', cb) ?? { remove() {} };
+  /** Relay inbox previews → capsule bars under the status pill. */
+  setInboxItems(
+    items: { id: string; title: string; preview: string; source: string; time: number; pinned?: boolean }[],
+  ): void {
+    try { AiBubble?.setInboxItems(JSON.stringify(items)); } catch (e) {
+      console.warn('[AiBubbleBridge]: setInboxItems failed:', e);
+    }
   },
 
   onLongPress(cb: () => void): { remove(): void } {
     return getAiEmitter()?.addListener('onAiBubbleLongPress', cb) ?? { remove() {} };
   },
 
-  onDragEnd(cb: (e: { screenY: number; pageY: number }) => void): { remove(): void } {
-    return getAiEmitter()?.addListener('onAiBubbleDragEnd', cb) ?? { remove() {} };
-  },
-
   onAction(cb: (e: { actionId: string }) => void): { remove(): void } {
     return getAiEmitter()?.addListener('onAiBubbleAction', cb) ?? { remove() {} };
   },
 
-  onPermissionDenied(cb: () => void): { remove(): void } {
-    return getAiEmitter()?.addListener('onAiBubblePermissionDenied', cb) ?? { remove() {} };
+  /** Tap on the collected single-button form: start AIRelay, then expand. */
+  onExpand(cb: () => void): { remove(): void } {
+    return getAiEmitter()?.addListener('onAiBubbleExpand', cb) ?? { remove() {} };
+  },
+
+  /** Tap on a capsule bar: open that message's translucent detail page. */
+  onCapsuleTap(cb: (e: { id: string }) => void): { remove(): void } {
+    return getAiEmitter()?.addListener('onAiCapsuleTap', cb) ?? { remove() {} };
+  },
+
+  /** Long-press on a capsule bar: insert that message directly. */
+  onCapsuleLongPress(cb: (e: { id: string }) => void): { remove(): void } {
+    return getAiEmitter()?.addListener('onAiCapsuleLongPress', cb) ?? { remove() {} };
   },
 };
 
@@ -269,16 +226,6 @@ const PaletteBubbleBridge = {
     try { PaletteBubble?.show(); } catch (e) {
       console.warn('[PaletteBubbleBridge]: show failed:', e);
     }
-  },
-
-  hide(): void {
-    try { PaletteBubble?.hide(); } catch (e) {
-      console.warn('[PaletteBubbleBridge]: hide failed:', e);
-    }
-  },
-
-  async isShowing(): Promise<boolean> {
-    try { return await PaletteBubble?.isShowing() ?? false; } catch (_) { return false; }
   },
 
   onSlotTap(cb: (e: { slotIndex: number; color: string; thickness: number; penType: number }) => void): { remove(): void } {

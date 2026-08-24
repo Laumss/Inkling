@@ -69,6 +69,50 @@ with open(sys.argv[5], 'w', encoding='utf-8') as f:
     print_color "PluginConfig.json file created: $config_file" Green
 }
 
+# ---------- Advance plugin version before packaging ----------
+increment_plugin_version() {
+    local config_file="$1"
+    local result
+
+    if ! result="$(python3 - "$config_file" <<'PY'
+import json
+import re
+import sys
+
+path = sys.argv[1]
+with open(path, 'r', encoding='utf-8-sig') as f:
+    config = json.load(f)
+
+try:
+    old_code = int(str(config.get('versionCode', 0)))
+except (TypeError, ValueError):
+    old_code = 0
+new_code = old_code + 1
+config['versionCode'] = str(new_code)
+
+raw_name = config.get('versionName')
+old_name = '' if raw_name is None else str(raw_name)
+if not old_name.strip():
+    old_name = '0.0.0'
+match = re.match(r'^(.*?)(\d+)$', old_name)
+new_name = f'{match.group(1)}{int(match.group(2)) + 1}' if match else f'{old_name}.1'
+config['versionName'] = new_name
+
+with open(path, 'w', encoding='utf-8') as f:
+    json.dump(config, f, indent=4, ensure_ascii=False)
+
+print(f'{old_name}\t{new_name}\t{old_code}\t{new_code}')
+PY
+)"; then
+        print_color "Failed to advance plugin version" Red
+        return 1
+    fi
+
+    local old_name new_name old_code new_code
+    IFS=$'\t' read -r old_name new_name old_code new_code <<< "$result"
+    print_color "Plugin version advanced: $old_name -> $new_name, code $old_code -> $new_code" Green
+}
+
 # ---------- Check if module name should be ignored ----------
 is_ignored_module() {
     local name="$1"
@@ -398,22 +442,25 @@ build_android_apk() {
         return 1
     fi
 
-    local variant="Release"
+    # Always assemble Debug: :sn-plugin-lib:parseReleaseLocalResources fails
+    # with !directory.isDirectory(). Non-WithLogs still strips debug tools via
+    # -PinklingEnableDebug=false -> BuildConfig.ENABLE_DEBUG=false.
+    local task="buildCustomApkDebug"
+    local debug_prop="-PinklingEnableDebug=false"
     if [[ "${WITH_LOGS:-}" == "1" ]]; then
-        variant="Debug"
+        debug_prop="-PinklingEnableDebug=true"
     fi
-    local task="buildCustomApk${variant}"
 
     if [[ -f "$android_dir/gradlew" ]]; then
         chmod +x "$android_dir/gradlew"
         sed -i 's/\r$//' "$android_dir/gradlew"
         print_color "Cleaning previous build..." Blue
         (cd "$android_dir" && ./gradlew clean)
-        print_color "Using gradlew to execute ${task} task..." Green
-        (cd "$android_dir" && ./gradlew "$task")
+        print_color "Using gradlew to execute ${task} ${debug_prop} task..." Green
+        (cd "$android_dir" && ./gradlew "$task" "$debug_prop")
     elif command -v gradle &>/dev/null; then
-        print_color "Using gradle to execute ${task} task..." Green
-        (cd "$android_dir" && gradle "$task")
+        print_color "Using gradle to execute ${task} ${debug_prop} task..." Green
+        (cd "$android_dir" && gradle "$task" "$debug_prop")
     else
         print_color "Neither gradle nor gradlew found, cannot build APK" Red
         return 1
@@ -598,6 +645,14 @@ main() {
         print_color "Created build/generated directory: $BUILD_GENERATED_DIR" Green
     fi
 
+    # Patch: strip verbose console.log from sn-plugin-lib verifyParams (saves ~4s per modifyElements call)
+    while IFS= read -r -d '' vf; do
+        if grep -q "console.log('verifyParams'" "$vf" 2>/dev/null; then
+            sed -i "s/  console.log('verifyParams'.*//" "$vf"
+            print_color "Patched: $(echo "$vf" | sed "s|$PROJECT_ROOT/||")" Green
+        fi
+    done < <(find "$PROJECT_ROOT/node_modules/sn-plugin-lib" -name 'VerifyUtils.*' -print0 2>/dev/null)
+
     # Step 2: React Native bundling
     print_color "=== Step 2: Execute React Native bundling ===" Blue
     if ! build_react_native_bundle "$BUILD_GENERATED_DIR"; then
@@ -622,6 +677,9 @@ main() {
         print_color "=== Step 5: Generate root directory PluginConfig.json ===" Blue
         new_plugin_config "$plugin_id"
     fi
+
+    # Every produced package gets a fresh host-visible version before it is copied.
+    increment_plugin_version "$root_config"
 
     # Step 6: Copy PluginConfig.json to build/generated and handle icon
     print_color "=== Step 6: Copy PluginConfig.json to build/generated folder and handle icon ===" Blue

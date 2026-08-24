@@ -5,6 +5,9 @@ param(
     [switch]$WithLogs
 )
 
+# Tolerate unix-style flag: `./buildPlugin.ps1 --with-logs` (unbound args land in $args)
+if ($args -contains '--with-logs') { $WithLogs = $true }
+
 # Set color output function
 function Write-ColorOutput {
     param(
@@ -214,6 +217,47 @@ function New-PluginConfig {
     }
     catch {
         Write-ColorOutput "Failed to create PluginConfig.json file: $_" 'Red'
+        exit 1
+    }
+}
+
+# Advance the distributable plugin version before every package build.
+# PluginHost uses PluginConfig.json; keep versionCode monotonically increasing and
+# advance the final versionName component so the package visible on device matches.
+function Increment-PluginVersion {
+    param([string]$ConfigFile)
+
+    try {
+        $config = Get-Content $ConfigFile -Raw | ConvertFrom-Json
+        $oldCode = 0L
+        if ($null -ne $config.versionCode) {
+            [void][long]::TryParse([string]$config.versionCode, [ref]$oldCode)
+        }
+        $newCode = [string]($oldCode + 1)
+        if ($null -eq $config.PSObject.Properties['versionCode']) {
+            $config | Add-Member -NotePropertyName versionCode -NotePropertyValue $newCode
+        } else {
+            $config.versionCode = $newCode
+        }
+
+        $oldName = [string]$config.versionName
+        if ([string]::IsNullOrWhiteSpace($oldName)) { $oldName = '0.0.0' }
+        if ($oldName -match '^(.*?)(\d+)$') {
+            $newName = "$($Matches[1])$(([long]$Matches[2]) + 1)"
+        } else {
+            $newName = "$oldName.1"
+        }
+        if ($null -eq $config.PSObject.Properties['versionName']) {
+            $config | Add-Member -NotePropertyName versionName -NotePropertyValue $newName
+        } else {
+            $config.versionName = $newName
+        }
+
+        $config | ConvertTo-Json -Depth 10 | Set-Content $ConfigFile -Encoding UTF8
+        Write-ColorOutput "Plugin version advanced: $oldName → $newName, code $oldCode → $newCode" 'Green'
+    }
+    catch {
+        Write-ColorOutput "Failed to advance plugin version: $_" 'Red'
         exit 1
     }
 }
@@ -727,11 +771,16 @@ function Build-AndroidApk {
     $currentDir = Get-Location
     try {
         Set-Location $androidDir
-        
-        # Execute gradle build - use custom buildCustomApkDebug task
+
+        # Always assemble Debug: :sn-plugin-lib:parseReleaseLocalResources fails
+        # with !directory.isDirectory(). Non-WithLogs still strips debug tools via
+        # -PinklingEnableDebug=false → BuildConfig.ENABLE_DEBUG=false.
+        $apkTask = 'buildCustomApkDebug'
+        $debugProp = if ($script:WithLogs) { '-PinklingEnableDebug=true' } else { '-PinklingEnableDebug=false' }
+
         $gradlewPath = Join-Path $androidDir 'gradlew.bat'
         if (Test-Path $gradlewPath) {
-            Write-ColorOutput 'Using gradlew.bat to execute buildCustomApkDebug task...' 'Green'
+            Write-ColorOutput "Using gradlew.bat to execute $apkTask $debugProp..." 'Green'
             
             # Ensure JAVA_HOME environment variable is set
             if (-not $env:JAVA_HOME) {
@@ -752,16 +801,18 @@ function Build-AndroidApk {
                 }
             }
             
+            # Force English locale for javac/kotlinc output (avoids garbled CJK console text)
+            $env:JAVA_TOOL_OPTIONS = '-Duser.language=en -Duser.country=US'
+
             # Clean previous build to avoid stale cache
             Write-ColorOutput 'Cleaning previous build...' 'Blue'
-            & cmd.exe /c gradlew.bat clean
-            # Execute gradle build (use direct invocation to avoid stdout buffer deadlock)
-            & cmd.exe /c gradlew.bat buildCustomApkDebug
+            & cmd.exe /c "$gradlewPath clean"
+            & cmd.exe /c "$gradlewPath $apkTask $debugProp"
             $buildResult = $LASTEXITCODE
         }
         elseif (Get-Command 'gradle' -ErrorAction SilentlyContinue) {
-            Write-ColorOutput 'Using gradle to execute buildCustomApkDebug task...' 'Green'
-            & gradle buildCustomApkDebug
+            Write-ColorOutput "Using gradle to execute $apkTask task..." 'Green'
+            & gradle $apkTask $debugProp
             $buildResult = $LASTEXITCODE
         }
         else {
@@ -1174,6 +1225,16 @@ function Main {
         Write-ColorOutput "Created build/generated directory: $buildGeneratedDir" 'Green'
     }
     
+    # Patch: strip verbose console.log from sn-plugin-lib verifyParams (saves ~4s per modifyElements call)
+    $verifyFiles = Get-ChildItem -Path (Join-Path $projectRoot 'node_modules\sn-plugin-lib') -Recurse -Filter 'VerifyUtils.*' -File -ErrorAction SilentlyContinue
+    foreach ($vf in $verifyFiles) {
+        if (Select-String -Path $vf.FullName -Pattern "console.log\('verifyParams'" -Quiet) {
+            (Get-Content $vf.FullName -Raw) -replace "  console\.log\('verifyParams'[^\r\n]*", '' | Set-Content $vf.FullName -Encoding UTF8 -NoNewline
+            $rel = $vf.FullName.Substring($projectRoot.Path.Length + 1)
+            Write-ColorOutput "Patched: $rel" 'Green'
+        }
+    }
+
     # Step 2: Run React Native bundling command
     Write-ColorOutput '=== Step 2: Execute React Native bundling ===' 'Blue'
     $bundleSuccess = Build-ReactNativeBundle -ProjectRoot $projectRoot -ProjectName $projectName -OutputDir $buildGeneratedDir
@@ -1198,7 +1259,10 @@ function Main {
         Write-ColorOutput '=== Step 5: Generate root directory PluginConfig.json ===' 'Blue'
         New-PluginConfig -PluginId $pluginId -PackageInfo $packageInfo -ProjectRoot $projectRoot
     }
-    
+
+    # Every produced package gets a fresh host-visible version before it is copied.
+    Increment-PluginVersion -ConfigFile $rootConfigFile
+
     # Step 6: Copy root directory PluginConfig.json file to build/generated folder and handle icon file
     Write-ColorOutput '=== Step 6: Copy PluginConfig.json to build/generated folder and handle icon ===' 'Blue'
     $buildGeneratedConfigFile = Join-Path $buildGeneratedDir 'PluginConfig.json'

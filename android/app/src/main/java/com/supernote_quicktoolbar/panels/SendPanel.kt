@@ -5,7 +5,6 @@ import com.supernote_quicktoolbar.overlays.*
 import com.supernote_quicktoolbar.bubbles.*
 
 import android.content.Context
-import android.content.Intent
 import android.graphics.Color
 import android.net.ConnectivityManager
 import android.net.Network
@@ -25,12 +24,18 @@ import com.facebook.react.bridge.*
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.modules.core.DeviceEventManagerModule
+import com.supernote_quicktoolbar.net.LocalSendDiscovery
 import com.supernote_quicktoolbar.ui_common.PanelBase
 import com.supernote_quicktoolbar.ui_common.PanelScrollHost
 import com.supernote_quicktoolbar.ui_common.PanelWidgets
 import java.io.*
+import java.math.BigInteger
 import java.net.*
 import java.security.*
+import java.security.spec.PKCS8EncodedKeySpec
+import java.security.cert.X509Certificate
+import java.security.cert.CertificateFactory
+import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
@@ -45,7 +50,7 @@ import org.json.JSONObject
 
 class SendPanel(
     ctx: ReactApplicationContext,
-    toolbar: FloatingToolbarModule
+    private val toolbar: FloatingToolbarModule
 ) : PanelBase(ctx, toolbar) {
 
     override val tag = "SendPanel"
@@ -78,17 +83,35 @@ class SendPanel(
     private var cancelBtn: View? = null
     private var fileButtonsContainer: LinearLayout? = null
 
-    fun show(fromBubble: Boolean = false, syncClipboard: Boolean = false) {
+    private var sessionGen = 0
+
+    fun show(
+        fromBubble: Boolean = false,
+        syncClipboard: Boolean = false,
+        onShowResult: ((Boolean) -> Unit)? = null
+    ) {
+        if (!LocalSendModule.isWifiConnectedStatic(reactContext)) {
+            com.supernote_quicktoolbar.ui_common.Dialog.tip(reactContext, NativeLocale.t("no_wifi"))
+            onShowResult?.invoke(false)
+            return
+        }
         currentInstance = this
+        sessionGen++
         pendingText = ""; pendingImages = emptyList(); pendingLinkedFiles = emptyList()
         selectedPeer = null; sending = false
         cameFromBubble = fromBubble
         clipboardSyncMode = syncClipboard
-        showPanel()
-        android.os.Handler(android.os.Looper.getMainLooper()).post {
-            startPeerPolling()
-            LocalSendModule.reprobeKnownPeers()
-            LocalSendModule.triggerScan()
+        showPanel { shown ->
+            if (shown) {
+                if (!LocalSendModule.staticIsRunning) {
+                    toolbarModule.emitEvent("startLocalSendFromNative", Arguments.createMap())
+                }
+                startPeerPolling()
+                LocalSendModule.probeDefaultPeer(reactContext)
+                LocalSendModule.reprobeKnownPeers()
+                LocalSendModule.triggerScan()
+            }
+            onShowResult?.invoke(shown)
         }
     }
 
@@ -96,13 +119,14 @@ class SendPanel(
         android.os.Handler(android.os.Looper.getMainLooper()).post {
             stopPeerPolling()
             try { windowManager?.removeView(rootView) } catch (_: Exception) {}
+            FloatingPenGuard.setFullScreenActive(false, "panel:$panelName")
             rootView = null; windowManager = null
             onHide()
-            toolbarModule.disablePenBlock()
         }
     }
 
     override fun onHide() {
+        autoSendArmed = false
         statusTextView = null; previewTextView = null; peerContainer = null; scrollHost = null
         sendTextBtn = null; cancelBtn = null; fileButtonsContainer = null
         currentInstance = null
@@ -142,7 +166,27 @@ class SendPanel(
             }
             rebuildFileButtons()
             updateSendBtnState()
+            autoSendArmed = rootView != null && !clipboardSyncMode &&
+                LocalSendModule.getDefaultPeer(reactContext) != null
+            maybeAutoSendToDefault()
         }
+    }
+
+    private var autoSendArmed = false
+
+    private fun maybeAutoSendToDefault() {
+        if (!autoSendArmed || sending || clipboardSyncMode) return
+        val def = LocalSendModule.getDefaultPeer(reactContext) ?: run { autoSendArmed = false; return }
+        val textOnly = pendingText.isNotEmpty() && pendingImages.isEmpty() && pendingLinkedFiles.isEmpty()
+        val singleFile = pendingText.isEmpty() && pendingImages.size == 1 && pendingLinkedFiles.isEmpty()
+        if (!textOnly && !singleFile) { autoSendArmed = false; return }
+        val live = LocalSendModule.getPeersSnapshot()
+            .firstOrNull { it.fingerprint == def.fingerprint } ?: return
+        autoSendArmed = false
+        selectedPeer = live
+        refreshPeerList()
+        if (BuildConfig.ENABLE_DEBUG) Log.i(tag, "auto-send to default peer ${live.alias} (${if (textOnly) "text" else "file"})")
+        if (textOnly) handleSendText() else handleSendFile(pendingImages.first())
     }
 
     override fun buildContent(root: LinearLayout) {
@@ -243,13 +287,24 @@ class SendPanel(
                 return@post
             }
 
+            val defaultPeer = LocalSendModule.getDefaultPeer(reactContext)
+            if (defaultPeer != null) {
+                peers.firstOrNull { it.fingerprint == defaultPeer.fingerprint }?.let { live ->
+                    if (live.ip != defaultPeer.ip || live.port != defaultPeer.port) {
+                        LocalSendModule.setDefaultPeer(reactContext, live)
+                    }
+                }
+            }
+
             if (selectedPeer == null || peers.none { it.fingerprint == selectedPeer?.fingerprint }) {
-                selectedPeer = peers.first()
+                selectedPeer = peers.firstOrNull { it.fingerprint == defaultPeer?.fingerprint }
+                    ?: peers.first()
             }
 
             for (peer in peers) container.addView(createPeerRow(peer))
             updateSendBtnState()
             scrollHost?.refreshThumb()
+            maybeAutoSendToDefault()
         }
     }
 
@@ -269,11 +324,22 @@ class SendPanel(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { bottomMargin = dp(4) }
             setOnClickListener {
+                autoSendArmed = false
                 selectedPeer = peer
                 refreshPeerList()
                 updateSendBtnState()
             }
+            setOnLongClickListener {
+                val cur = LocalSendModule.getDefaultPeer(reactContext)
+                LocalSendModule.setDefaultPeer(
+                    reactContext,
+                    if (cur?.fingerprint == peer.fingerprint) null else peer
+                )
+                refreshPeerList()
+                true
+            }
         }
+        val isDefault = LocalSendModule.getDefaultPeer(reactContext)?.fingerprint == peer.fingerprint
 
         val iconText = when (peer.deviceType) {
             "desktop" -> "PC"; "mobile" -> "MB"; "tablet" -> "TB"; "web" -> "WB"; else -> "DV"
@@ -304,6 +370,22 @@ class SendPanel(
         })
         row.addView(info)
 
+        if (isDefault) {
+            row.addView(TextView(reactContext).apply {
+                text = NativeLocale.t("peer_default_badge")
+                textSize = sp(10f); setTextColor(Color.WHITE)
+                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                gravity = Gravity.CENTER
+                setPadding(dp(6), dp(2), dp(6), dp(2))
+                background = GradientDrawable().apply {
+                    setColor(Color.BLACK); cornerRadius = dp(3).toFloat()
+                }
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { rightMargin = dp(6) }
+            })
+        }
+
         if (isSelected) {
             row.addView(TextView(reactContext).apply {
                 text = "✓"; textSize = sp(16f); setTextColor(Color.BLACK)
@@ -315,6 +397,19 @@ class SendPanel(
         return row
     }
 
+    /** Ensure host INTERNET permission before an upload; resets sending state on denial. */
+    private fun withInternetPermission(onGranted: () -> Unit) {
+        toolbar.requestPluginInternetPermission { granted ->
+            if (!granted) {
+                sending = false
+                statusTextView?.text = NativeLocale.t("perm_required")
+                updateSendBtnState()
+                return@requestPluginInternetPermission
+            }
+            onGranted()
+        }
+    }
+
     private fun handleSendText() = handleSendText(pendingText)
 
     private fun handleSendText(text: String) {
@@ -323,18 +418,20 @@ class SendPanel(
         sending = true
         statusTextView?.text = NativeLocale.t("sending")
         updateSendBtnState()
-        thread(isDaemon = true) {
-            try {
-                LocalSendModule.sendTextDirect(peer.ip, peer.port, text, peer.useTls)
-                android.os.Handler(android.os.Looper.getMainLooper()).post {
-                    statusTextView?.text = NativeLocale.t("send_success")
-                    handler.postDelayed({ closeAndRestore() }, 800)
-                }
-            } catch (e: Exception) {
-                android.os.Handler(android.os.Looper.getMainLooper()).post {
-                    sending = false
-                    statusTextView?.text = "${NativeLocale.t("send_failed")}: ${e.message}"
-                    updateSendBtnState()
+        withInternetPermission {
+            thread(isDaemon = true) {
+                try {
+                    LocalSendModule.sendTextDirect(peer.ip, peer.port, text, peer.useTls)
+                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                        statusTextView?.text = NativeLocale.t("send_success")
+                        scheduleAutoClose()
+                    }
+                } catch (e: Exception) {
+                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                        sending = false
+                        statusTextView?.text = "${NativeLocale.t("send_failed")}: ${e.message}"
+                        updateSendBtnState()
+                    }
                 }
             }
         }
@@ -346,19 +443,30 @@ class SendPanel(
         sending = true
         statusTextView?.text = NativeLocale.t("sending")
         updateSendBtnState()
-        thread(isDaemon = true) {
-            try {
-                LocalSendModule.sendFileDirect(peer.ip, peer.port, path, peer.useTls)
-                android.os.Handler(android.os.Looper.getMainLooper()).post {
-                    statusTextView?.text = NativeLocale.t("send_success")
-                    handler.postDelayed({ closeAndRestore() }, 800)
+        toolbar.requestPluginFileReadPermission { granted ->
+            if (!granted) {
+                sending = false
+                statusTextView?.text = NativeLocale.t("file_read_permission_needed")
+                updateSendBtnState()
+                toolbar.openPluginSettingsAfterFileReadDenied()
+                return@requestPluginFileReadPermission
+            }
+            withInternetPermission {
+            thread(isDaemon = true) {
+                try {
+                    LocalSendModule.sendFileDirect(peer.ip, peer.port, path, peer.useTls)
+                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                        statusTextView?.text = NativeLocale.t("send_success")
+                        scheduleAutoClose()
+                    }
+                } catch (e: Exception) {
+                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                        sending = false
+                        statusTextView?.text = "${NativeLocale.t("send_failed")}: ${e.message}"
+                        updateSendBtnState()
+                    }
                 }
-            } catch (e: Exception) {
-                android.os.Handler(android.os.Looper.getMainLooper()).post {
-                    sending = false
-                    statusTextView?.text = "${NativeLocale.t("send_failed")}: ${e.message}"
-                    updateSendBtnState()
-                }
+            }
             }
         }
     }
@@ -369,32 +477,52 @@ class SendPanel(
         sending = true
         statusTextView?.text = NativeLocale.t("sync_packaging")
         updateSendBtnState()
-        thread(isDaemon = true) {
-            try {
-                val zipPath = packageClipboard()
-                if (zipPath == null) {
-                    android.os.Handler(android.os.Looper.getMainLooper()).post {
-                        sending = false
-                        statusTextView?.text = NativeLocale.t("sync_clipboard_empty")
-                        updateSendBtnState()
-                    }
-                    return@thread
-                }
-                android.os.Handler(android.os.Looper.getMainLooper()).post { statusTextView?.text = NativeLocale.t("sync_waiting") }
-                LocalSendModule.sendFileDirect(peer.ip, peer.port, zipPath, peer.useTls)
-                try { File(zipPath).delete() } catch (_: Exception) {}
-                android.os.Handler(android.os.Looper.getMainLooper()).post {
-                    statusTextView?.text = NativeLocale.t("send_success")
-                    handler.postDelayed({ closeAndRestore() }, 800)
-                }
-            } catch (e: Exception) {
-                val msg = if (e.message?.contains("403") == true)
-                    NativeLocale.t("sync_rejected")
-                else "${NativeLocale.t("send_failed")}: ${e.message}"
-                android.os.Handler(android.os.Looper.getMainLooper()).post {
+        toolbar.requestPluginFileReadPermission { readGranted ->
+            if (!readGranted) {
+                sending = false
+                statusTextView?.text = NativeLocale.t("file_read_permission_needed")
+                updateSendBtnState()
+                toolbar.openPluginSettingsAfterFileReadDenied()
+                return@requestPluginFileReadPermission
+            }
+            toolbar.requestPluginFileWritePermission { writeGranted ->
+                if (!writeGranted) {
                     sending = false
-                    statusTextView?.text = msg
+                    statusTextView?.text = NativeLocale.t("perm_required")
                     updateSendBtnState()
+                    toolbar.openPluginSettingsAfterFileWriteDenied()
+                    return@requestPluginFileWritePermission
+                }
+                withInternetPermission {
+                thread(isDaemon = true) {
+                    try {
+                        val zipPath = packageClipboard()
+                        if (zipPath == null) {
+                            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                                sending = false
+                                statusTextView?.text = NativeLocale.t("sync_clipboard_empty")
+                                updateSendBtnState()
+                            }
+                            return@thread
+                        }
+                        android.os.Handler(android.os.Looper.getMainLooper()).post { statusTextView?.text = NativeLocale.t("sync_waiting") }
+                        LocalSendModule.sendFileDirect(peer.ip, peer.port, zipPath, peer.useTls)
+                        try { File(zipPath).delete() } catch (_: Exception) {}
+                        android.os.Handler(android.os.Looper.getMainLooper()).post {
+                            statusTextView?.text = NativeLocale.t("send_success")
+                            scheduleAutoClose()
+                        }
+                    } catch (e: Exception) {
+                        val msg = if (e.message?.contains("403") == true)
+                            NativeLocale.t("sync_rejected")
+                        else "${NativeLocale.t("send_failed")}: ${e.message}"
+                        android.os.Handler(android.os.Looper.getMainLooper()).post {
+                            sending = false
+                            statusTextView?.text = msg
+                            updateSendBtnState()
+                        }
+                    }
+                }
                 }
             }
         }
@@ -462,18 +590,29 @@ class SendPanel(
         peerPollRunnable = null
     }
 
+    private fun scheduleAutoClose() {
+        val gen = sessionGen
+        handler.postDelayed({
+            if (gen != sessionGen) return@postDelayed
+            closeAndRestore()
+        }, 800)
+    }
+
     private fun closeAndRestore() {
         val fromBubble = cameFromBubble
         hide()
-        toolbarModule.cancelPendingScreen()
-        toolbarModule.requestClosePluginView()
-        toolbarModule.emitEventPublic("onNativePanelClose",
+        toolbar.cancelPendingScreen()
+        toolbar.requestClosePluginView()
+        toolbarModule.emitEvent("onNativePanelClose",
             Arguments.createMap().apply {
                 putString("panel", "send")
                 putBoolean("cameFromBubble", fromBubble)
             })
+        ScreenshotBubble.reshowIfPending()
         if (fromBubble) {
+            val gen = sessionGen
             handler.postDelayed({
+                if (gen != sessionGen) return@postDelayed
                 toolbarModule.restoreToolbar()
                 FloatingBubbleModule.reshowLast(reactContext)
                 AiBubbleModule.reshowLast(reactContext)
@@ -542,6 +681,12 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                 forceCloseAll()
                 sendEvent("onLocalSendStopped", Arguments.createMap())
             }
+
+            override fun onAvailable(network: Network) {
+                // Rebind the shared discovery socket onto the new interface
+                // (no-op when no consumer needs it).
+                LocalSendDiscovery.restartForNetworkChange()
+            }
         }
         try {
             val req = NetworkRequest.Builder()
@@ -555,39 +700,40 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    override fun onCatalystInstanceDestroy() {
+    override fun invalidate() {
         val cm = reactApplicationContext
             .getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
         networkCallback?.let { try { cm?.unregisterNetworkCallback(it) } catch (_: Exception) {} }
         networkCallback = null
 
-        isRunning = false
-        try { serverSocket?.close() } catch (_: Exception) {}
-        try { multicastSocket?.close() } catch (_: Exception) {}
-        serverSocket = null
-        multicastSocket = null
+        // Release only the LocalSend demand on the shared discovery socket:
+        // AIRelayCore's dictation listening must survive an RN reload.
         forceCloseAll()
-        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "onCatalystInstanceDestroy: LocalSend server stopped")
+        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "invalidate: LocalSend server stopped")
+        super.invalidate()
     }
 
     companion object {
         private const val TAG = "LocalSendModule"
         private const val PROTOCOL_VERSION = "2.0"
         private const val DEFAULT_PORT = 53317
-        private const val MULTICAST_ADDR = "224.0.0.167"
-        private const val MULTICAST_PORT = 53317
         private const val API_BASE = "/api/localsend/v2"
+        private const val API_BASE_V1 = "/api/localsend/v1"
 
         @Volatile private var staticServerSocket: ServerSocket? = null
-        @Volatile private var staticMulticastSocket: MulticastSocket? = null
         @Volatile @JvmStatic var staticIsRunning = false
 
+        /**
+         * Stops the LocalSend HTTP server and drops LocalSend's demand on the
+         * shared discovery socket. Does NOT touch the multicast socket
+         * directly — LocalSendDiscovery keeps it alive while AIRelay still
+         * listens for the phone's dictation announcements.
+         */
         fun forceCloseAll() {
             staticIsRunning = false
             try { staticServerSocket?.close() } catch (_: Exception) {}
-            try { staticMulticastSocket?.close() } catch (_: Exception) {}
             staticServerSocket = null
-            staticMulticastSocket = null
+            LocalSendDiscovery.stopLocalSendDiscovery()
         }
 
         data class PendingText(val id: String, val text: String, val fileName: String)
@@ -624,6 +770,16 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
 
         @Volatile @JvmStatic
         var staticDiscoveredPeers: ConcurrentHashMap<String, DiscoveredPeer> = ConcurrentHashMap()
+
+        private const val PEER_TTL_MS = 15_000L
+
+        data class StoredSecurityContext(
+            val keyAlias: String,
+            val privateKey: String,
+            val publicKey: String,
+            val certificate: String,
+            val certificateHash: String
+        )
 
         private const val INBOX_DIR = "/sdcard/INBOX"
         private val IMAGE_EXTS_RECV = setOf("jpg", "jpeg", "png", "bmp", "gif", "webp")
@@ -686,8 +842,106 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
         @JvmStatic
         fun getPeersSnapshot(): List<DiscoveredPeer> {
             val now = System.currentTimeMillis()
-            staticDiscoveredPeers.entries.removeIf { now - it.value.lastSeen > 30_000 }
+            staticDiscoveredPeers.entries.removeIf {
+                now - it.value.lastSeen > PEER_TTL_MS ||
+                    isLocalAddressStatic(it.value.ip) ||
+                    it.value.fingerprint == staticDeviceFingerprint
+            }
             return staticDiscoveredPeers.values.toList()
+        }
+
+        private const val DEFAULT_PEER_KEY = "localsend_default_peer"
+
+        @JvmStatic
+        fun getDefaultPeer(ctx: Context): DiscoveredPeer? {
+            return try {
+                val json = ctx.getSharedPreferences("quicktoolbar_presets", 0)
+                    .getString(DEFAULT_PEER_KEY, null) ?: return null
+                val o = JSONObject(json)
+                val fp = o.optString("fingerprint", "")
+                if (fp.isEmpty()) null else DiscoveredPeer(
+                    alias = o.optString("alias", "?"),
+                    ip = o.optString("ip", ""),
+                    port = o.optInt("port", DEFAULT_PORT),
+                    deviceType = o.optString("deviceType", "desktop"),
+                    fingerprint = fp,
+                    useTls = o.optBoolean("useTls", true)
+                )
+            } catch (_: Exception) { null }
+        }
+
+        @JvmStatic
+        fun setDefaultPeer(ctx: Context, peer: DiscoveredPeer?) {
+            val prefs = ctx.getSharedPreferences("quicktoolbar_presets", 0)
+            if (peer == null) {
+                prefs.edit().remove(DEFAULT_PEER_KEY).apply()
+                return
+            }
+            val o = JSONObject().apply {
+                put("alias", peer.alias)
+                put("ip", peer.ip)
+                put("port", peer.port)
+                put("deviceType", peer.deviceType)
+                put("fingerprint", peer.fingerprint)
+                put("useTls", peer.useTls)
+            }
+            prefs.edit().putString(DEFAULT_PEER_KEY, o.toString()).apply()
+        }
+
+        @JvmStatic
+        fun isWifiConnectedStatic(ctx: Context): Boolean {
+            val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                ?: return false
+            val net = cm.activeNetwork ?: return false
+            val caps = cm.getNetworkCapabilities(net) ?: return false
+            return caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+        }
+
+        @JvmStatic
+        fun packageClipboardStatic(ctx: Context): String? {
+            val prefs = ctx.getSharedPreferences("quicktoolbar_presets", 0)
+            val clipsJson = prefs.getString("preset_99", null) ?: return null
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SYNC-DBG] packageClipboard raw preset_99: $clipsJson")
+            val clips = JSONObject(clipsJson)
+
+            val filteredClips = JSONObject()
+            val keys = clips.keys()
+            while (keys.hasNext()) {
+                val slot = keys.next()
+                val path = clips.optString(slot, "")
+                val fileExists = path.isNotEmpty() && File(path).exists()
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SYNC-DBG] packageClipboard slot=$slot path='$path' exists=$fileExists")
+                if (fileExists) filteredClips.put(slot, path)
+            }
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SYNC-DBG] packageClipboard filtered: $filteredClips (${filteredClips.length()} slots)")
+            if (filteredClips.length() == 0) return null
+
+            val zipFile = File(ctx.cacheDir, "clipboard_sync_${System.currentTimeMillis()}.zip")
+            ZipOutputStream(zipFile.outputStream().buffered()).use { zos ->
+                zos.putNextEntry(ZipEntry("clips.json"))
+                zos.write(filteredClips.toString().toByteArray(Charsets.UTF_8))
+                zos.closeEntry()
+                val keys2 = filteredClips.keys()
+                while (keys2.hasNext()) {
+                    val slot = keys2.next()
+                    val f = File(filteredClips.getString(slot))
+                    zos.putNextEntry(ZipEntry("stickers/${f.name}"))
+                    f.inputStream().buffered().use { it.copyTo(zos) }
+                    zos.closeEntry()
+                }
+            }
+            return zipFile.absolutePath
+        }
+
+        /** Probe the bound default peer's last-known address so it appears
+         *  in the peer list immediately, without waiting for a full scan. */
+        @JvmStatic
+        fun probeDefaultPeer(ctx: Context) {
+            val def = getDefaultPeer(ctx) ?: return
+            if (def.ip.isEmpty()) return
+            kotlin.concurrent.thread(isDaemon = true, name = "LocalSend-ProbeDefault") {
+                probeHostStatic(def.ip, def.port)
+            }
         }
 
         @Volatile private var reprobeRunning = false
@@ -727,6 +981,324 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             SSLContext.getInstance("TLS").apply { init(null, tm, SecureRandom()) }
         }
         private val staticHostnameVerifier = HostnameVerifier { _, _ -> true }
+
+        private const val SECURITY_PREFS = "quicktoolbar_presets"
+        private const val SECURITY_CONTEXT_KEY = "ls_security_context"
+        private const val KEY_ALIAS = "inkling_localsend_tls_pem_v1"
+        private val KEYSTORE_PASSWORD = "inkling".toCharArray()
+
+        @Volatile private var staticServerTlsContext: SSLContext? = null
+        @Volatile private var staticStoredSecurityContext: StoredSecurityContext? = null
+
+        @Synchronized
+        fun ensureSecurityContext(ctx: android.content.Context): StoredSecurityContext {
+            staticStoredSecurityContext?.let { return it }
+
+            val prefs = ctx.getSharedPreferences(SECURITY_PREFS, 0)
+            val stored = prefs.getString(SECURITY_CONTEXT_KEY, null)
+                ?.let { parseStoredSecurityContext(it) }
+                ?.takeIf { it.keyAlias == KEY_ALIAS && it.privateKey.contains("BEGIN PRIVATE KEY") && it.certificate.contains("BEGIN CERTIFICATE") }
+
+            val context = stored ?: loadOrGenerateSecurityContext()
+            if (stored == null) {
+                prefs.edit().putString(SECURITY_CONTEXT_KEY, securityContextToJson(context)).apply()
+            }
+            staticStoredSecurityContext = context
+            return context
+        }
+
+        @JvmStatic
+        fun initServerTlsContext(ctx: android.content.Context) {
+            if (staticServerTlsContext != null) return
+            try {
+                val securityContext = ensureSecurityContext(ctx)
+                val privateKey = parsePrivateKeyPem(securityContext.privateKey)
+                val certificate = parseCertificatePem(securityContext.certificate)
+                val ks = KeyStore.getInstance(KeyStore.getDefaultType()).apply {
+                    load(null)
+                    setKeyEntry(securityContext.keyAlias, privateKey, KEYSTORE_PASSWORD, arrayOf(certificate))
+                }
+                val kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
+                kmf.init(ks, KEYSTORE_PASSWORD)
+                val keyManagers = kmf.keyManagers.map { km ->
+                    if (km is X509KeyManager) AliasKeyManager(km, securityContext.keyAlias) else km
+                }.toTypedArray()
+                staticServerTlsContext = SSLContext.getInstance("TLS").apply {
+                    init(keyManagers, null, SecureRandom())
+                }
+                if (BuildConfig.ENABLE_DEBUG) {
+                    Log.i(TAG, "[LS-DIAG] server TLS context initialized fingerprint=${securityContext.certificateHash}")
+                }
+            } catch (e: Exception) {
+                if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "[LS-DIAG] server TLS init exception", e)
+            }
+        }
+
+        @JvmStatic
+        fun serverProtocol(): String = if (staticServerTlsContext != null) "https" else "http"
+
+        private fun parseStoredSecurityContext(raw: String): StoredSecurityContext? {
+            return try {
+                val o = JSONObject(raw)
+                StoredSecurityContext(
+                    keyAlias = o.optString("keyAlias", KEY_ALIAS),
+                    privateKey = o.optString("privateKey", ""),
+                    publicKey = o.optString("publicKey", ""),
+                    certificate = o.optString("certificate", ""),
+                    certificateHash = o.optString("certificateHash", "")
+                ).takeIf { it.certificateHash.isNotEmpty() }
+            } catch (_: Exception) {
+                null
+            }
+        }
+
+        private fun securityContextToJson(context: StoredSecurityContext): String =
+            JSONObject().apply {
+                put("keyAlias", context.keyAlias)
+                put("privateKey", context.privateKey)
+                put("publicKey", context.publicKey)
+                put("certificate", context.certificate)
+                put("certificateHash", context.certificateHash)
+            }.toString()
+
+        private fun loadOrGenerateSecurityContext(): StoredSecurityContext {
+            val keyPair = KeyPairGenerator.getInstance("RSA").apply {
+                initialize(2048, SecureRandom())
+            }.generateKeyPair()
+            val cert = generateSelfSignedCertificate(keyPair)
+
+            return StoredSecurityContext(
+                keyAlias = KEY_ALIAS,
+                privateKey = pemBlock("PRIVATE KEY", keyPair.private.encoded),
+                publicKey = pemBlock("PUBLIC KEY", cert.publicKey.encoded),
+                certificate = pemBlock("CERTIFICATE", cert.encoded),
+                certificateHash = staticSha256Hex(cert.encoded)
+            )
+        }
+
+        private fun parsePrivateKeyPem(pem: String): PrivateKey {
+            val der = parsePemBlock(pem)
+            return KeyFactory.getInstance("RSA").generatePrivate(PKCS8EncodedKeySpec(der))
+        }
+
+        private fun parseCertificatePem(pem: String): X509Certificate {
+            val der = parsePemBlock(pem)
+            return CertificateFactory.getInstance("X.509")
+                .generateCertificate(ByteArrayInputStream(der)) as X509Certificate
+        }
+
+        private fun parsePemBlock(pem: String): ByteArray {
+            val content = pem.replace("\r\n", "\n")
+                .split("\n")
+                .filter { it.isNotBlank() && !it.startsWith("-----") }
+                .joinToString("")
+            return android.util.Base64.decode(content, android.util.Base64.DEFAULT)
+        }
+
+        private fun generateSelfSignedCertificate(keyPair: KeyPair): X509Certificate {
+            val now = System.currentTimeMillis()
+            val notBefore = Date(now - TimeUnit.DAYS.toMillis(1))
+            val notAfter = Date(now + TimeUnit.DAYS.toMillis(365L * 10L))
+            val serial = BigInteger(64, SecureRandom()).abs().add(BigInteger.ONE)
+            val algorithm = derSequence(
+                derOid("1.2.840.113549.1.1.11"),
+                derNull()
+            )
+            val name = derName("LocalSend User")
+            val tbs = derSequence(
+                derInteger(serial),
+                algorithm,
+                name,
+                derSequence(derTime(notBefore), derTime(notAfter)),
+                name,
+                keyPair.public.encoded
+            )
+            val sig = Signature.getInstance("SHA256withRSA").apply {
+                initSign(keyPair.private)
+                update(tbs)
+            }.sign()
+            val certDer = derSequence(tbs, algorithm, derBitString(sig))
+            return CertificateFactory.getInstance("X.509")
+                .generateCertificate(ByteArrayInputStream(certDer)) as X509Certificate
+        }
+
+        private fun pemBlock(type: String, der: ByteArray): String {
+            val base64 = android.util.Base64.encodeToString(
+                der,
+                android.util.Base64.NO_WRAP
+            )
+            val body = base64.chunked(64).joinToString("\n")
+            return "-----BEGIN $type-----\n$body\n-----END $type-----\n"
+        }
+
+        private fun derSequence(vararg parts: ByteArray): ByteArray =
+            derTagged(0x30, parts.flatMap { it.asIterable() }.toByteArray())
+
+        private fun derSet(vararg parts: ByteArray): ByteArray =
+            derTagged(0x31, parts.flatMap { it.asIterable() }.toByteArray())
+
+        private fun derTagged(tag: Int, value: ByteArray): ByteArray =
+            byteArrayOf(tag.toByte()) + derLength(value.size) + value
+
+        private fun derLength(length: Int): ByteArray {
+            if (length < 128) return byteArrayOf(length.toByte())
+            val bytes = mutableListOf<Byte>()
+            var n = length
+            while (n > 0) {
+                bytes.add(0, (n and 0xff).toByte())
+                n = n ushr 8
+            }
+            return byteArrayOf((0x80 or bytes.size).toByte()) + bytes.toByteArray()
+        }
+
+        private fun derInteger(value: BigInteger): ByteArray =
+            derTagged(0x02, value.toByteArray())
+
+        private fun derNull(): ByteArray = byteArrayOf(0x05, 0x00)
+
+        private fun derOid(oid: String): ByteArray {
+            val parts = oid.split(".").map { it.toLong() }
+            val encoded = mutableListOf<Byte>()
+            encoded.add((parts[0] * 40 + parts[1]).toByte())
+            for (part in parts.drop(2)) {
+                val stack = mutableListOf<Byte>()
+                var n = part
+                stack.add((n and 0x7f).toByte())
+                n = n ushr 7
+                while (n > 0) {
+                    stack.add(0, ((n and 0x7f) or 0x80).toByte())
+                    n = n ushr 7
+                }
+                encoded.addAll(stack)
+            }
+            return derTagged(0x06, encoded.toByteArray())
+        }
+
+        private fun derUtf8(value: String): ByteArray =
+            derTagged(0x0c, value.toByteArray(Charsets.UTF_8))
+
+        private fun derName(commonName: String): ByteArray =
+            derSequence(
+                derSet(
+                    derSequence(
+                        derOid("2.5.4.3"),
+                        derUtf8(commonName)
+                    )
+                )
+            )
+
+        private fun derTime(date: Date): ByteArray {
+            val text = SimpleDateFormat("yyMMddHHmmss'Z'", Locale.US).apply {
+                timeZone = TimeZone.getTimeZone("UTC")
+            }.format(date)
+            return derTagged(0x17, text.toByteArray(Charsets.US_ASCII))
+        }
+
+        private fun derBitString(value: ByteArray): ByteArray =
+            derTagged(0x03, byteArrayOf(0x00) + value)
+
+        private class AliasKeyManager(
+            private val delegate: X509KeyManager,
+            private val alias: String
+        ) : X509ExtendedKeyManager() {
+            override fun getClientAliases(keyType: String?, issuers: Array<java.security.Principal>?): Array<String>? =
+                if (isRsaKeyType(keyType)) arrayOf(alias) else delegate.getClientAliases(keyType, issuers)
+
+            override fun chooseClientAlias(
+                keyType: Array<out String>?,
+                issuers: Array<java.security.Principal>?,
+                socket: Socket?
+            ): String? =
+                if (keyType?.any { isRsaKeyType(it) } == true) alias else delegate.chooseClientAlias(keyType, issuers, socket)
+
+            override fun getServerAliases(keyType: String?, issuers: Array<java.security.Principal>?): Array<String> =
+                if (isRsaKeyType(keyType)) arrayOf(alias) else emptyArray()
+
+            override fun chooseServerAlias(
+                keyType: String?,
+                issuers: Array<java.security.Principal>?,
+                socket: Socket?
+            ): String? =
+                if (isRsaKeyType(keyType)) alias else delegate.chooseServerAlias(keyType, issuers, socket)
+
+            override fun getCertificateChain(alias: String?): Array<java.security.cert.X509Certificate>? =
+                delegate.getCertificateChain(this.alias)
+
+            override fun getPrivateKey(alias: String?): PrivateKey? =
+                delegate.getPrivateKey(this.alias)
+
+            override fun chooseEngineClientAlias(
+                keyType: Array<out String>?,
+                issuers: Array<java.security.Principal>?,
+                engine: SSLEngine?
+            ): String? =
+                if (keyType?.any { isRsaKeyType(it) } == true) alias else null
+
+            override fun chooseEngineServerAlias(
+                keyType: String?,
+                issuers: Array<java.security.Principal>?,
+                engine: SSLEngine?
+            ): String? =
+                if (isRsaKeyType(keyType)) alias else null
+
+            private fun isRsaKeyType(keyType: String?): Boolean {
+                val normalized = keyType?.uppercase(Locale.US) ?: return false
+                return normalized == "RSA" || normalized.startsWith("RSA_")
+            }
+        }
+
+        // The SSLSocketFactory.createSocket(Socket, InputStream consumed, boolean)
+        // overload exists on the API 24+ base class, but the device's Conscrypt
+        // doesn't override it — the base impl throws UnsupportedOperationException
+        // (observed as "TLS handshake failed: InvocationTargetException"). So
+        // instead we wrap the accepted socket in a delegating Socket whose input
+        // stream re-injects the peeked bytes, then use the universally supported
+        // createSocket(Socket, String, Int, Boolean) overload; Conscrypt's wrapped
+        // SSLSocket reads via the underlying socket's getInputStream().
+        private class PrereadSocket(private val delegate: Socket, prefix: ByteArray) : Socket() {
+            private val input: InputStream =
+                SequenceInputStream(ByteArrayInputStream(prefix), delegate.getInputStream())
+
+            override fun getInputStream(): InputStream = input
+            override fun getOutputStream(): OutputStream = delegate.getOutputStream()
+            override fun getInetAddress(): InetAddress? = delegate.inetAddress
+            override fun getLocalAddress(): InetAddress = delegate.localAddress
+            override fun getPort(): Int = delegate.port
+            override fun getLocalPort(): Int = delegate.localPort
+            override fun getRemoteSocketAddress(): SocketAddress? = delegate.remoteSocketAddress
+            override fun getLocalSocketAddress(): SocketAddress? = delegate.localSocketAddress
+            override fun isConnected(): Boolean = delegate.isConnected
+            override fun isBound(): Boolean = delegate.isBound
+            override fun isClosed(): Boolean = delegate.isClosed
+            override fun isInputShutdown(): Boolean = delegate.isInputShutdown
+            override fun isOutputShutdown(): Boolean = delegate.isOutputShutdown
+            override fun getSoTimeout(): Int = delegate.soTimeout
+            override fun setSoTimeout(timeout: Int) { delegate.soTimeout = timeout }
+            override fun getTcpNoDelay(): Boolean = delegate.tcpNoDelay
+            override fun setTcpNoDelay(on: Boolean) { delegate.tcpNoDelay = on }
+            override fun getKeepAlive(): Boolean = delegate.keepAlive
+            override fun setKeepAlive(on: Boolean) { delegate.keepAlive = on }
+            override fun getSoLinger(): Int = delegate.soLinger
+            override fun setSoLinger(on: Boolean, linger: Int) = delegate.setSoLinger(on, linger)
+            override fun getReuseAddress(): Boolean = delegate.reuseAddress
+            override fun setReuseAddress(on: Boolean) { delegate.reuseAddress = on }
+            override fun getReceiveBufferSize(): Int = delegate.receiveBufferSize
+            override fun setReceiveBufferSize(size: Int) { delegate.receiveBufferSize = size }
+            override fun getSendBufferSize(): Int = delegate.sendBufferSize
+            override fun setSendBufferSize(size: Int) { delegate.sendBufferSize = size }
+            override fun shutdownInput() = delegate.shutdownInput()
+            override fun shutdownOutput() = delegate.shutdownOutput()
+            override fun close() = delegate.close()
+            override fun toString(): String = "PrereadSocket($delegate)"
+        }
+
+        @JvmStatic
+        private fun wrapServerTlsSocket(tls: SSLContext, socket: Socket, consumed: ByteArray): SSLSocket {
+            val host = (socket.remoteSocketAddress as? InetSocketAddress)?.address?.hostAddress ?: ""
+            return tls.socketFactory.createSocket(
+                PrereadSocket(socket, consumed), host, socket.port, true
+            ) as SSLSocket
+        }
 
         private fun staticOpenConn(url: String, connectTimeout: Int = 10000, readTimeout: Int = 30000): HttpURLConnection {
             val conn = URL(url).openConnection() as HttpURLConnection
@@ -790,6 +1362,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             put(fileId, JSONObject().apply {
                 put("id", fileId); put("fileName", fileName)
                 put("size", size); put("fileType", fileType)
+                put("hash", sha)
                 put("sha256", sha)
                 if (preview != null) put("preview", preview)
             })
@@ -840,6 +1413,9 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                     put("alias", staticDeviceAlias); put("version", PROTOCOL_VERSION)
                     put("deviceModel", "Supernote"); put("deviceType", "mobile")
                     put("fingerprint", staticDeviceFingerprint)
+                    put("port", DEFAULT_PORT)
+                    put("protocol", serverProtocol())
+                    put("download", false)
                 })
                 put("files", filesJson)
             }
@@ -859,9 +1435,18 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                 val sessionId = prepareJson.optString("sessionId", "")
                 val tokenMap = prepareJson.optJSONObject("files")
                 if (sessionId.isEmpty()) { if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SEND-DBG] auto-accepted"); return "auto" }
+                if (tokenMap == null || tokenMap.length() == 0) {
+                    // Receiver accepted but issued no tokens: everything was
+                    // consumed at prepare-upload time (e.g. text delivered via
+                    // the preview field short path). Nothing left to upload.
+                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SEND-DBG] no tokens issued, consumed at prepare-upload; done")
+                    return sessionId
+                }
                 for ((fileId, data) in fileData) {
                     val token = tokenMap?.optString(fileId, "") ?: ""
-                    if (token.isEmpty()) continue
+                    if (token.isEmpty()) {
+                        throw IOException("prepare-upload returned no token for $fileId: $prepareResp")
+                    }
                     val path = "$API_BASE/upload?sessionId=$sessionId&fileId=$fileId&token=$token"
                     if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SEND-DBG] uploading $fileId size=${data.size}")
                     if (useTls) {
@@ -927,14 +1512,16 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             if (scanRunningStatic) return
             thread(isDaemon = true, name = "NativePanel-Scan") {
                 scanRunningStatic = true
+                staticDiscoveredPeers.clear()
                 try {
                     val localIp = getLocalIpStatic()
                     if (localIp == "0.0.0.0") return@thread
+                    val localIps = getLocalIpsStatic()
                     val subnet = localIp.substringBeforeLast('.')
                     val executor = Executors.newFixedThreadPool(50)
                     for (i in 1..254) {
                         val ip = "$subnet.$i"
-                        if (ip == localIp) continue
+                        if (ip in localIps) continue
                         executor.submit { probeHostStatic(ip, DEFAULT_PORT) }
                     }
                     executor.shutdown()
@@ -948,6 +1535,27 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
         }
 
         @Volatile private var scanRunningStatic = false
+
+        private fun getLocalIpsStatic(): Set<String> {
+            val result = linkedSetOf<String>()
+            try {
+                val interfaces = NetworkInterface.getNetworkInterfaces()
+                while (interfaces.hasMoreElements()) {
+                    val iface = interfaces.nextElement()
+                    if (iface.isLoopback || !iface.isUp) continue
+                    val addrs = iface.inetAddresses
+                    while (addrs.hasMoreElements()) {
+                        val addr = addrs.nextElement()
+                        if (addr is Inet4Address && !addr.isLoopbackAddress) {
+                            addr.hostAddress?.let { result.add(it) }
+                        }
+                    }
+                }
+            } catch (_: Exception) {}
+            return result
+        }
+
+        private fun isLocalAddressStatic(ip: String): Boolean = ip in getLocalIpsStatic()
 
         private fun getLocalIpStatic(): String {
             return try {
@@ -966,7 +1574,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
         }
 
         private fun probeHostStatic(ip: String, port: Int) {
-
+            if (isLocalAddressStatic(ip)) return
             try {
                 val conn = staticOpenConn("https://$ip:$port$API_BASE/info", 1500, 1500)
                 conn.requestMethod = "GET"
@@ -998,6 +1606,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
         }
 
         private fun registerPeerFromJson(body: String, ip: String, port: Int, useTls: Boolean = true) {
+            if (isLocalAddressStatic(ip)) return
             val data = JSONObject(body)
             val fp = data.optString("fingerprint", "")
             if (fp.isNotEmpty() && fp != staticDeviceFingerprint) {
@@ -1013,9 +1622,6 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
     private var serverSocket: ServerSocket?
         get() = staticServerSocket
         set(v) { staticServerSocket = v }
-    private var multicastSocket: MulticastSocket?
-        get() = staticMulticastSocket
-        set(v) { staticMulticastSocket = v }
     private var isRunning: Boolean
         get() = staticIsRunning
         set(v) { staticIsRunning = v }
@@ -1027,6 +1633,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
 
     private val uploadSessions = ConcurrentHashMap<String, UploadSession>()
     private var activeUploadSession: String? = null
+    @Volatile private var serverStartError: Exception? = null
 
     data class DiscoveredPeer(
         val alias: String,
@@ -1037,7 +1644,10 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
         val lastSeen: Long = System.currentTimeMillis(),
         val useTls: Boolean = true
     )
-    private val discoveredPeers = ConcurrentHashMap<String, DiscoveredPeer>()
+    // Single source of truth: the static map, so peers found by static scans
+    // before startServer() aren't discarded by a map swap.
+    private val discoveredPeers: ConcurrentHashMap<String, DiscoveredPeer>
+        get() = staticDiscoveredPeers
 
     private val knownSenderIps = Collections.synchronizedSet(LinkedHashSet<String>())
 
@@ -1062,20 +1672,40 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
 
             staticReceiveDir = receiveDir
             staticDeviceAlias = deviceAlias
+            val securityContext = ensureSecurityContext(reactApplicationContext)
+            deviceFingerprint = securityContext.certificateHash
             staticDeviceFingerprint = deviceFingerprint
-            staticDiscoveredPeers = discoveredPeers
 
             File(receiveDir).mkdirs()
 
+            initServerTlsContext(reactApplicationContext)
+
             isRunning = true
+            serverStartError = null
+            val serverReady = java.util.concurrent.CountDownLatch(1)
 
             thread(isDaemon = true, name = "LocalSend-Server") {
-                runHttpServer()
+                runHttpServer(serverReady)
             }
 
-            thread(isDaemon = true, name = "LocalSend-Multicast") {
-                runMulticastDiscovery()
+            if (!serverReady.await(2, TimeUnit.SECONDS)) {
+                if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "startServer: HTTP bind did not report ready within 2s")
             }
+            serverStartError?.let { throw it }
+
+            if (BuildConfig.ENABLE_DEBUG) {
+                Log.i(TAG, "startServer: bound HTTP port=$serverPort, localIp=${getLocalIp()}, receiveDir=$receiveDir")
+            }
+
+            // Shared discovery socket: listen for LocalSend peers and start
+            // announcing. Idempotent — if AIRelay's dictation listener already
+            // bound 53317 this only installs our handlers and flips the flag.
+            LocalSendDiscovery.startLocalSendDiscovery(
+                reactApplicationContext,
+                announcementProvider = { buildLocalSendAnnouncement() },
+                onLocalSendAnnouncement = { senderIp, dto -> handleLocalSendAnnouncement(senderIp, dto) },
+            )
+            LocalSendDiscovery.setLocalSendAnnouncing(true)
 
             val localIp = getLocalIp()
             if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "LocalSend server started on $localIp:$serverPort")
@@ -1097,12 +1727,13 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
         isRunning = false
         try {
             serverSocket?.close()
-            multicastSocket?.close()
         } catch (e: Exception) {
             if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "Error closing sockets", e)
         }
         serverSocket = null
-        multicastSocket = null
+        // Drops only LocalSend's demand; dictation discovery (AIRelay) keeps
+        // the multicast socket alive if it is listening.
+        LocalSendDiscovery.stopLocalSendDiscovery()
         uploadSessions.clear()
         activeUploadSession = null
         discoveredPeers.clear()
@@ -1166,7 +1797,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun getDiscoveredPeers(promise: Promise) {
         val now = System.currentTimeMillis()
-        discoveredPeers.entries.removeIf { now - it.value.lastSeen > 30_000 }
+        discoveredPeers.entries.removeIf { now - it.value.lastSeen > PEER_TTL_MS || isLocalAddress(it.value.ip) || it.value.fingerprint == deviceFingerprint }
 
         val arr = Arguments.createArray()
         discoveredPeers.values.forEach { peer ->
@@ -1203,14 +1834,16 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                 val subnet = localIp.substringBeforeLast('.')
                 val localSuffix = localIp.substringAfterLast('.').toIntOrNull() ?: 0
                 val executor = Executors.newFixedThreadPool(50)
+                val localIps = getLocalIpsStatic()
 
                 val knownCopy = synchronized(knownSenderIps) { knownSenderIps.toList() }
                 if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "scanForPeers: phase1 known IPs: $knownCopy")
                 for (ip in knownCopy) {
+                    if (ip in localIps) continue
                     executor.submit { probeHost(ip, DEFAULT_PORT) }
                 }
 
-                val skipIps = knownCopy.toSet() + localIp
+                val skipIps = knownCopy.toSet() + localIps
                 if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "scanForPeers: phase2 scanning subnet $subnet.1-254 (skipping ${skipIps.size} IPs)")
                 for (i in 1..254) {
                     val ip = "$subnet.$i"
@@ -1236,14 +1869,14 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
     }
 
     private fun probeHost(ip: String, port: Int) {
-
+        if (isLocalAddress(ip)) return
         try {
             val url = "https://$ip:$port$API_BASE/info"
             if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "probeHost: trying $url")
             val conn = openConn(url, connectTimeout = 500, readTimeout = 500)
             conn.requestMethod = "GET"
             val code = conn.responseCode
-            if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "probeHost: $url → HTTP $code")
+            if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "probeHost: $url -> HTTP $code")
             if (code == 200) {
                 val body = conn.inputStream.bufferedReader().readText()
                 conn.disconnect()
@@ -1261,6 +1894,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             sock.soTimeout = 500
             val out = sock.getOutputStream()
             val req = "GET $API_BASE/info HTTP/1.1\r\nHost: $ip:$port\r\nConnection: close\r\n\r\n"
+            if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "probeHost: trying http://$ip:$port$API_BASE/info (raw)")
             out.write(req.toByteArray(Charsets.UTF_8))
             out.flush()
             val reader = sock.getInputStream().bufferedReader(Charsets.UTF_8)
@@ -1277,6 +1911,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
     }
 
     private fun registerPeerFromProbe(body: String, ip: String, port: Int, useTls: Boolean = true) {
+        if (isLocalAddress(ip)) return
         if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "probeHost: $ip response body: $body")
         val data = JSONObject(body)
         val fp = data.optString("fingerprint", "")
@@ -1388,6 +2023,9 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                 put("deviceModel", "Supernote")
                 put("deviceType", "mobile")
                 put("fingerprint", deviceFingerprint)
+                put("port", serverPort)
+                put("protocol", serverProtocol())
+                put("download", false)
             })
             put("files", filesJson)
         }
@@ -1409,6 +2047,17 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             return "auto"
         }
 
+        if (tokenMap == null || tokenMap.length() == 0) {
+            // Receiver accepted but issued no tokens: everything was consumed
+            // at prepare-upload time (e.g. text delivered via the preview
+            // field short path). Nothing left to upload.
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "doLocalSendUpload: no tokens issued, consumed at prepare-upload; done")
+            sendEvent("onSendComplete", Arguments.createMap().apply {
+                putString("sessionId", sessionId)
+            })
+            return sessionId
+        }
+
         if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Got sessionId=$sessionId, uploading ${fileData.size} file(s)")
         sendEvent("onSendStarted", Arguments.createMap().apply {
             putString("sessionId", sessionId)
@@ -1419,8 +2068,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
         for ((fileId, data) in fileData) {
             val token = tokenMap?.optString(fileId, "") ?: ""
             if (token.isEmpty()) {
-                if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "doLocalSendUpload: no token for $fileId, skipping upload")
-                continue
+                throw IOException("prepare-upload returned no token for $fileId: $prepareResp")
             }
 
             val uploadUrl = "$baseUrl/upload?sessionId=$sessionId&fileId=$fileId&token=$token"
@@ -1450,7 +2098,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
 
     private fun guessMimeType(name: String): String = staticGuessMimeType(name)
 
-    private fun runHttpServer() {
+    private fun runHttpServer(ready: java.util.concurrent.CountDownLatch? = null) {
         try {
             val sock = ServerSocket()
             sock.reuseAddress = true
@@ -1462,9 +2110,10 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                     sock.bind(InetSocketAddress(tryPort))
                     boundPort = tryPort
                     bindOk = true
+                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[LS-DIAG] bind OK on tcp/$tryPort")
                     break
                 } catch (e: java.net.BindException) {
-                    if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "Port $tryPort unavailable (${e.message}), trying next...")
+                    if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "[LS-DIAG] bind failed on tcp/$tryPort (${e.message}), trying next")
                 }
             }
             if (!bindOk) {
@@ -1474,10 +2123,14 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             serverPort = boundPort
             serverSocket = sock
             if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "HTTP server listening on port $serverPort")
+            ready?.countDown()
 
             while (isRunning) {
                 try {
                     val client = serverSocket?.accept() ?: break
+                    if (BuildConfig.ENABLE_DEBUG) {
+                        Log.i(TAG, "[LS-DIAG] accepted tcp connection from ${client.remoteSocketAddress} on local=${client.localSocketAddress}")
+                    }
                     thread(isDaemon = true) {
                         handleClient(client)
                     }
@@ -1486,6 +2139,8 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                 }
             }
         } catch (e: Exception) {
+            serverStartError = e
+            ready?.countDown()
             if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "HTTP server error", e)
             sendEvent("onServerError", Arguments.createMap().apply {
                 putString("error", e.message ?: "Unknown error")
@@ -1494,18 +2149,49 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
     }
 
     private fun handleClient(socket: Socket) {
+        var effectiveSocket: Socket = socket
         try {
             socket.soTimeout = 30000
             val remoteIp = (socket.remoteSocketAddress as? InetSocketAddress)?.address?.hostAddress ?: "0.0.0.0"
+
+            // Peek exactly 1 byte from the raw stream: 0x16 = TLS ClientHello.
+            val raw = socket.getInputStream()
+            val firstByte = raw.read()
+            if (firstByte < 0) return
+
             val input: BufferedInputStream
             val output: BufferedOutputStream
-            try {
-                input = BufferedInputStream(socket.inputStream)
+            if (firstByte == 0x16) {
+                val tls = staticServerTlsContext
+                if (tls == null) {
+                    if (BuildConfig.ENABLE_DEBUG) {
+                        Log.w(TAG, "[RECV-DBG] TLS ClientHello from $remoteIp but no server TLS context; closing")
+                    }
+                    return
+                }
+                val sslSocket = try {
+                    // Layer an SSLSocket over the accepted socket; PrereadSocket
+                    // re-injects the peeked 0x16 byte into the handshake stream.
+                    (wrapServerTlsSocket(tls, socket, byteArrayOf(0x16))).apply {
+                        useClientMode = false
+                        startHandshake()
+                    }
+                } catch (e: Exception) {
+                    if (BuildConfig.ENABLE_DEBUG) {
+                        Log.w(TAG, "[RECV-DBG] TLS handshake failed from $remoteIp: ${e.javaClass.simpleName}: ${e.message}" +
+                            (e.cause?.let { " (cause: ${it.javaClass.simpleName}: ${it.message})" } ?: ""))
+                    }
+                    return
+                }
+                effectiveSocket = sslSocket
+                input = BufferedInputStream(sslSocket.inputStream)
+                output = BufferedOutputStream(sslSocket.outputStream)
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[RECV-DBG] TLS session established with $remoteIp")
+            } else {
+                input = BufferedInputStream(
+                    SequenceInputStream(ByteArrayInputStream(byteArrayOf(firstByte.toByte())), raw)
+                )
                 output = BufferedOutputStream(socket.outputStream)
-            } catch (e: SSLException) {
-                if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "[RECV-DBG] TLS handshake failed from $remoteIp (non-TLS client?), ignoring")
-                try { socket.close() } catch (_: Exception) {}
-                return
             }
 
             val requestLine = readLine(input) ?: return
@@ -1534,34 +2220,44 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             val queryString = if (qIdx >= 0) rawPath.substring(qIdx + 1) else ""
             val queryParams = parseQuery(queryString)
 
+            // Official LocalSend clients probe the legacy v1 info endpoint
+            // (GET /api/localsend/v1/info) before listing a device; serve v1
+            // paths with the same handlers as v2.
+            val apiPath = when {
+                path.startsWith("$API_BASE/") -> path.removePrefix(API_BASE)
+                path.startsWith("$API_BASE_V1/") -> path.removePrefix(API_BASE_V1)
+                else -> path
+            }
+
             when {
-                method == "GET" && path == "$API_BASE/info" ->
+                method == "GET" && apiPath == "/info" ->
                     handleInfo(output)
 
-                method == "POST" && path == "$API_BASE/register" -> {
+                method == "POST" && apiPath == "/register" -> {
                     val body = readBody(input, contentLength)
                     handleRegister(output, body, remoteIp)
                 }
 
-                method == "POST" && path == "$API_BASE/prepare-upload" -> {
+                method == "POST" && apiPath == "/prepare-upload" -> {
                     val body = readBody(input, contentLength)
                     handlePrepareUpload(output, body, remoteIp, queryParams)
                 }
 
-                method == "POST" && path == "$API_BASE/upload" ->
+                method == "POST" && apiPath == "/upload" ->
                     handleUpload(output, input, remoteIp, queryParams, contentLength)
 
-                method == "POST" && path == "$API_BASE/cancel" ->
+                method == "POST" && apiPath == "/cancel" ->
                     handleCancel(output, queryParams)
 
                 else ->
                     sendHttpResponse(output, 404, """{"error":"Not found"}""")
             }
         } catch (e: SSLException) {
-            if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "[RECV-DBG] TLS error from client (non-TLS?), ignoring: ${e.message}")
+            if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "[RECV-DBG] TLS error from client, ignoring: ${e.message}")
         } catch (e: Exception) {
             if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "Client handler error", e)
         } finally {
+            try { effectiveSocket.close() } catch (_: Exception) {}
             try { socket.close() } catch (_: Exception) {}
         }
     }
@@ -1575,16 +2271,19 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             put("fingerprint", deviceFingerprint)
             put("download", false)
         }
+        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[LS-DIAG] /info response port=$serverPort protocol=${serverProtocol()} body=$info")
         sendHttpResponse(output, 200, info.toString())
     }
 
     private fun handleRegister(output: BufferedOutputStream, body: String, remoteIp: String) {
         try {
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[LS-DIAG] /register from $remoteIp body=${body.take(500)}")
             val data = JSONObject(body)
             val peerAlias = data.optString("alias", "Unknown")
             val peerPort = data.optInt("port", DEFAULT_PORT)
             val peerDeviceType = data.optString("deviceType", "desktop")
             val peerFingerprint = data.optString("fingerprint", remoteIp)
+            val peerProtocol = data.optString("protocol", "https")
 
             knownSenderIps.add(remoteIp)
 
@@ -1601,7 +2300,8 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                 ip = remoteIp,
                 port = peerPort,
                 deviceType = peerDeviceType,
-                fingerprint = peerFingerprint
+                fingerprint = peerFingerprint,
+                useTls = peerProtocol != "http"
             )
 
             if (isNew || isChanged) {
@@ -1624,7 +2324,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                 put("deviceType", "mobile")
                 put("fingerprint", deviceFingerprint)
                 put("port", serverPort)
-                put("protocol", "http")
+                put("protocol", serverProtocol())
                 put("download", false)
             }
             sendHttpResponse(output, 200, response.toString())
@@ -1672,20 +2372,31 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             knownSenderIps.add(remoteIp)
 
             val allPreviews = mutableListOf<String>()
+            var allFilesAreText = true
             val keys0 = files.keys()
             while (keys0.hasNext()) {
                 val fileId = keys0.next()
                 val fileData = files.getJSONObject(fileId)
                 val preview = fileData.optString("preview", "")
                 val fileType = fileData.optString("fileType", "")
+                val fileName = fileData.optString("fileName", "")
                 if (preview.isNotEmpty() && fileType.startsWith("text/")) {
                     allPreviews.add(preview)
                 }
+                if (!fileType.startsWith("text/") && !isTextFile(fileName)) {
+                    allFilesAreText = false
+                }
+            }
+            if (allFilesAreText && !FloatingBubbleModule.isTextReceiverShowing()) {
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Text receive rejected from [$senderAlias]: receiver bubble closed")
+                notifyTextReceiverClosed()
+                sendHttpResponse(output, 403, """{"error":"Text receiver is closed"}""")
+                return
             }
             if (allPreviews.isNotEmpty() && allPreviews.size == files.length()) {
                 if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Text message(s) from [$senderAlias] via preview field: ${allPreviews.size}")
                 val combined = allPreviews.joinToString("\n")
-                sendTextViaBroadcast(combined)
+                deliverLocalSendText(combined, "message.txt")
 
                 val textSessionId = UUID.randomUUID().toString().replace("-", "").substring(0, 22)
                 val response = JSONObject().apply {
@@ -1723,26 +2434,44 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                 it.startsWith("clipboard_sync_") && it.endsWith(".zip")
             }
 
+            val isSingleImage = fileNames.size == 1 && isImageFile(fileNames.first())
+
             if (isClipboardSync) {
                 val latch = java.util.concurrent.CountDownLatch(1)
                 var accepted = false
                 val msg = NativeLocale.t("sync_clipboard_ask").replace("%s", senderAlias)
-                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SYNC-DBG] showRattaDialog for prepare-upload confirm")
-                android.os.Handler(android.os.Looper.getMainLooper()).post {
-                    com.ratta.supernote.pluginlib.api.HostUIAPI.getInstance().showRattaDialog(
-                        reactApplicationContext.currentActivity, msg,
-                        NativeLocale.t("cancel"), NativeLocale.t("confirm"), false,
-                        object : com.ratta.supernote.pluginlib.callback.RattaDialogListener {
-                            override fun onConfirm() { accepted = true; latch.countDown() }
-                            override fun onCancel() { accepted = false; latch.countDown() }
-                        }
-                    )
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[SYNC-DBG] confirm for prepare-upload")
+                com.supernote_quicktoolbar.ui_common.Dialog.confirmResult(reactApplicationContext, msg) { ok ->
+                    accepted = ok
+                    latch.countDown()
                 }
                 latch.await(30, TimeUnit.SECONDS)
                 if (!accepted) {
                     if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Clipboard sync rejected by user from [$senderAlias]")
                     sendHttpResponse(output, 403, """{"error":"Rejected by user"}""")
                     return
+                }
+            }
+
+            if (isSingleImage) {
+                if (!FloatingToolbarModule.isInNoteApp()) {
+                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Image from [$senderAlias] accepted to inbox (not in note)")
+                    session.insertImagesImmediately = false
+                } else {
+                    val latch = java.util.concurrent.CountDownLatch(1)
+                    var choice = com.supernote_quicktoolbar.ui_common.Dialog.ImageReceiveChoice.REJECT
+                    val msg = NativeLocale.t("image_receive_ask").replace("%s", senderAlias)
+                    com.supernote_quicktoolbar.ui_common.Dialog.chooseImageReceive(reactApplicationContext, msg) {
+                        choice = it
+                        latch.countDown()
+                    }
+                    latch.await(60, TimeUnit.SECONDS)
+                    if (choice == com.supernote_quicktoolbar.ui_common.Dialog.ImageReceiveChoice.REJECT) {
+                        sendHttpResponse(output, 403, """{"error":"Image rejected by user"}""")
+                        return
+                    }
+                    session.insertImagesImmediately =
+                        choice == com.supernote_quicktoolbar.ui_common.Dialog.ImageReceiveChoice.INSERT_NOW
                 }
             }
 
@@ -1805,11 +2534,15 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
             return
         }
 
-        val dir = File(receiveDir)
-        dir.mkdirs()
-        val destFile = safeFileName(fileInfo.fileName, dir)
+        val ext = fileInfo.fileName.substringAfterLast('.', "").lowercase()
+        val saveDir = if (ext == "snplg") File("/sdcard/MyStyle") else File(receiveDir)
+        saveDir.mkdirs()
+        val destFile = safeFileName(fileInfo.fileName, saveDir)
 
-        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Receiving file: ${fileInfo.fileName} -> $destFile")
+        if (BuildConfig.ENABLE_DEBUG) {
+            Log.i(TAG, "[LS-DIAG] receive target dir=${saveDir.absolutePath} exists=${saveDir.exists()} canWrite=${saveDir.canWrite()} dest=$destFile")
+            Log.i(TAG, "Receiving file: ${fileInfo.fileName} -> $destFile")
+        }
 
         try {
             var received = 0L
@@ -1852,8 +2585,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                 handleClipboardSyncReceive(destFile, session.senderAlias ?: remoteIp)
             } else if (isTextFile(fileInfo.fileName)) {
                 val textContent = destFile.readText(Charsets.UTF_8)
-                destFile.delete()
-                sendTextViaBroadcast(textContent)
+                deliverLocalSendText(textContent, fileInfo.fileName)
             } else {
                 if (isImageFile(fileInfo.fileName)) {
                     addSessionReceivedImage(ReceivedFileInfo(
@@ -1862,6 +2594,19 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                     ))
                     if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Added to session received: ${destFile.absolutePath}, total=${getReceivedImageFiles().size}")
                     ImagePanel.currentInstance?.onFileReceived()
+                    if (session.insertImagesImmediately && FloatingToolbarModule.isInNoteApp()) {
+                        synchronized(ImagePanel::class.java) {
+                            ImagePanel.pendingReceivedDeletes.add(destFile.absolutePath)
+                        }
+                        val toolbar = FloatingToolbarModule.currentInstance
+                        if (toolbar != null) {
+                            Handler(Looper.getMainLooper()).post {
+                                Handler(Looper.getMainLooper()).postDelayed({
+                                    toolbar.requestInsertImage(destFile.absolutePath)
+                                }, 300)
+                            }
+                        }
+                    }
                 }
                 if (DocLinkPanel.DOC_EXTS.contains(fileInfo.fileName.substringAfterLast('.', "").lowercase())) {
                     DocLinkPanel.currentInstance?.onFileReceived()
@@ -1902,49 +2647,104 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
         sendHttpResponse(output, 200, "")
     }
 
-    private fun runMulticastDiscovery() {
+    /** LocalSend v2 announcement payload sent via the shared discovery socket. */
+    private fun buildLocalSendAnnouncement(): JSONObject = JSONObject().apply {
+        put("alias", deviceAlias)
+        put("version", PROTOCOL_VERSION)
+        put("deviceModel", "Supernote")
+        put("deviceType", "mobile")
+        put("fingerprint", deviceFingerprint)
+        put("port", serverPort)
+        put("protocol", serverProtocol())
+        put("download", false)
+        put("announce", true)
+    }
+
+    /** Handles a LocalSend peer announcement routed here by LocalSendDiscovery. */
+    private fun handleLocalSendAnnouncement(senderIp: String, dto: JSONObject) {
         try {
-            val group = InetAddress.getByName(MULTICAST_ADDR)
-            multicastSocket = MulticastSocket(null).apply {
-                reuseAddress = true
-                bind(InetSocketAddress(MULTICAST_PORT))
-                joinGroup(group)
-            }
+            val fp = dto.optString("fingerprint", "")
+            if (fp.isEmpty() || fp == deviceFingerprint) return
+            val peerAlias = dto.optString("alias", "Unknown")
+            val peerPort = dto.optInt("port", DEFAULT_PORT)
+            val peerDeviceType = dto.optString("deviceType", "desktop")
+            val peerProtocol = dto.optString("protocol", "https")
+            val isAnnounce = dto.optBoolean("announce", dto.optBoolean("announcement", false))
 
-            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Multicast announce started on $MULTICAST_ADDR:$MULTICAST_PORT")
-
-            while (isRunning) {
-                try {
-                    val announcement = JSONObject().apply {
-                        put("alias", deviceAlias)
-                        put("version", PROTOCOL_VERSION)
-                        put("deviceModel", "Supernote")
-                        put("deviceType", "mobile")
-                        put("fingerprint", deviceFingerprint)
-                        put("port", serverPort)
-                        put("protocol", "http")
-                        put("download", false)
-                        put("announce", true)
-                    }
-                    val data = announcement.toString().toByteArray()
-                    val packet = DatagramPacket(data, data.size, group, MULTICAST_PORT)
-                    multicastSocket?.send(packet)
-                } catch (e: Exception) {
-                    if (isRunning) if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "Announce error: ${e.message}")
+            val existing = discoveredPeers[fp]
+            // Re-put unconditionally: refreshes lastSeen so the peer stays alive.
+            discoveredPeers[fp] = DiscoveredPeer(
+                alias = peerAlias, ip = senderIp, port = peerPort,
+                deviceType = peerDeviceType, fingerprint = fp,
+                useTls = peerProtocol != "http"
+            )
+            if (existing == null) {
+                if (BuildConfig.ENABLE_DEBUG) {
+                    Log.i(TAG, "[LS-DIAG] multicast discovered peer $peerAlias @ $senderIp:$peerPort protocol=$peerProtocol announce=$isAnnounce")
                 }
-                Thread.sleep(5000)
+                sendEvent("onPeerFound", Arguments.createMap().apply {
+                    putString("alias", peerAlias)
+                    putString("ip", senderIp)
+                    putString("deviceType", peerDeviceType)
+                    putInt("port", peerPort)
+                    putString("fingerprint", fp)
+                })
             }
+            if (isAnnounce) {
+                thread(isDaemon = true, name = "LocalSend-AnnounceReply") {
+                    respondToAnnouncement(senderIp, peerPort, peerProtocol)
+                }
+            }
+        } catch (_: Exception) {}
+    }
+
+    /** Answer a peer's multicast announcement so it lists us: HTTP register, UDP fallback. */
+    private fun respondToAnnouncement(ip: String, port: Int, peerProtocol: String) {
+        val body = JSONObject().apply {
+            put("alias", deviceAlias)
+            put("version", PROTOCOL_VERSION)
+            put("deviceModel", "Supernote")
+            put("deviceType", "mobile")
+            put("fingerprint", deviceFingerprint)
+            put("port", serverPort)
+            put("protocol", serverProtocol())
+            put("download", false)
+        }
+        try {
+            if (peerProtocol == "http") {
+                staticRawSocketPostJson(ip, port, "$API_BASE/register", body.toString())
+            } else {
+                staticHttpPostJson("https://$ip:$port$API_BASE/register", body.toString())
+            }
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[LS-DIAG] register response sent to $peerProtocol://$ip:$port")
         } catch (e: Exception) {
-            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "Multicast announce error", e)
+            try {
+                body.put("announce", false)
+                LocalSendDiscovery.sendUnicast(ip, body)
+                if (BuildConfig.ENABLE_DEBUG) {
+                    Log.i(TAG, "[LS-DIAG] register HTTP to $ip failed (${e.message}); UDP response sent instead")
+                }
+            } catch (_: Exception) {}
         }
     }
 
-    private fun sendTextViaBroadcast(text: String) {
-        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "sendTextViaBroadcast: len=${text.length}")
-        val intent = Intent("com.dictation.TEXT_TO_PLUGIN").apply {
-            putExtra("text", text)
+    private fun deliverLocalSendText(text: String, fileName: String) {
+        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "deliverLocalSendText: file=$fileName len=${text.length}")
+        sendEvent("onTextReceived", Arguments.createMap().apply {
+            putString("text", text)
+            putString("fileName", fileName)
+        })
+    }
+
+    private fun notifyTextReceiverClosed() {
+        com.supernote_quicktoolbar.ui_common.Dialog.confirmResult(
+            reactApplicationContext, NativeLocale.t("text_recv_closed")
+        ) { confirmed ->
+            if (confirmed) {
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "text_recv_closed confirmed: requesting text receiver bubble")
+                sendEvent("onOpenTextReceiverRequested", Arguments.createMap())
+            }
         }
-        reactApplicationContext.sendBroadcast(intent)
     }
 
     private fun sendEvent(eventName: String, params: WritableMap) {
@@ -1977,6 +2777,8 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
         staticOpenConn(url, connectTimeout, readTimeout)
 
     private fun getLocalIp(): String = getLocalIpStatic()
+
+    private fun isLocalAddress(ip: String): Boolean = isLocalAddressStatic(ip)
 
     private fun readLine(input: InputStream): String? {
         val sb = StringBuilder()
@@ -2061,8 +2863,7 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
     private fun isImageFile(name: String): Boolean = isImageFileStatic(name)
 
     private fun isTextFile(name: String): Boolean {
-        val ext = name.substringAfterLast('.', "").lowercase()
-        return ext == "txt"
+        return name == "message.txt"
     }
 
     private fun handleClipboardSyncReceive(zipFile: File, senderAlias: String) {
@@ -2111,7 +2912,9 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                     .edit().putString("preset_99", clipsJson).apply()
                 if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Clipboard sync imported, clips updated")
             }
-            zipFile.delete()
+            sendEvent("nativeDeleteFile", Arguments.createMap().apply {
+                putString("path", zipFile.absolutePath)
+            })
             Handler(Looper.getMainLooper()).post {
                 try {
                     com.ratta.supernote.pluginlib.api.HostUIAPI.getInstance().showTipDialog(
@@ -2184,7 +2987,13 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
                     if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "Clipboard sync imported, clips updated")
                 }
 
-                zipFile.delete()
+                try {
+                    if (!zipFile.delete() && BuildConfig.ENABLE_DEBUG) {
+                        Log.w(TAG, "[SYNC-DBG] importClipboardSync temp delete skipped: ${zipFile.absolutePath}")
+                    }
+                } catch (e: Exception) {
+                    if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "[SYNC-DBG] importClipboardSync temp delete failed: ${e.message}")
+                }
                 refreshToolbarClipIcons()
                 sendEvent("clipsChanged", Arguments.createMap())
                 promise.resolve(true)
@@ -2211,7 +3020,8 @@ class LocalSendModule(reactContext: ReactApplicationContext) :
         val timeout: Long = 600_000L,
         val files: MutableMap<String, FileInfo> = mutableMapOf(),
         val tokens: MutableMap<String, String> = mutableMapOf(),
-        val received: MutableMap<String, Boolean> = mutableMapOf()
+        val received: MutableMap<String, Boolean> = mutableMapOf(),
+        var insertImagesImmediately: Boolean = false
     ) {
         fun isValid(): Boolean = (System.currentTimeMillis() - createdAt) < timeout
     }

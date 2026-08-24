@@ -3,15 +3,16 @@
 import { AppRegistry, Image, DeviceEventEmitter } from 'react-native';
 import App from './App';
 import { name as appName } from './app.json';
-import { PluginManager, NativeUIUtils } from 'sn-plugin-lib';
+import { PluginManager, NativeUIUtils, FileUtils } from 'sn-plugin-lib';
 import { ensureInit, stopAllModes, startLocalSend, stopLocalSend, isLocalSendRunning } from './components/BackgroundService';
-import { setPendingButton, isAppMounted } from './pendingButton';
+import { PluginCommAPI } from 'sn-plugin-lib';
+import { setPendingButton, isAppMounted, markHostButtonEvent } from './pendingButton';
 import { loadClips } from './components/ToolPresets';
 import FloatingToolbarBridge, { ENABLE_DEBUG } from './components/FloatingToolbarBridge';
 import LocalSendBridge from './components/LocalSendBridge';
 import { executeAction } from './components/ToolActions';
-import { setLocale, t } from './components/i18n';
-import { PenLasso } from './components/PenTools';
+import { setLocale, getLocale, t } from './components/i18n';
+import { ensureInitialPermissions } from './components/PermissionCoordinator';
 
 if (!ENABLE_DEBUG) {
   console.log = () => {};
@@ -23,7 +24,19 @@ if (!ENABLE_DEBUG) {
 AppRegistry.registerComponent(appName, () => App);
 
 PluginManager.init();
+setLocale(getLocale());
 ensureInit();
+if (ENABLE_DEBUG) {
+  const names = Object.keys(require('react-native').NativeModules || {});
+  console.log('[index] FloatingToolbar available=', FloatingToolbarBridge.isAvailable, 'nativeModules=', names.join(','));
+}
+
+DeviceEventEmitter.addListener('plugin_button_event', (msg) => {
+  markHostButtonEvent();
+  FloatingToolbarBridge.reportHostButtonChannel(true);
+  FloatingToolbarBridge.reportHostButtonRaw('probe ' + JSON.stringify(msg));
+  console.log('[index] raw plugin_button_event:', JSON.stringify(msg));
+});
 async function refreshTitleClips() {
   try {
     const clips = await loadClips();
@@ -56,6 +69,16 @@ function registerLocalSendButton() {
   });
 }
 
+DeviceEventEmitter.addListener('nativeDeleteFile', async (evt) => {
+  if (evt && evt.path) {
+    try {
+      await FileUtils.deleteFile(evt.path);
+    } catch (e) {
+      console.warn('[index]: nativeDeleteFile failed:', e);
+    }
+  }
+});
+
 DeviceEventEmitter.addListener('startLocalSendFromNative', async (evt) => {
   console.log('[index]: startLocalSendFromNative');
   const ok = await startLocalSend();
@@ -64,38 +87,14 @@ DeviceEventEmitter.addListener('startLocalSendFromNative', async (evt) => {
   }
 });
 
-DeviceEventEmitter.addListener('clipboardChanged', async () => {
-  console.log('[index]: clipboardChanged → refresh title clips');
-  if (FloatingToolbarBridge.isShowingSync()) {
-    await refreshTitleClips();
-  }
-});
-
 DeviceEventEmitter.addListener('clipsChanged', async () => {
   console.log('[index]: clipsChanged (from native sync) → refresh title clips');
   await refreshTitleClips();
 });
 
-FloatingToolbarBridge.onTitlePenLassoAction(() => {
-  console.log('[index]: onTitlePenLassoAction → arm pen lasso');
-  PenLasso.arm().catch(e => console.error('[index]: PenLasso.arm error:', e));
-});
-
 FloatingToolbarBridge.onDestroyAll(() => {
   console.log('[index]: onDestroyAll → stopAllModes');
   stopAllModes();
-});
-
-FloatingToolbarBridge.onPenLockRequest(() => {
-  console.log('[index]: onPenLockRequest');
-  if (!isAppMounted()) {
-    FloatingToolbarBridge.setPendingScreen('penLock');
-    FloatingToolbarBridge.openPenLockView();
-  }
-});
-
-FloatingToolbarBridge.onPenLockRelease(() => {
-  console.log('[index]: onPenLockRelease');
 });
 
 FloatingToolbarBridge.onToolTap(async ({ toolAction }) => {
@@ -125,26 +124,30 @@ FloatingToolbarBridge.onToolLongPress(async ({ toolId }) => {
   }
 });
 
-let lastCaptureTime = 0;
-const CAPTURE_DEBOUNCE = 3000;
-
 PluginManager.registerButtonListener({
-  onButtonPress(event) {
+  async onButtonPress(event) {
+    FloatingToolbarBridge.reportHostButtonRaw('listener id=' + (event && event.id));
     console.log('[index]: button id=', event.id);
 
+    if (event.id === 100 || event.id === 200 || event.id === 300) {
+      setPendingButton(event.id);
+      const ready = await ensureInitialPermissions();
+      if (!ready) {
+        setPendingButton(null);
+        try { PluginManager.closePluginView(); } catch (_) {}
+        return;
+      }
+    }
+
     if (event.id === 300) {
-      const now = Date.now();
-      if (now - lastCaptureTime < CAPTURE_DEBOUNCE) return;
-      lastCaptureTime = now;
-      FloatingToolbarBridge.handleDocScreenshotCrop();
+      FloatingToolbarBridge.toggleScreenshotBubble();
+      setTimeout(() => {
+        try { PluginManager.closePluginView(); } catch (_) {}
+      }, 100);
       return;
     }
 
     if (event.id === 200) {
-      // Mark this wake-up as coming from the LocalSend button: the host calls
-      // showPluginView even with showType=0, so App uses this to silently close
-      // instead of falling through to the default openMainPanel.
-      setPendingButton(200);
       (async () => {
         try {
           if (isLocalSendRunning()) {
@@ -161,29 +164,22 @@ PluginManager.registerButtonListener({
           }
         } catch (e) {
           console.error('[index]: LocalSend toggle error:', e);
+        } finally {
+          setTimeout(() => {
+            try { PluginManager.closePluginView(); } catch (_) {}
+          }, 100);
         }
       })();
       return;
     }
 
     if (event.id === 100) {
-
-      if (FloatingToolbarBridge.isShowingSync()) {
-        console.log('[index]: toolbar visible → destroyAll');
-
-        stopAllModes();
-        FloatingToolbarBridge.destroyAll();
-        return;
-      }
-
-      setPendingButton(event.id);
-      console.log('[index]: id=100 show path → showCurrent (native owns tool list)');
-      FloatingToolbarBridge.showCurrent();
+      console.log('[index]: id=100 → toggle native toolbar available=', FloatingToolbarBridge.isAvailable, 'showing=', FloatingToolbarBridge.isShowingSync());
+      stopAllModes();
+      FloatingToolbarBridge.toggleFromPluginButton();
       refreshTitleClips();
       return;
     }
-    setPendingButton(event.id);
-    DeviceEventEmitter.emit('quickToolbarButton', { id: event.id });
   },
 });
 
@@ -223,4 +219,3 @@ if (ENABLE_DEBUG) {
     },
   });
 }
-

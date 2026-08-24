@@ -1,4 +1,7 @@
 package com.supernote_quicktoolbar.bubbles
+
+import com.supernote_quicktoolbar.TouchInput
+import com.supernote_quicktoolbar.FloatingPenGuard
 import com.supernote_quicktoolbar.BuildConfig
 import com.supernote_quicktoolbar.*
 import com.supernote_quicktoolbar.overlays.*
@@ -10,15 +13,12 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.ColorFilter
 import android.graphics.Paint
-import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.LayerDrawable
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
-import android.provider.Settings
 import android.util.Log
 import android.view.*
 import android.widget.FrameLayout
@@ -39,7 +39,6 @@ class AiBubbleModule(reactContext: ReactApplicationContext) :
     private val handler = Handler(Looper.getMainLooper())
 
     private val CLR_INK       = Color.parseColor("#1E1E1B")
-    private val CLR_INK_MID   = Color.parseColor("#5C5C56")
     private val CLR_INK_FAINT = Color.parseColor("#9A9A92")
     private val CLR_PANEL     = Color.parseColor("#F4F4F0")
     private val CLR_LINE      = Color.parseColor("#CBCBC4")
@@ -54,7 +53,6 @@ class AiBubbleModule(reactContext: ReactApplicationContext) :
         @Volatile @JvmStatic private var windowManager: WindowManager? = null
         @Volatile @JvmStatic private var bubbleView: View? = null
         @Volatile @JvmStatic private var statusText: TextView? = null
-        @Volatile @JvmStatic private var subText: TextView? = null
         @Volatile @JvmStatic private var iconView: ImageView? = null
         @Volatile @JvmStatic private var timeText: TextView? = null
         @Volatile @JvmStatic private var waveView: View? = null
@@ -75,11 +73,26 @@ class AiBubbleModule(reactContext: ReactApplicationContext) :
         @Volatile @JvmStatic private var stickyY: Int = 120
 
         @Volatile @JvmStatic private var cachedActionsJson: String = "[]"
+        @Volatile @JvmStatic private var cachedInboxJson: String = "[]"
+        @Volatile @JvmStatic private var inboxCol: LinearLayout? = null
         @Volatile @JvmStatic private var pendingLongPress: Runnable? = null
         private const val LONG_PRESS_MS = 600L
 
+        @JvmStatic private fun clampY(desired: Int, viewH: Int): Int =
+            BubbleWindowSupport.clampToBand(screenHeight, desired, viewH)
+
+        /** Main pill width; capsules below are +28% (spec), both centered. */
+        private const val BAR_WIDTH_DP = 420
+        private const val CAPSULE_WIDTH_DP = 537   // 420 × 1.28
+        private const val MAX_CAPSULES = 4
+
         @Volatile @JvmStatic var lastShownText: String = ""
         @Volatile @JvmStatic private var currentMode: String = "ai"
+
+        /** Star-icon tap collapses the whole window into a small round ball
+         *  (ScreenshotBubble style); tapping the ball expands it again.
+         *  Survives hide/reshow cycles until the bubble is hidden for real. */
+        @Volatile @JvmStatic private var collapsedBall = false
 
         @Volatile @JvmStatic
         private var currentInstance: AiBubbleModule? = null
@@ -88,6 +101,7 @@ class AiBubbleModule(reactContext: ReactApplicationContext) :
             if (lastShownText.isEmpty()) return
             val handler = Handler(Looper.getMainLooper())
             handler.post {
+                if (FloatingToolbarModule.anyNativeOverlayOwnsScreen()) return@post
                 try {
                     if (bubbleView != null) {
                         statusText?.text = lastShownText
@@ -107,10 +121,17 @@ class AiBubbleModule(reactContext: ReactApplicationContext) :
                 pendingLongPress = null
                 if (bubbleView != null) {
                     try { windowManager?.removeView(bubbleView) } catch (_: Exception) {}
-                    bubbleView = null; statusText = null; subText = null; iconView = null
-                    timeText = null; waveView = null; actionRow = null; layoutParams = null
+                    bubbleView = null; statusText = null; iconView = null
+                    timeText = null; waveView = null; actionRow = null; inboxCol = null
+                    layoutParams = null
                 }
             }
+        }
+
+        @JvmStatic fun hideAndForget() {
+            lastShownText = ""
+            collapsedBall = false
+            hideStatic()
         }
 
         @JvmStatic fun handleOrientationChange() {
@@ -124,7 +145,7 @@ class AiBubbleModule(reactContext: ReactApplicationContext) :
                     val lp = layoutParams ?: return@post
                     val v = bubbleView ?: return@post
                     val vh = v.height.takeIf { it > 0 } ?: 60
-                    lp.y = lp.y.coerceIn(0, (screenHeight - vh).coerceAtLeast(0))
+                    lp.y = clampY(lp.y, vh)
                     stickyY = lp.y
                     try { windowManager?.updateViewLayout(v, lp) } catch (_: Exception) {}
                 } catch (_: Exception) {}
@@ -137,17 +158,31 @@ class AiBubbleModule(reactContext: ReactApplicationContext) :
         val m = if (mode == MODE_VOICE) MODE_VOICE else MODE_AI
         handler.post {
             try {
-                if (bubbleView != null && currentMode == m) {
+                if (bubbleView != null && currentMode == m && !collapsedBall) {
                     statusText?.text = text; return@post
                 }
                 currentMode = m
+                collapsedBall = false
                 createBubble(text)
             } catch (e: Exception) { if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "show: ${e.message}", e) }
         }
     }
 
+    /** Opens the AI entry as the single-button collected form without starting AIRelay. */
+    @ReactMethod fun showCollapsed(text: String) {
+        lastShownText = text
+        handler.post {
+            try {
+                currentMode = MODE_AI
+                collapsedBall = true
+                createBubble(text)
+            } catch (e: Exception) { if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "showCollapsed: ${e.message}", e) }
+        }
+    }
+
     @ReactMethod fun hide() {
         lastShownText = ""
+        collapsedBall = false
         handler.post { try { removeBubble() } catch (e: Exception) { if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "hide: ${e.message}", e) } }
     }
 
@@ -156,85 +191,37 @@ class AiBubbleModule(reactContext: ReactApplicationContext) :
         handler.post { statusText?.text = text }
     }
 
-    @ReactMethod fun updateSubText(text: String) {
-        handler.post { subText?.text = text }
-    }
-
-    @ReactMethod fun updateTime(text: String) {
-        handler.post { timeText?.text = text }
-    }
-
-    @ReactMethod fun setMode(mode: String) {
-        val m = if (mode == MODE_VOICE) MODE_VOICE else MODE_AI
-        if (m == currentMode) return
-        handler.post {
-            currentMode = m
-            if (bubbleView != null) createBubble(lastShownText)
-        }
-    }
-
     @ReactMethod fun setActionButtons(json: String) {
         cachedActionsJson = json
         handler.post { try { rebuildActionRow() } catch (e: Exception) { if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "setActionButtons: ${e.message}", e) } }
     }
 
+    /** Relay inbox previews (JSON [{id,title,preview,source,time}]) → capsule bars. */
+    @ReactMethod fun setInboxItems(json: String) {
+        cachedInboxJson = json
+        handler.post { try { rebuildInboxCol() } catch (e: Exception) { if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "setInboxItems: ${e.message}", e) } }
+    }
+
     @ReactMethod fun setPageHeight(height: Int) { pageHeight = height }
-    @ReactMethod fun setScreenHeight(height: Int) { screenHeight = height }
-
-    @ReactMethod fun isShowing(promise: Promise) { promise.resolve(bubbleView != null) }
-
-    @ReactMethod(isBlockingSynchronousMethod = true)
-    fun isShowingSync(): Boolean = bubbleView != null
-
-    @ReactMethod fun checkOverlayPermission(promise: Promise) {
-        if (Build.VERSION.SDK_INT >= 23) promise.resolve(Settings.canDrawOverlays(reactApplicationContext))
-        else promise.resolve(true)
-    }
-
-    @ReactMethod fun requestOverlayPermission() {
-        try {
-            reactApplicationContext.startActivity(
-                android.content.Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    android.net.Uri.parse("package:${reactApplicationContext.packageName}"))
-                    .apply { addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK) })
-        } catch (e: Exception) {
-            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "requestOverlayPermission: ${e.message}", e)
-        }
-    }
 
     private val sf: Float by lazy { ScreenScale.factor(reactApplicationContext) }
     private fun dp(v: Int): Int = (v * reactApplicationContext.resources.displayMetrics.density * sf).roundToInt()
     private fun dp(v: Float): Int = (v * reactApplicationContext.resources.displayMetrics.density * sf).roundToInt()
     private fun sp(v: Float): Float = v * sf
 
-    private fun callShowPluginView() {
-        try {
-            val pm = reactApplicationContext.catalystInstance.getNativeModule("NativePluginManager") ?: return
-            val methods = pm::class.java.methods.filter { it.name == "showPluginView" }
-            if (methods.isEmpty()) return
-            val m = methods.firstOrNull { it.parameterCount == 0 }
-                ?: methods.firstOrNull { it.parameterCount == 1 }
-                ?: methods.first()
-            if (m.parameterCount == 0) m.invoke(pm)
-            else m.invoke(pm, PromiseImpl(null, null))
-        } catch (e: Exception) { if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "callShowPluginView: ${e.message}", e) }
-    }
-
     private fun createBubble(text: String) {
         val context = reactApplicationContext
         removeBubble()
-        if (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(context)) {
-            emitEvent("onAiBubblePermissionDenied", Arguments.createMap()); return
-        }
         windowManager = context.getSystemService(android.content.Context.WINDOW_SERVICE) as WindowManager
         val dm = context.resources.displayMetrics
         screenHeight = dm.heightPixels
         screenWidth = dm.widthPixels
 
+        if (collapsedBall) { createCollapsedBall(); return }
+
         val isVoice = currentMode == MODE_VOICE
         val bgColor = if (isVoice) CLR_INK else CLR_PANEL
         val fgColor = if (isVoice) CLR_SEL_FG else CLR_INK
-        val fgMid   = if (isVoice) Color.parseColor("#B8B8B0") else CLR_INK_MID
         val fgFaint = if (isVoice) Color.parseColor("#8A8A82") else CLR_INK_FAINT
         val borderColor = CLR_INK
         val borderW = if (isVoice) 0 else dp(2)
@@ -255,6 +242,11 @@ class AiBubbleModule(reactContext: ReactApplicationContext) :
                 if (borderW > 0) setStroke(borderW, borderColor)
                 this.cornerRadius = cornerR
             }
+            // The window is capsule-column wide; the main pill stays at its
+            // classic width, centered.
+            layoutParams = LinearLayout.LayoutParams(
+                dp(BAR_WIDTH_DP), LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { gravity = Gravity.CENTER_HORIZONTAL }
         }
 
         val iconSz = dp(28)
@@ -280,16 +272,6 @@ class AiBubbleModule(reactContext: ReactApplicationContext) :
             letterSpacing = 0.02f
         }
         textCol.addView(statusText)
-        subText = TextView(context).apply {
-            this.text = ""; textSize = sp(12f); setTextColor(fgMid)
-            maxLines = 1; letterSpacing = 0.03f
-            visibility = View.GONE
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { topMargin = dp(3) }
-        }
-        textCol.addView(subText)
         capsule.addView(textCol)
 
         val waveSz = dp(22)
@@ -323,6 +305,19 @@ class AiBubbleModule(reactContext: ReactApplicationContext) :
 
         mainBarAndActions.addView(capsule)
 
+        // Relay inbox capsules — "flash idea" bars directly under the status
+        // pill (above the action buttons, which stay at the very bottom).
+        inboxCol = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(10) }
+            visibility = View.GONE
+        }
+        mainBarAndActions.addView(inboxCol)
+        rebuildInboxCol()
+
         actionRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_HORIZONTAL
@@ -338,18 +333,25 @@ class AiBubbleModule(reactContext: ReactApplicationContext) :
         outerWrapper.addView(mainBarAndActions)
         bubbleView = outerWrapper
 
-        @Suppress("DEPRECATION")
-        val wmType = WindowManager.LayoutParams.TYPE_PHONE
-        val barWidthDp = 420
-        val barW = dp(barWidthDp)
-        layoutParams = WindowManager.LayoutParams(
-            barW, WindowManager.LayoutParams.WRAP_CONTENT,
-            wmType,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
-            PixelFormat.TRANSLUCENT
+        val barW = dp(CAPSULE_WIDTH_DP)
+        layoutParams = BubbleWindowSupport.overlayParams(
+            barW, WindowManager.LayoutParams.WRAP_CONTENT
         ).apply {
             gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-            x = 0; y = stickyY.coerceIn(0, (screenHeight - 60).coerceAtLeast(0))
+            x = 0; y = clampY(stickyY, 60)
+        }
+
+        // Content height changes (inbox capsules / action row) or the first
+        // measure can push the window bottom past the 94% band — re-clamp
+        // after every layout pass that changes the height.
+        outerWrapper.addOnLayoutChangeListener { v, _, top, _, bottom, _, oldTop, _, oldBottom ->
+            if (bottom - top == oldBottom - oldTop) return@addOnLayoutChangeListener
+            val lp = layoutParams ?: return@addOnLayoutChangeListener
+            val ny = clampY(lp.y, bottom - top)
+            if (ny != lp.y) {
+                lp.y = ny; stickyY = ny
+                try { windowManager?.updateViewLayout(v, lp) } catch (_: Exception) {}
+            }
         }
 
         val longPressR = Runnable {
@@ -370,16 +372,20 @@ class AiBubbleModule(reactContext: ReactApplicationContext) :
                     handler.postDelayed(longPressR, LONG_PRESS_MS); true
                 }
                 MotionEvent.ACTION_MOVE -> {
+                    if (!TouchInput.isFinger(ev)) return@setOnTouchListener true
                     val dx = ev.rawX - startRawX; val dy = ev.rawY - startRawY
                     if (!isDragging && (Math.abs(dx) > 10 || Math.abs(dy) > 10)) {
                         isDragging = true; handler.removeCallbacks(longPressR)
                     }
                     if (isDragging) {
-                        lp.y = (startY + dy.toInt()).coerceIn(0, screenHeight - 60)
+                        lp.y = clampY(startY + dy.toInt(), view.height.takeIf { it > 0 } ?: 60)
                         try { windowManager?.updateViewLayout(view, lp) } catch (_: Exception) {}
                     }; true
                 }
-                MotionEvent.ACTION_CANCEL -> { handler.removeCallbacks(longPressR); true }
+                MotionEvent.ACTION_CANCEL -> {
+                    handler.removeCallbacks(longPressR)
+                    true
+                }
                 MotionEvent.ACTION_UP -> {
                     handler.removeCallbacks(longPressR)
                     if (longPressFired) {  }
@@ -391,16 +397,117 @@ class AiBubbleModule(reactContext: ReactApplicationContext) :
                             putDouble("screenY", sy.toDouble())
                             putInt("pageY", (sy * r).toInt())
                         })
+                    } else if (ev.x <= (iconView?.right ?: 0) + dp(10)) {
+                        // Tap on the star/spark icon: collapse the whole
+                        // window into a small round ball.
+                        collapsedBall = true
+                        createBubble(lastShownText)
+                    } else if (ev.x >= gripView.left - dp(10)) {
+                        Unit
                     } else {
                         emitEvent("onAiBubbleTap", Arguments.createMap())
-                    }; true
+                    }
+                    true
                 }
                 else -> false
             }
         }
 
         windowManager?.addView(outerWrapper, layoutParams)
+        FloatingPenGuard.track("ai_bubble", outerWrapper)
         if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "AI bubble shown: mode=$currentMode text='$text'")
+    }
+
+    /**
+     * Collapsed form: a small round ball (ScreenshotBubble style — white
+     * circle, ink border) with the AI spark icon centered. Tap → expand back
+     * to the full pill; vertical drag repositions within the 6%–94% band.
+     */
+    private fun createCollapsedBall() {
+        val context = reactApplicationContext
+        val borderW = dp(2)
+        val ballIconSz = dp(32)
+        val pad = dp(10)
+        val total = ballIconSz + pad * 2 + borderW * 2
+
+        val ball = FrameLayout(context).apply {
+            background = GradientDrawable().apply {
+                setColor(CLR_PANEL)
+                setStroke(borderW, CLR_INK)
+                cornerRadius = total / 2f
+            }
+            val assetName = if (currentMode == MODE_VOICE) "icons/icon_sound.xml" else "icons/icon_ai_spark.xml"
+            val bmp = VectorAssets.loadBitmapTinted(context, assetName, ballIconSz, CLR_INK)
+            addView(ImageView(context).apply {
+                if (bmp != null) setImageBitmap(bmp)
+                scaleType = ImageView.ScaleType.FIT_CENTER
+                layoutParams = FrameLayout.LayoutParams(ballIconSz, ballIconSz, Gravity.CENTER)
+            })
+        }
+        bubbleView = ball
+
+        layoutParams = BubbleWindowSupport.overlayParams(total, total).apply {
+            gravity = Gravity.TOP or Gravity.END
+            x = dp(20)
+            y = clampY(stickyY, total)
+        }
+
+        val collapsedLongPress = Runnable {
+            if (!isDragging && collapsedBall && bubbleView === ball) {
+                longPressFired = true
+                emitEvent("onAiBubbleLongPress", Arguments.createMap())
+            }
+        }
+        pendingLongPress = collapsedLongPress
+
+        ball.setOnTouchListener { _, ev ->
+            val lp = layoutParams ?: return@setOnTouchListener false
+            when (ev.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    startY = lp.y
+                    startRawY = ev.rawY
+                    isDragging = false
+                    longPressFired = false
+                    handler.removeCallbacks(collapsedLongPress)
+                    handler.postDelayed(collapsedLongPress, LONG_PRESS_MS)
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (!TouchInput.isFinger(ev)) return@setOnTouchListener true
+                    val dy = ev.rawY - startRawY
+                    if (!isDragging && Math.abs(dy) > 10) {
+                        isDragging = true
+                        handler.removeCallbacks(collapsedLongPress)
+                    }
+                    if (isDragging) {
+                        lp.y = clampY(startY + dy.toInt(), total)
+                        try { windowManager?.updateViewLayout(ball, lp) } catch (_: Exception) {}
+                    }
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    handler.removeCallbacks(collapsedLongPress)
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    handler.removeCallbacks(collapsedLongPress)
+                    when {
+                        longPressFired -> Unit
+                        isDragging -> { stickyY = lp.y }
+                        else -> {
+                            // Short tap: ask JS to start AIRelay, then it calls expand().
+                            emitEvent("onAiBubbleExpand", Arguments.createMap())
+                        }
+                    }
+                    true
+                }
+                else -> false
+            }
+        }
+
+        windowManager?.addView(ball, layoutParams)
+        FloatingPenGuard.track("ai_bubble", ball)
+        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "AI bubble collapsed to ball")
     }
 
     private fun rebuildActionRow() {
@@ -450,6 +557,60 @@ class AiBubbleModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    /** Rebuilds the "flash idea" capsule bars from cachedInboxJson. */
+    private fun rebuildInboxCol() {
+        val col = inboxCol ?: return
+        col.removeAllViews()
+        try {
+            val arr = JSONArray(cachedInboxJson)
+            if (arr.length() == 0) { col.visibility = View.GONE; tryUpdateLayout(); return }
+            col.visibility = View.VISIBLE
+
+            val count = minOf(arr.length(), MAX_CAPSULES)
+            for (i in 0 until count) {
+                val obj = arr.getJSONObject(i)
+                val id = obj.getString("id")
+                val title = obj.optString("title", "")
+                val preview = obj.optString("preview", "")
+                // Pure text: title line + body, clamped to three lines so all
+                // four capsules share the same height.
+                val body = if (preview.startsWith(title) || title.isEmpty()) preview
+                           else title + "\n" + preview
+
+                val bar = TextView(reactApplicationContext).apply {
+                    text = body
+                    textSize = sp(14f)
+                    setTextColor(CLR_INK)
+                    setLineSpacing(0f, 1.15f)
+                    minLines = 3; maxLines = 3
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                    setPadding(dp(20), dp(12), dp(20), dp(12))
+                    background = GradientDrawable().apply {
+                        setColor(CLR_PANEL)
+                        setStroke(dp(2), CLR_INK)
+                        cornerRadius = dp(16).toFloat()
+                    }
+                    layoutParams = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    ).apply { topMargin = if (i == 0) 0 else dp(8) }
+                    setOnClickListener {
+                        emitEvent("onAiCapsuleTap", Arguments.createMap().apply { putString("id", id) })
+                    }
+                    setOnLongClickListener {
+                        emitEvent("onAiCapsuleLongPress", Arguments.createMap().apply { putString("id", id) })
+                        true
+                    }
+                }
+                col.addView(bar)
+            }
+            tryUpdateLayout()
+        } catch (e: Exception) {
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "rebuildInboxCol: ${e.message}")
+            col.visibility = View.GONE
+        }
+    }
+
     private fun tryUpdateLayout() {
         try { if (bubbleView != null && layoutParams != null)
             windowManager?.updateViewLayout(bubbleView, layoutParams) } catch (_: Exception) {}
@@ -458,18 +619,16 @@ class AiBubbleModule(reactContext: ReactApplicationContext) :
     private fun removeBubble() {
         pendingLongPress?.let { handler.removeCallbacks(it) }
         pendingLongPress = null
-
         if (bubbleView != null) {
             try { windowManager?.removeView(bubbleView) } catch (e: Exception) { if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "removeView: ${e.message}") }
-            bubbleView = null; statusText = null; subText = null; iconView = null
-            timeText = null; waveView = null; actionRow = null; layoutParams = null
+            bubbleView = null; statusText = null; iconView = null
+            timeText = null; waveView = null; actionRow = null; inboxCol = null
+            layoutParams = null
         }
     }
 
-    private fun emitEvent(name: String, params: WritableMap) {
-        try { reactApplicationContext.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java).emit(name, params) }
-        catch (e: Exception) { if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "emitEvent($name): ${e.message}") }
-    }
+    private fun emitEvent(name: String, params: WritableMap) =
+        BubbleWindowSupport.emitEvent(reactApplicationContext, TAG, name, params)
 
     override fun onCatalystInstanceDestroy() {
         if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "onCatalystInstanceDestroy — keeping AI bubble alive")

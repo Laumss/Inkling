@@ -21,13 +21,13 @@ class InklingPackages : ReactPackage {
         }
         tryAdd("FloatingToolbar") { FloatingToolbarModule(reactContext) }
         tryAdd("LocalSendModule") { LocalSendModule(reactContext) }
-        tryAdd("BroadcastBridge") { BroadcastBridge(reactContext) }
+        tryAdd("AIRelayModule") { AIRelayModule(reactContext) }
         tryAdd("FloatingBubble") { FloatingBubbleModule(reactContext) }
-        tryAdd("ScreenshotModule") { ScreenshotModule(reactContext) }
         tryAdd("AiBubble") { AiBubbleModule(reactContext) }
         tryAdd("PaletteBubble") { PaletteBubbleModule(reactContext) }
         tryAdd("TextLayoutEngine") { TextLayoutEngine(reactContext) }
         tryAdd("TextboxMetrics") { TextboxMetricsModule(reactContext) }
+        tryAdd("InklingImageUtil") { ImageUtilModule(reactContext) }
         return modules
     }
 

@@ -11,15 +11,11 @@ const BBOX_PADDING_PX = 100;
 let armed = false;
 let bboxSub: { remove(): void } | null = null;
 let cancelSub: { remove(): void } | null = null;
-let wasAlreadyLocked = false;
 
 export const PenLasso = {
   async arm(): Promise<void> {
     if (armed) { PenLasso.disarm(); }
     armed = true;
-
-    wasAlreadyLocked = FloatingToolbarBridge.isPenLockedSync();
-    if (!wasAlreadyLocked) FloatingToolbarBridge.engagePenLock();
 
     bboxSub = FloatingToolbarBridge.onPenLassoBbox(async (event) => {
       if (!armed) return;
@@ -29,13 +25,10 @@ export const PenLasso = {
     });
 
     cancelSub = FloatingToolbarBridge.onPenLassoCancel(() => {
+      console.log(PL_TAG, 'onPenLassoCancel received, armed=', armed);
       if (!armed) return;
       armed = false;
       PenLasso.disarm();
-      if (!wasAlreadyLocked) {
-        FloatingToolbarBridge.releasePenLock();
-        FloatingToolbarBridge.disablePenBlock();
-      }
       FloatingToolbarBridge.restoreToolbar();
     });
 
@@ -46,19 +39,10 @@ export const PenLasso = {
     if (bboxSub) { try { bboxSub.remove(); } catch (_) {} bboxSub = null; }
     if (cancelSub) { try { cancelSub.remove(); } catch (_) {} cancelSub = null; }
   },
-
-  isArmed(): boolean {
-    return armed;
-  },
 };
 
 async function handleBbox(bbox: { left: number; top: number; right: number; bottom: number }): Promise<void> {
   try {
-    if (!wasAlreadyLocked) {
-      FloatingToolbarBridge.releasePenLock();
-      FloatingToolbarBridge.disablePenBlock();
-    }
-
     let pageW = 1920, pageH = 2560;
     try {
       const [fpRes, pgRes]: any[] = await Promise.all([

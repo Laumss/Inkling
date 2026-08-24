@@ -2,6 +2,7 @@ import { PluginFileAPI, PluginCommAPI, PluginNoteAPI, PluginManager } from 'sn-p
 import { NativeModules, NativeEventEmitter } from 'react-native';
 import { FileLogger } from './FileLogger';
 import { splitTextForHeight } from './TextboxMetrics';
+import { normalizeInsertionLeft } from './InsertionGeometry';
 
 const { FloatingToolbar } = NativeModules;
 
@@ -16,17 +17,57 @@ interface QueueItem {
   source: TextSource;
 }
 
-const PAGE_MARGIN_RIGHT = 0.04;
-const PAGE_MARGIN_LEFT  = 0.07;
-
 const TOP_MARGIN_BASE     = 150;
 
 const BASE_PAGE_HEIGHT    = 1872;
 
+let _presetNotePath: string | null = null;
+let _presetPageSize: { width: number; height: number } | null = null;
+
+export function presetPageInfo(notePath: string, size: { width: number; height: number }): void {
+  _presetNotePath = notePath;
+  _presetPageSize = size;
+  console.log('[TextInserter]: presetPageInfo cached notePath=', notePath, 'size=', JSON.stringify(size));
+}
+
 const FONT_SIZE         = 36;
+// Must mirror TextLayoutEngine.kt: NOTE renders textboxes taller than
+// StaticLayout.height (42px device line height + frame inset); without this
+// the last line's bottom quarter clips. Applied on top of split fittingHeight.
+const NOTE_RENDER_PAD   = 28;
+// Mirrors TextLayoutEngine.DEVICE_LINE_HEIGHT / emojiExtraHeight: the NOTE
+// app renders emoji wider than StaticLayout measures → device wraps extra
+// lines. Reserve one device line per 4 emoji in split measurement too.
+const DEVICE_LINE_HEIGHT = 42;
+// Mirrors TextLayoutEngine's long-box allowance for NOTE's system font, whose
+// wrap width differs from PluginHost StaticLayout despite the width adjustment.
+const SYSTEM_FONT_WRAP_SAFETY_RATIO = 0.15;
+const SYSTEM_FONT_WRAP_SAFETY_MIN_LINES = 8;
+const EMOJI_PER_EXTRA_LINE = 4;
+const EMOJI_REGEX = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}\u{2190}-\u{21FF}\u{2B00}-\u{2BFF}]/gu;
+
+function emojiExtraHeight(text: string): number {
+  const count = (text.match(EMOJI_REGEX) ?? []).length;
+  if (count === 0) return 0;
+  return Math.ceil(count / EMOJI_PER_EXTRA_LINE) * DEVICE_LINE_HEIGHT;
+}
+
+function systemFontWrapExtraHeight(lineCount: number): number {
+  if (lineCount < SYSTEM_FONT_WRAP_SAFETY_MIN_LINES) return 0;
+  return Math.ceil(lineCount * SYSTEM_FONT_WRAP_SAFETY_RATIO) * DEVICE_LINE_HEIGHT;
+}
+// Must mirror TextLayoutEngine.WIDTH_ADJUSTMENT: the NOTE app wraps text
+// ~30px narrower than the frame rect, so split measurement must use the
+// same reduced width or the device wraps more lines than we budgeted for.
+const WIDTH_ADJUSTMENT  = 30;
 const INTERVAL_MS       = 200;
 
 const PEN_SAFE_GAP_MS   = 2000;
+
+// The note app re-loads its page layers right after returning to the
+// foreground; inserting a text box during that window crashes its native
+// redraw. Wait this long after a foreground return before inserting.
+const NOTE_FOREGROUND_SETTLE_MS = 1500;
 
 const SDK_TIMEOUT_MS    = 8000;
 
@@ -87,8 +128,6 @@ export class TextInserter {
   private pageNextLeft = new Map<number, number>();
 
   private _bubbleAnchorTop: number = -1;
-  private _lassoAnchorTop: number = -1;
-  private _lassoAnchorLeft: number = -1;
 
   private timerRef: ReturnType<typeof setTimeout> | null = null;
   private activeMode: InsertMode | null = null;
@@ -108,6 +147,11 @@ export class TextInserter {
 
   private _occupiedRanges: OccupiedRange[] = [];
   private _occupiedPage = -1;
+
+  // Inserts are held until this timestamp. Set when the note app returns to
+  // the foreground: inserting while it is still re-loading its page layers
+  // can crash the note's native redraw (SIGSEGV in redrawTrails).
+  private _holdInsertsUntil = 0;
 
   private _expectedTotalPages = -1;
 
@@ -132,6 +176,11 @@ export class TextInserter {
   }
 
   enqueue(text: string, source: TextSource = 'unknown') {
+    // The note renders plain text only: drop markdown heading markers
+    // ("# "…"###### " at line starts) instead of inserting them literally.
+    text = text.replace(/^#{1,6}\s+/gm, '');
+    // Same for blockquote markers: strip leading "> " (incl. nested ">> ").
+    text = text.replace(/^(?:>\s?)+/gm, '');
     this.textQueue.push({ text, source });
 
     if (this.activeMode && !this._paused) this._registerPenUp();
@@ -169,6 +218,10 @@ export class TextInserter {
     const out = this.textQueue.map(q => q.text);
     this.textQueue = [];
     return out;
+  }
+
+  isBusy(): boolean {
+    return this.inserting;
   }
 
   isRunning(): boolean {
@@ -241,16 +294,51 @@ export class TextInserter {
     this.onPositionChanged?.(this.targetPage, clamped, 'unknown', false);
   }
 
-  forceSetNextLeft(left: number) {
-    if (left < 0) { this.pageNextLeft.delete(this.targetPage); return; }
-    this.pageNextLeft.set(this.targetPage, left);
-    console.log('[TextInserter]: forceSetNextLeft page=', this.targetPage, 'left=', left);
+  /** Delay any insertText for [ms] from now (e.g. note app just resumed). */
+  holdInserts(ms: number) {
+    const until = Date.now() + ms;
+    if (until > this._holdInsertsUntil) {
+      this._holdInsertsUntil = until;
+      console.log('[TextInserter]: holding inserts for', ms, 'ms');
+    }
   }
 
-  setLassoAnchor(top: number, left: number) {
-    this._lassoAnchorTop = top;
-    this._lassoAnchorLeft = left;
-    console.log('[TextInserter]: setLassoAnchor top=', top, 'left=', left);
+  private _normalizeNextLeft(left: number) {
+    if (!this.pageSize) {
+      const normalized = Math.max(0, Math.round(left));
+      return { left: normalized, safeMaxLeft: normalized, right: normalized, minTextboxWidth: 0 };
+    }
+    return normalizeInsertionLeft(this.pageSize.width, left, FONT_SIZE);
+  }
+
+  forceSetNextLeft(left: number): number | undefined {
+    if (left < 0) {
+      this.pageNextLeft.delete(this.targetPage);
+      return undefined;
+    }
+    const geometry = this._normalizeNextLeft(left);
+    this.pageNextLeft.set(this.targetPage, geometry.left);
+    console.log('[TextInserter]: forceSetNextLeft page=', this.targetPage,
+      'requested=', left, 'normalized=', geometry.left, 'safeMax=', geometry.safeMaxLeft,
+      'minWidth=', geometry.minTextboxWidth);
+    return geometry.left;
+  }
+
+  setNextInsertionAnchor(top: number, left: number, source: string = 'programmatic'):
+      { top: number; left: number; safeMaxLeft: number } {
+    const clampedTop = Math.max(this._topMargin(), Math.round(top));
+    const geometry = this._normalizeNextLeft(left);
+    this.pageNextTop.set(this.targetPage, clampedTop);
+    this.pageNextLeft.set(this.targetPage, geometry.left);
+    this._bubbleAnchorTop = clampedTop;
+    console.warn('[TextInserter/DIAG]: setNextInsertionAnchor source=', source,
+      'page=', this.targetPage, 'requested=', JSON.stringify({ top, left }),
+      'normalized=', JSON.stringify({ top: clampedTop, left: geometry.left }),
+      'safeMax=', geometry.safeMaxLeft, 'minWidth=', geometry.minTextboxWidth);
+    FileLogger.logEvent('SetInsertAnchor',
+      `source=${source} page=${this.targetPage} requested=(${left},${top}) normalized=(${geometry.left},${clampedTop}) safeMax=${geometry.safeMaxLeft}`);
+    this.onPositionChanged?.(this.targetPage, clampedTop, 'unknown', false);
+    return { top: clampedTop, left: geometry.left, safeMaxLeft: geometry.safeMaxLeft };
   }
 
   getTargetPage(): number { return this.targetPage; }
@@ -336,9 +424,11 @@ export class TextInserter {
 
     try {
       const fpRes = await sdkCall(PluginCommAPI.getCurrentFilePath(), 'getCurrentFilePath');
+      console.log('[TextInserter]: getCurrentFilePath →', JSON.stringify(fpRes));
       if (fpRes?.success && fpRes.result) this.notePath = fpRes.result;
 
       const pgRes = await sdkCall(PluginCommAPI.getCurrentPageNum(), 'getCurrentPageNum');
+      console.log('[TextInserter]: getCurrentPageNum →', JSON.stringify(pgRes));
       if (pgRes?.success && typeof pgRes.result === 'number') {
         this.currentPage = pgRes.result;
         this.targetPage  = pgRes.result;
@@ -348,15 +438,24 @@ export class TextInserter {
         console.warn('[TextInserter]: notePath empty, retrying getCurrentFilePath...');
         await new Promise<void>(r => setTimeout(r, 600));
         const fp2 = await sdkCall(PluginCommAPI.getCurrentFilePath(), 'getCurrentFilePath(retry)');
+        console.log('[TextInserter]: getCurrentFilePath(retry) →', JSON.stringify(fp2));
         if (fp2?.success && fp2.result) this.notePath = fp2.result;
       }
 
-      let psRes = await sdkCall(PluginFileAPI.getPageSize(this.notePath, this.currentPage), 'getPageSize');
+      let psRes: any = null;
+      if (_presetNotePath && _presetPageSize && _presetNotePath === this.notePath) {
+        psRes = { success: true, result: { ..._presetPageSize } };
+        console.log('[TextInserter]: pageSize from preset cache →', JSON.stringify(psRes.result));
+      } else {
+        psRes = await sdkCall(PluginFileAPI.getPageSize(this.notePath, this.currentPage), 'getPageSize');
+        console.log('[TextInserter]: getPageSize(notePath=', this.notePath, ', page=', this.currentPage, ') →', JSON.stringify(psRes));
+      }
 
       if (!psRes?.success || !psRes.result?.width) {
         console.warn('[TextInserter]: getPageSize failed, retrying in 800ms...');
         await new Promise<void>(r => setTimeout(r, 800));
         psRes = await sdkCall(PluginFileAPI.getPageSize(this.notePath, this.currentPage), 'getPageSize(retry)');
+        console.log('[TextInserter]: getPageSize(retry) →', JSON.stringify(psRes));
       }
       if (psRes?.success && psRes.result?.width) {
         this.pageSize = { width: psRes.result.width, height: psRes.result.height };
@@ -510,6 +609,21 @@ export class TextInserter {
       return 'continue';
     }
 
+    if (Date.now() < this._holdInsertsUntil) {
+      return 'continue';
+    }
+
+    // Authoritative anti-race gate: ask the native side directly how long the
+    // note app has been foreground. The event-based holdInserts() above can
+    // lose the race (native flag flips before the JS event lands), which let
+    // an insertText hit the note 26ms into its page reload and crash it.
+    try {
+      const elapsed = FloatingToolbar?.getNoteForegroundElapsedMs?.();
+      if (typeof elapsed === 'number' && elapsed < NOTE_FOREGROUND_SETTLE_MS) {
+        return 'continue'; // covers elapsed === -1 (not in note app) too
+      }
+    } catch (_) {}
+
     if (!this._isPenIdle()) {
       return 'continue';
     }
@@ -531,9 +645,35 @@ export class TextInserter {
     const rawLines = text.split('\n');
     const rawLineCount = rawLines.length;
     const emptyLineCount = rawLines.filter(l => l.trim().length === 0).length;
+    // Strip <t>...</t> thinking blocks (may span multiple lines)
+    text = text.replace(/<t>[\s\S]*?<\/t>\s*/g, '');
+    // Strip unclosed <t> at end of text (last thinking block cut by split)
+    text = text.replace(/<t>[^]*$/g, '');
+    // Strip orphaned </t> at/near start (relay chunks at 600 chars; a <t>
+    // block spanning the boundary leaves the second chunk starting with
+    // "...thinking</t>actual reply" — no opening <t> for our regexes above).
+    text = text.replace(/^[^]*?<\/t>\s*/g, '');
     text = text.replace(/^(\d+)\./gm, '$1\u200B.');
     text = text.replace(/\*/g, '');
     text = text.replace(/`/g, '');
+    // Prefill placeholder UUIDs \u2014 defense in depth (relay strips them on
+    // closeHead, but streamed/older texts still carry them; tail group may
+    // be truncated mid-stream, hence {1,12}).
+    text = text.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1,12}/gi, '');
+    // Role turn markers:
+    //   H:/Human: \u2014 the user's handwritten text (already on the page as ink);
+    //             delete the ENTIRE line (marker + content) to avoid duplicate.
+    //   A:/Assistant: \u2014 AI reply; strip the marker only, keep the content.
+    // BLANK is an invisible sentinel that survives the empty-line filter
+    // below and turns back into a real empty line (turn separator) at the
+    // end; leading sentinels (prefill "## H:" opener at text start) are
+    // dropped so the note doesn't begin with a blank line.
+    const BLANK = '\u2063';
+    // H lines: entire line \u2192 blank sentinel (content discarded)
+    text = text.replace(/^(?:#{1,3}\s*)?(?:H|Human)\s*[:\uFF1A].*$/gim, BLANK);
+    // A lines: marker stripped, content kept on its own line
+    text = text.replace(/^(?:#{1,3}\s*)?(?:A|Assistant)\s*[:\uFF1A][ \t]*(.*)$/gim,
+      (_, rest) => (rest && rest.trim().length > 0 ? `${BLANK}\n${rest}` : BLANK));
     text = text.split('\n').map(line => {
       const t = line.trim();
       if (t.startsWith('|') && t.endsWith('|')) {
@@ -547,9 +687,16 @@ export class TextInserter {
       const t = line.trim();
       if (t.length === 0) return false;
       if (/^-{2,}$/.test(t)) return false;
-      if (/^#{1,3}\s*(Human|Assistant)\s*:?/i.test(t)) return false;
       return true;
     }).join('\n');
+    // Sentinel → real blank line: collapse runs, drop leading/trailing ones
+    // (a prefill "## H:" opener must not indent the note with an empty line),
+    // then the bare sentinel char vanishes leaving "\n\n" = one blank line.
+    text = text
+      .replace(new RegExp(`(?:${BLANK}\\n?)+`, 'g'), `${BLANK}\n`)
+      .replace(new RegExp(`^(?:${BLANK}\\n)+`), '')
+      .replace(new RegExp(`(?:\\n?${BLANK}\\n?)+$`), '')
+      .replace(new RegExp(BLANK, 'g'), '');
     const cleanedLineCount = text.split('\n').length;
     FileLogger.logEvent('TextPreprocess',
       `rawLines=${rawLineCount} emptyLines=${emptyLineCount} cleanedLines=${cleanedLineCount} textLen=${text.length}`);
@@ -636,13 +783,25 @@ export class TextInserter {
         let splitFitting: string | null = null;
         let splitOverflow: string | null = null;
         let splitHeight: number = splitAvailH;
+        let splitLineCount = 0;
 
         try {
-          const splitResult = await splitTextForHeight(text, boxWidth, FONT_SIZE, splitAvailH);
+          // Measure at the note's effective wrap width, and reserve the
+          // render pad + emoji allowance so fitting lines still fit the page
+          // after the device's wider emoji wrapping.
+          const measureWidth = Math.max(24, boxWidth - WIDTH_ADJUSTMENT);
+          const availableLineBudget = Math.floor(
+            Math.max(0, splitAvailH - NOTE_RENDER_PAD) / DEVICE_LINE_HEIGHT,
+          );
+          const measureAvailH = Math.max(FONT_SIZE,
+            splitAvailH - NOTE_RENDER_PAD - emojiExtraHeight(text)
+              - systemFontWrapExtraHeight(availableLineBudget));
+          const splitResult = await splitTextForHeight(text, measureWidth, FONT_SIZE, measureAvailH);
           if (splitResult && splitResult.didSplit && splitResult.fittingText.trim().length > 0) {
             splitFitting = splitResult.fittingText;
             splitOverflow = splitResult.overflowText;
             splitHeight = splitResult.fittingHeight;
+            splitLineCount = splitResult.fittingLineCount;
             console.log('[TextInserter]: native split: fitting=', splitFitting.length, 'overflow=', splitOverflow.length);
           }
         } catch (e) {
@@ -673,6 +832,7 @@ export class TextInserter {
               splitFitting = fit;
               splitOverflow = over;
               splitHeight = Math.ceil(fittingLines * lineH);
+              splitLineCount = fittingLines;
               console.log('[TextInserter]: JS fallback split: fitting=', fit.length,
                 'overflow=', over.length, 'fittingLines=', fittingLines);
             }
@@ -681,7 +841,11 @@ export class TextInserter {
 
         if (splitFitting && splitFitting.trim().length > 0) {
           const fitTop = top;
-          const fitBottom = Math.min(ps.height, fitTop + splitHeight + 9);
+          // splitHeight includes StaticLayout's bottom padding; add the
+          // note-render + emoji allowance (same basis as the single-box path).
+          const fitBottom = Math.min(ps.height,
+            fitTop + splitHeight + NOTE_RENDER_PAD + emojiExtraHeight(splitFitting)
+              + systemFontWrapExtraHeight(splitLineCount));
           try {
             const fitRes = await sdkCall(
               PluginNoteAPI.insertText({
@@ -730,70 +894,10 @@ export class TextInserter {
         return 'continue';
       }
 
-      const candidateTemplates: string[] = [];
-      try {
-        const templates = await sdkCall(PluginCommAPI.getNoteSystemTemplates(), 'getNoteSystemTemplates');
-        if (Array.isArray(templates) && templates.length > 0) {
-          for (const t of templates) {
-            if (t?.name) candidateTemplates.push(t.name);
-          }
-        }
-        console.log('[TextInserter]: parsed templates count=', candidateTemplates.length);
-      } catch (_) {}
-      if (!candidateTemplates.includes('style_white')) {
-        candidateTemplates.push('style_white');
-      }
-
-      const newPageIndex = this.targetPage + 1;
-      console.log('[TextInserter]: page full, creating page', newPageIndex, 'candidates=', candidateTemplates);
-
-      let pageCreated = false;
-      for (const templateName of candidateTemplates) {
-        try {
-          const npRes = await sdkCall(
-            PluginFileAPI.insertNotePage({
-              notePath: this.notePath,
-              page: newPageIndex,
-              template: templateName,
-            } as any),
-            'insertNotePage',
-          );
-
-          if (npRes?.success) {
-            console.log('[TextInserter]: page created with template=', templateName);
-            this.targetPage = newPageIndex;
-
-            const newPageTop = this._bubbleAnchorTop > 0 ? this._bubbleAnchorTop : tm;
-            this.pageNextTop.set(newPageIndex, newPageTop);
-            console.log('[TextInserter]: new page top=', newPageTop,
-              'bubbleAnchor=', this._bubbleAnchorTop, 'topMargin=', tm);
-            this._occupiedRanges = [];
-            this._occupiedPage = newPageIndex;
-            if (this._expectedTotalPages > 0) this._expectedTotalPages++;
-            pageCreated = true;
-
-            try {
-              await sdkCall(PluginCommAPI.reloadFile(), 'reloadFile');
-              console.log('[TextInserter]: reloadFile after insertNotePage OK');
-            } catch (e) {
-              console.warn('[TextInserter]: reloadFile failed (non-fatal):', e);
-            }
-
-            this.onPositionChanged?.(newPageIndex, newPageTop, itemSource, true);
-            break;
-          } else {
-            console.warn('[TextInserter]: insertNotePage failed with template=', templateName, ':', npRes?.error?.message);
-          }
-        } catch (e) {
-          console.warn('[TextInserter]: insertNotePage exception with template=', templateName, ':', e);
-        }
-      }
-
-      if (!pageCreated) {
-        console.error('[TextInserter]: all template candidates failed, pausing (not stopping)');
-        FileLogger.logEvent('InsertPageAllFailed', `page=${newPageIndex} candidates=${candidateTemplates.join(',')}`);
-        this.targetPage = newPageIndex;
-      }
+      // Page full — do NOT auto-create a new page (that triggers a note save
+      // which breaks undo/redo). Instead pause and let the user decide.
+      console.log('[TextInserter]: page full, pausing (remaining queue=', this.textQueue.length, ')');
+      FileLogger.logEvent('PageFull', `page=${this.targetPage} queueLen=${this.textQueue.length}`);
       return 'pause';
     }
 
@@ -957,8 +1061,12 @@ export class TextInserter {
   private async _checkNoteContext(): Promise<boolean> {
     try {
 
+      const fgElapsed = FloatingToolbar?.getNoteForegroundElapsedMs?.();
+      const notInNoteApp = typeof fgElapsed === 'number' && fgElapsed < 0;
+
       const fpRes = await sdkCall(PluginCommAPI.getCurrentFilePath(), 'getCurrentFilePath(check)');
-      if (fpRes?.success && fpRes.result && this.notePath && fpRes.result !== this.notePath) {
+      if (!notInNoteApp &&
+          fpRes?.success && fpRes.result && this.notePath && fpRes.result !== this.notePath) {
         const oldPath = this.notePath;
         const newPath = fpRes.result;
         console.error('[TextInserter]: NOTE SWITCHED! old=', oldPath, 'new=', newPath);

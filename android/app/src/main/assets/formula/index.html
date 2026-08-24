@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<script>
+window.MathJax = {
+  tex: { packages: { '[+]': ['ams'] } },
+  svg: { fontCache: 'none' },
+  startup: {
+    typeset: false,
+    ready: function () {
+      MathJax.startup.defaultReady();
+      MathJax.startup.promise.then(function () {
+        window.__mjReady = true;
+        if (window.AndroidFormula) AndroidFormula.onEngineReady();
+      });
+    }
+  }
+};
+</script>
+<!-- Bundled MathJax (tex-svg.js beside this file); CDN fallback below. -->
+<script src="tex-svg.js"
+        onerror="var s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-svg.js';s.onerror=function(){if(window.AndroidFormula)AndroidFormula.onError('mathjax-load-failed');};document.head.appendChild(s);"></script>
+</head>
+<body>
+<script>
+(function () {
+  'use strict';
+
+  // Rasterization: MathJax viewBox units are 1/1000 em. The plugin displays
+  // formulas at ~72 page-px per em; rendering at 2x that keeps the fallback
+  // PNG crisp after downscaling.
+  var RASTER_PX_PER_EM = 144;
+  var MAX_PX_W = 3200;
+  var MAX_PX_H = 3200;
+
+  // Stroke extraction mode:
+  //   'skeleton' — Zhang-Suen thin the solid raster to its 1px medial axis,
+  //                trace medial polylines along glyph direction, then let the
+  //                plugin pen width fill them back to solid. Strokes follow the
+  //                real writing trajectory, so glyphs are SOLID *and* MyScribe-
+  //                recognizable (scanline's zigzag has no trajectory → garbled;
+  //                outline leaves interiors hollow).
+  //   'scanline' — original zigzag scanline fill: solid but unrecognizable.
+  //   'outline'  — silhouette only: reproduces the hollow glyphs (diagnostic).
+  var FILL_MODE = 'skeleton';
+  var DIAG_LOG = true;           // emit stage + raster diagnostics to logcat
+  var DIAG_ASCII_COLS = 64;      // width of the ASCII raster dump (0 = off)
+  var DIAG_ASCII_MAX_ROWS = 48;  // cap dumped rows to bound log size
+
+  // Ink extraction operates in raster px (same space as the PNG). Adjacent-row
+  // runs are chained into per-glyph regions; scanline mode fills them with a
+  // zigzag, outline mode traces only their silhouette.
+  var FILL_ROW_PITCH_PX = 2;     // scanline spacing (px); denser = more solid fill
+  var FILL_PEN_PX = 6;           // pen width hint sent to plugin (raw scaling base)
+  var ALPHA_THRESHOLD = 32;      // canvas alpha above this counts as ink
+  var MAX_POLYLINES = 400;       // above this the formula is image-only
+  // Blocks travel to the plugin in a broadcast extra (binder ~1MB budget
+  // shared per process) — keep stroke payloads comfortably below that.
+  var MAX_STROKES_JSON = 200000;
+
+  function b64DecodeUtf8(b64) {
+    var bin = atob(b64), bytes = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new TextDecoder('utf-8').decode(bytes);
+  }
+
+  // Diagnostic log → Kotlin (Logcat via AndroidFormula.onLog) + WebView console.
+  function flog(msg) {
+    if (!DIAG_LOG) return;
+    try { if (window.AndroidFormula && AndroidFormula.onLog) AndroidFormula.onLog(msg); } catch (e) {}
+    try { console.log('[FormulaJS] ' + msg); } catch (e) {}
+  }
+
+  // Ink coverage + ASCII dump of the rasterized formula. The dump lets a human
+  // SEE whether the raster itself is hollow (bug upstream in SVG/render) or
+  // solid (hollow born only in stroke extraction) — bisecting the root cause.
+  function probeRaster(data, w, h) {
+    var ink = 0, minX = w, minY = h, maxX = -1, maxY = -1;
+    for (var y = 0; y < h; y++) {
+      var base = y * w * 4 + 3;
+      for (var x = 0; x < w; x++) {
+        if (data[base + x * 4] > ALPHA_THRESHOLD) {
+          ink++;
+          if (x < minX) minX = x; if (x > maxX) maxX = x;
+          if (y < minY) minY = y; if (y > maxY) maxY = y;
+        }
+      }
+    }
+    var bw = maxX - minX + 1, bh = maxY - minY + 1;
+    var cov = (bw > 0 && bh > 0) ? ink / (bw * bh) : 0;
+    flog('raster ' + w + 'x' + h + ' inkPx=' + ink + ' bbox=' + bw + 'x' + bh +
+         '@(' + minX + ',' + minY + ') bboxCoverage=' + cov.toFixed(3));
+    if (DIAG_ASCII_COLS > 0 && maxX >= 0) dumpAscii(data, w, minX, minY, bw, bh);
+  }
+
+  // Downsamples the ink bbox to a coarse grid ('#' = any ink in the cell).
+  function dumpAscii(data, w, ox, oy, bw, bh) {
+    var cols = Math.min(DIAG_ASCII_COLS, bw);
+    var cellW = bw / cols;
+    var rows = Math.min(DIAG_ASCII_MAX_ROWS, Math.max(1, Math.round(bh / cellW)));
+    var cellH = bh / rows;
+    flog('ascii ' + cols + 'x' + rows + ' cell=' + cellW.toFixed(1) + 'x' + cellH.toFixed(1) + 'px:');
+    for (var ry = 0; ry < rows; ry++) {
+      var line = '', y0 = oy + Math.floor(ry * cellH), y1 = oy + Math.floor((ry + 1) * cellH);
+      for (var rx = 0; rx < cols; rx++) {
+        var inked = false, x0 = ox + Math.floor(rx * cellW), x1 = ox + Math.floor((rx + 1) * cellW);
+        for (var yy = y0; yy < y1 && !inked; yy++) {
+          var b = yy * w * 4 + 3;
+          for (var xx = x0; xx < x1; xx++) {
+            if (data[b + xx * 4] > ALPHA_THRESHOLD) { inked = true; break; }
+          }
+        }
+        line += inked ? '#' : '.';
+      }
+      flog('|' + line);
+    }
+  }
+
+  // Outline strokes: one silhouette polyline per connected glyph region (left
+  // edge top→bottom, right edge back up, closed). Interiors stay empty →
+  // reproduces the HOLLOW glyphs. Same region-chaining as buildStrokes.
+  function buildOutlineStrokes(rows) {
+    var out = [];
+    for (var r = 0; r < rows.length; r++) {
+      for (var i = 0; i < rows[r].length; i++) {
+        var run = rows[r][i];
+        if (run.used) continue;
+        run.used = true;
+        var chain = [run], cur = run, cr = r;
+        for (;;) {
+          var nextRow = rows[cr + 1];
+          if (!nextRow) break;
+          var next = null;
+          for (var j = 0; j < nextRow.length; j++) {
+            var cand = nextRow[j];
+            if (!cand.used && cand[0] <= cur[1] && cand[1] >= cur[0]) { next = cand; break; }
+          }
+          if (!next) break;
+          next.used = true;
+          chain.push(next);
+          cur = next; cr++;
+        }
+        var pts = [];
+        for (var k = 0; k < chain.length; k++) pts.push(chain[k][0], chain[k][2]);
+        for (var k2 = chain.length - 1; k2 >= 0; k2--) pts.push(chain[k2][1], chain[k2][2]);
+        pts.push(chain[0][0], chain[0][2]);
+        out.push({ w: FILL_PEN_PX, pts: pts });
+        if (out.length > MAX_POLYLINES) return null;
+      }
+    }
+    return out.length > 0 ? out : null;
+  }
+
+  // Extracts horizontal ink runs [x0,x1] for every sampled row.
+  function collectRuns(data, w, h) {
+    var rows = [];
+    for (var y = Math.floor(FILL_ROW_PITCH_PX / 2); y < h; y += FILL_ROW_PITCH_PX) {
+      var runs = [], x0 = -1, base = y * w * 4 + 3;
+      for (var x = 0; x < w; x++) {
+        var ink = data[base + x * 4] > ALPHA_THRESHOLD;
+        if (ink && x0 < 0) x0 = x;
+        if (!ink && x0 >= 0) { runs.push([x0, x - 1, y]); x0 = -1; }
+      }
+      if (x0 >= 0) runs.push([x0, w - 1, y]);
+      rows.push(runs);
+    }
+    return rows;
+  }
+
+  /**
+   * Chains runs of adjacent rows into zigzag polylines (one per connected
+   * region, roughly one per glyph). Per chained row appends 4 points:
+   * (cx,y) → (cx,ny) vertical connector at the overlap center, then the next
+   * run drawn end-to-end starting from the end nearer cx.
+   * Returns [{w, pts:[x0,y0,...]}] or null when over the polyline budget.
+   */
+  function buildStrokes(rows) {
+    var out = [];
+    for (var r = 0; r < rows.length; r++) {
+      for (var i = 0; i < rows[r].length; i++) {
+        var run = rows[r][i];
+        if (run.used) continue;
+        run.used = true;
+        var pts = [run[0], run[2], run[1], run[2]];
+        var cur = run, cr = r;
+        for (;;) {
+          var nextRow = rows[cr + 1];
+          if (!nextRow) break;
+          var next = null;
+          for (var j = 0; j < nextRow.length; j++) {
+            var cand = nextRow[j];
+            if (!cand.used && cand[0] <= cur[1] && cand[1] >= cur[0]) { next = cand; break; }
+          }
+          if (!next) break;
+          next.used = true;
+          var cx = Math.round((Math.max(cur[0], next[0]) + Math.min(cur[1], next[1])) / 2);
+          var nearFirst = Math.abs(next[0] - cx) <= Math.abs(next[1] - cx);
+          var a = nearFirst ? next[0] : next[1];
+          var b = nearFirst ? next[1] : next[0];
+          pts.push(cx, cur[2], cx, next[2], a, next[2], b, next[2]);
+          cur = next; cr++;
+        }
+        out.push({ w: FILL_PEN_PX, pts: pts });
+        if (out.length > MAX_POLYLINES) return null;
+      }
+    }
+    return out.length > 0 ? out : null;
+  }
+
+  // ---- Skeleton mode: medial-axis tracing (solid + recognizable) -----------
+
+  // Binarizes the raster into a 1px-border-padded flat Uint8Array (1 = ink).
+  // Padding lets Zhang-Suen sample 8-neighbours without bounds checks.
+  function binarize(data, w, h) {
+    var W = w + 2, H = h + 2, bin = new Uint8Array(W * H);
+    for (var y = 0; y < h; y++) {
+      var base = y * w * 4 + 3, row = (y + 1) * W + 1;
+      for (var x = 0; x < w; x++) {
+        if (data[base + x * 4] > ALPHA_THRESHOLD) bin[row + x] = 1;
+      }
+    }
+    return { bin: bin, W: W, H: H };
+  }
+
+  // Estimates mean stroke thickness = inkPx / skeletonPx (area / medial length).
+  // Used as the pen width so thin glyphs stay thin and thick rules/braces fill.
+  function estimateStrokeWidth(inkPx, skelPx) {
+    if (skelPx <= 0) return FILL_PEN_PX;
+    var t = inkPx / skelPx;
+    return Math.max(3, Math.min(24, Math.round(t)));
+  }
+
+  // Zhang-Suen thinning: erodes the binary image in-place to a 1px medial axis.
+  // Two sub-iterations per pass; stops when a pass removes nothing.
+  function zhangSuenThin(bin, W, H) {
+    var toClear = [];
+    function pass(step) {
+      toClear.length = 0;
+      for (var y = 1; y < H - 1; y++) {
+        for (var x = 1; x < W - 1; x++) {
+          var i = y * W + x;
+          if (bin[i] === 0) continue;
+          var p2 = bin[i - W], p3 = bin[i - W + 1], p4 = bin[i + 1],
+              p5 = bin[i + W + 1], p6 = bin[i + W], p7 = bin[i + W - 1],
+              p8 = bin[i - 1], p9 = bin[i - W - 1];
+          var b = p2 + p3 + p4 + p5 + p6 + p7 + p8 + p9;
+          if (b < 2 || b > 6) continue;
+          var a = (p2 === 0 && p3 === 1) + (p3 === 0 && p4 === 1) +
+                  (p4 === 0 && p5 === 1) + (p5 === 0 && p6 === 1) +
+                  (p6 === 0 && p7 === 1) + (p7 === 0 && p8 === 1) +
+                  (p8 === 0 && p9 === 1) + (p9 === 0 && p2 === 1);
+          if (a !== 1) continue;
+          if (step === 0) {
+            if (p2 * p4 * p6 !== 0) continue;
+            if (p4 * p6 * p8 !== 0) continue;
+          } else {
+            if (p2 * p4 * p8 !== 0) continue;
+            if (p2 * p6 * p8 !== 0) continue;
+          }
+          toClear.push(i);
+        }
+      }
+      for (var k = 0; k < toClear.length; k++) bin[toClear[k]] = 0;
+      return toClear.length;
+    }
+    var guard = 0;
+    for (;;) {
+      var removed = pass(0) + pass(1);
+      if (removed === 0 || ++guard > 200) break;
+    }
+  }
+
+  // Traces the 1px skeleton into polylines by walking 8-connected pixel chains.
+  // Starts chains at endpoints/junctions (degree != 2) first, then any leftover
+  // loop pixel. Each pixel is consumed once; arc-length decimation caps points.
+  var SKEL_DECIMATE_PX = 3;   // keep ~1 point per this many px of arc length
+  function traceSkeleton(bin, W, H, penW) {
+    // degree = count of 8-neighbours that are ink.
+    function deg(i) {
+      return bin[i - W] + bin[i - W + 1] + bin[i + 1] + bin[i + W + 1] +
+             bin[i + W] + bin[i + W - 1] + bin[i - 1] + bin[i - W - 1];
+    }
+    var OFF = [-W, -W + 1, 1, W + 1, W, W - 1, -1, -W - 1];
+    var visited = new Uint8Array(W * H);
+    var out = [];
+
+    function walk(start) {
+      var pts = [], i = start, prev = -1, acc = 0, lastX = -1, lastY = -1;
+      for (;;) {
+        visited[i] = 1;
+        var x = i % W, y = (i / W) | 0;
+        if (lastX < 0) { pts.push(x - 1, y - 1); lastX = x; lastY = y; acc = 0; }
+        else {
+          acc += Math.abs(x - lastX) + Math.abs(y - lastY);
+          if (acc >= SKEL_DECIMATE_PX) { pts.push(x - 1, y - 1); lastX = x; lastY = y; acc = 0; }
+        }
+        // pick next unvisited 8-neighbour that is ink; prefer straight-ahead.
+        var next = -1;
+        for (var d = 0; d < 8; d++) {
+          var n = i + OFF[d];
+          if (bin[n] === 1 && visited[n] === 0 && n !== prev) { next = n; break; }
+        }
+        if (next < 0) { var lx = i % W, ly = (i / W) | 0; pts.push(lx - 1, ly - 1); break; }
+        prev = i; i = next;
+      }
+      if (pts.length >= 4) { out.push({ w: penW, pts: pts }); }
+    }
+
+    // Pass 1: chains anchored at endpoints/junctions.
+    for (var i1 = W + 1; i1 < W * (H - 1); i1++) {
+      if (bin[i1] === 1 && visited[i1] === 0) {
+        var d1 = deg(i1);
+        if (d1 !== 2) walk(i1);
+        if (out.length > MAX_POLYLINES) return null;
+      }
+    }
+    // Pass 2: remaining pixels (closed loops with no endpoint).
+    for (var i2 = W + 1; i2 < W * (H - 1); i2++) {
+      if (bin[i2] === 1 && visited[i2] === 0) {
+        walk(i2);
+        if (out.length > MAX_POLYLINES) return null;
+      }
+    }
+    return out.length > 0 ? out : null;
+  }
+
+  // Solid + recognizable: thin to the medial axis, trace it, fill via pen width.
+  function buildSkeletonStrokes(data, w, h) {
+    var b = binarize(data, w, h);
+    var inkPx = 0;
+    for (var q = 0; q < b.bin.length; q++) inkPx += b.bin[q];
+    zhangSuenThin(b.bin, b.W, b.H);
+    var skelPx = 0;
+    for (var q2 = 0; q2 < b.bin.length; q2++) skelPx += b.bin[q2];
+    var penW = estimateStrokeWidth(inkPx, skelPx);
+    flog('skeleton: inkPx=' + inkPx + ' skelPx=' + skelPx + ' penW=' + penW);
+    return traceSkeleton(b.bin, b.W, b.H, penW);
+  }
+
+  /**
+   * Renders LaTeX to {width, height, em, png, strokes?} via
+   * AndroidFormula.onResult — png is a transparent-background black raster
+   * (base64, no prefix) used as fallback; strokes are scanline-fill polylines
+   * the plugin inserts as real ink elements (solid black glyphs).
+   */
+  window.renderFormulaB64 = function (b64) {
+    var latex;
+    try { latex = b64DecodeUtf8(b64); } catch (e) {
+      AndroidFormula.onError('b64-decode: ' + e); return;
+    }
+    if (!window.__mjReady) { AndroidFormula.onError('engine-not-ready'); return; }
+
+    MathJax.tex2svgPromise(latex, { display: true }).then(function (node) {
+      var svg = node.querySelector('svg');
+      if (!svg) { AndroidFormula.onError('no-svg'); return; }
+
+      var vb = (svg.getAttribute('viewBox') || '0 0 1000 1000')
+        .split(/\s+/).map(Number);
+      var vbW = Math.max(1, vb[2]), vbH = Math.max(1, vb[3]);
+
+      // Fixed px-per-em so every formula rasterizes at the same font
+      // density; clamp very wide/tall formulas to the budget.
+      var scale = RASTER_PX_PER_EM / 1000;
+      if (vbW * scale > MAX_PX_W) scale = MAX_PX_W / vbW;
+      if (vbH * scale > MAX_PX_H) scale = MAX_PX_H / vbH;
+      var pxW = Math.max(1, Math.round(vbW * scale));
+      var pxH = Math.max(1, Math.round(vbH * scale));
+      flog('render latexLen=' + latex.length + ' viewBox=' + vbW + 'x' + vbH +
+           ' scale=' + scale.toFixed(4) + ' raster=' + pxW + 'x' + pxH);
+
+      // Standalone SVG document: explicit pixel size + black ink
+      // (MathJax uses currentColor).
+      svg.setAttribute('width', pxW + 'px');
+      svg.setAttribute('height', pxH + 'px');
+      svg.setAttribute('color', '#000000');
+      svg.style.color = '#000000';
+
+      var blob = new Blob(
+        [new XMLSerializer().serializeToString(svg)],
+        { type: 'image/svg+xml;charset=utf-8' });
+      var url = URL.createObjectURL(blob);
+      var img = new Image();
+      img.onload = function () {
+        try {
+          var canvas = document.createElement('canvas');
+          canvas.width = pxW;
+          canvas.height = pxH;
+          var g = canvas.getContext('2d');
+          // No background fill — keep transparency for the fallback image.
+          g.drawImage(img, 0, 0, pxW, pxH);
+          URL.revokeObjectURL(url);
+
+          // Ink strokes from the very same raster the PNG comes from.
+          var strokes = null;
+          try {
+            var data = g.getImageData(0, 0, pxW, pxH).data;
+            probeRaster(data, pxW, pxH);
+            if (FILL_MODE === 'skeleton') {
+              flog('mode=skeleton');
+              strokes = buildSkeletonStrokes(data, pxW, pxH);
+            } else {
+              var rows = collectRuns(data, pxW, pxH);
+              var runCount = 0;
+              for (var ri = 0; ri < rows.length; ri++) runCount += rows[ri].length;
+              flog('runs: sampledRows=' + rows.length + ' totalRuns=' + runCount + ' mode=' + FILL_MODE);
+              strokes = (FILL_MODE === 'scanline')
+                ? buildStrokes(rows)
+                : buildOutlineStrokes(rows);
+            }
+            var jsonLen = strokes ? JSON.stringify(strokes).length : 0;
+            flog('strokes: count=' + (strokes ? strokes.length : 0) + ' jsonLen=' + jsonLen +
+                 (strokes && strokes.length ? ' firstPolyPts=' + (strokes[0].pts.length / 2) : ''));
+            if (strokes && jsonLen > MAX_STROKES_JSON) { flog('strokes over budget → image-only'); strokes = null; }
+          } catch (e) {
+            flog('stroke extraction error: ' + e);
+            strokes = null;
+          }
+
+          var dataUrl = canvas.toDataURL('image/png');
+          var result = {
+            width: pxW,
+            height: pxH,
+            em: Math.round(vbH / 10) / 100,
+            png: dataUrl.replace(/^data:image\/png;base64,/, '')
+          };
+          if (strokes) result.strokes = strokes;
+          AndroidFormula.onResult(JSON.stringify(result));
+        } catch (e) {
+          URL.revokeObjectURL(url);
+          AndroidFormula.onError('raster: ' + e);
+        }
+      };
+      img.onerror = function () {
+        URL.revokeObjectURL(url);
+        AndroidFormula.onError('svg-image-load-failed');
+      };
+      img.src = url;
+    }).catch(function (e) {
+      AndroidFormula.onError('tex: ' + e);
+    });
+  };
+
+  if (window.AndroidFormula) AndroidFormula.onPageLoaded();
+})();
+</script>
+</body>
+</html>

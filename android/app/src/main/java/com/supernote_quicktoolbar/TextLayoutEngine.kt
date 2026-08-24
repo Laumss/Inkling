@@ -22,10 +22,49 @@ class TextLayoutEngine(reactContext: ReactApplicationContext) :
         private const val PAGE_MARGIN_RIGHT = 0.04
         private const val TOP_MARGIN_BASE = 150
         private const val BASE_PAGE_HEIGHT = 1872
+        // Device-calibrated baseline: NOTE wraps text slightly narrower than the frame rect.
         private const val WIDTH_ADJUSTMENT = 30
+        // With fontPath="" NOTE uses its own system font, whose glyph widths do not exactly
+        // match PluginHost's StaticLayout font. Long boxes can therefore wrap ~15% more
+        // lines on the note side even at the adjusted width. Reserve those lines once a
+        // box is long enough for the mismatch to accumulate; short boxes keep their
+        // compact sizing and are already covered by NOTE_RENDER_PAD.
+        private const val SYSTEM_FONT_WRAP_SAFETY_RATIO = 0.15
+        private const val SYSTEM_FONT_WRAP_SAFETY_MIN_LINES = 8
+        private const val MAX_INSERT_LEFT_RATIO = 0.60
+        private const val MIN_TEXTBOX_WIDTH_RATIO = 0.20
+        private const val MIN_TEXTBOX_FONT_COLUMNS = 8
 
-        private const val HEIGHT_SAFETY_FACTOR = 1.15
-        private const val BOTTOM_PAD = 50
+        // The NOTE app renders each line at exactly 42px (textLineHeight in
+        // trail data), regardless of what StaticLayout computes. Over many
+        // lines the difference compounds → bottom content clipped. We now
+        // use max(StaticLayout.height, lineCount * DEVICE_LINE_HEIGHT) so
+        // the rect is always tall enough for what the device actually renders.
+        private const val DEVICE_LINE_HEIGHT = 42
+        const val NOTE_RENDER_PAD = 28
+
+        private const val MIN_TEXTBOX_HEIGHT = 48
+
+        // The NOTE app renders emoji noticeably wider than StaticLayout
+        // measures them (device-side clipping consistently follows lines
+        // with 🦈💤😳 etc.): the device wraps earlier, producing more lines
+        // than budgeted → tail lines fall outside the rect. Reserve one
+        // extra device line per EMOJI_PER_EXTRA_LINE emoji as insurance —
+        // a slightly-too-tall box is harmless, a too-short one clips.
+        private const val EMOJI_PER_EXTRA_LINE = 4
+        private val EMOJI_REGEX = Regex("[\\x{1F000}-\\x{1FAFF}\\x{2600}-\\x{27BF}\\x{FE0F}\\x{2190}-\\x{21FF}\\x{2B00}-\\x{2BFF}]")
+
+        private fun emojiExtraHeight(text: String): Int {
+            val count = EMOJI_REGEX.findAll(text).count()
+            if (count == 0) return 0
+            return ((count + EMOJI_PER_EXTRA_LINE - 1) / EMOJI_PER_EXTRA_LINE) * DEVICE_LINE_HEIGHT
+        }
+
+        private fun noteRenderLineCount(measuredLineCount: Int): Int {
+            if (measuredLineCount < SYSTEM_FONT_WRAP_SAFETY_MIN_LINES) return measuredLineCount
+            val extraLines = ceil(measuredLineCount * SYSTEM_FONT_WRAP_SAFETY_RATIO).toInt()
+            return measuredLineCount + extraLines
+        }
     }
 
     private data class ModeConfig(
@@ -60,6 +99,18 @@ class TextLayoutEngine(reactContext: ReactApplicationContext) :
         }
     }
 
+    private fun normalizeOverrideLeft(pageWidth: Int, right: Int, requestedLeft: Int): Int {
+        val minTextboxWidth = min(
+            right,
+            max(FONT_SIZE * MIN_TEXTBOX_FONT_COLUMNS, floor(pageWidth * MIN_TEXTBOX_WIDTH_RATIO).toInt())
+        )
+        val safeMaxLeft = max(
+            0,
+            min(floor(pageWidth * MAX_INSERT_LEFT_RATIO).toInt(), right - minTextboxWidth)
+        )
+        return requestedLeft.coerceIn(0, safeMaxLeft)
+    }
+
     @ReactMethod
     fun calculateLayout(params: ReadableMap, promise: Promise) {
         try {
@@ -76,19 +127,24 @@ class TextLayoutEngine(reactContext: ReactApplicationContext) :
             val defaultLeft = floor(pageWidth * PAGE_MARGIN_LEFT).toInt()
             val right = pageWidth - floor(pageWidth * PAGE_MARGIN_RIGHT).toInt()
             val overrideLeft = if (params.hasKey("overrideLeft") && !params.isNull("overrideLeft")) params.getInt("overrideLeft") else -1
-            val left = if (overrideLeft >= 0) max(0, min(overrideLeft, right - (FONT_SIZE * 3))) else defaultLeft
+            val left = if (overrideLeft >= 0) normalizeOverrideLeft(pageWidth, right, overrideLeft) else defaultLeft
             val maxH = floor(pageHeight * cfg.threshold).toInt()
             val boxWidth = right - left
 
             val layout = buildStaticLayout(text, boxWidth)
             val nativeHeight = layout.height
-            val lineCount = layout.lineCount
+            val measuredLineCount = layout.lineCount
+            val renderLineCount = noteRenderLineCount(measuredLineCount)
+            // Use the larger of StaticLayout height and the conservative NOTE-side
+            // render height so system-font wrap differences cannot clip tail lines.
+            val deviceHeight = renderLineCount * DEVICE_LINE_HEIGHT
 
             val segments = text.split("\n").filter { it.trim().isNotEmpty() }
             val gapCount = if (cfg.newlineGapLines > 0 && segments.size > 1) segments.size - 1 else 0
             val extraGap = ceil(gapCount * cfg.newlineGapLines * FONT_SIZE * cfg.lineHeightRatio).toInt()
 
-            val boxH = ceil((nativeHeight + extraGap) * HEIGHT_SAFETY_FACTOR).toInt() + BOTTOM_PAD
+            val boxH = max(MIN_TEXTBOX_HEIGHT,
+                max(nativeHeight, deviceHeight) + extraGap + emojiExtraHeight(text) + NOTE_RENDER_PAD)
 
             val occupied = parseOccupiedRanges(occupiedArray)
             val top = skipOccupiedArea(nextTop, boxH, max(cfg.boxGap, 10), occupied)
@@ -110,8 +166,9 @@ class TextLayoutEngine(reactContext: ReactApplicationContext) :
                 putInt("maxH", maxH)
                 putInt("left", left)
                 putInt("right", right)
-                putInt("charsPerLine", if (lineCount > 0) max(1, text.length / lineCount) else 1)
-                putInt("lines", lineCount)
+                putInt("charsPerLine", if (measuredLineCount > 0) max(1, text.length / measuredLineCount) else 1)
+                putInt("lines", renderLineCount)
+                putInt("measuredLines", measuredLineCount)
                 putInt("topMargin", topMargin)
                 putInt("boxGap", cfg.boxGap)
                 putInt("nativeHeight", nativeHeight)
@@ -124,61 +181,34 @@ class TextLayoutEngine(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun calculateBatch(params: ReadableMap, promise: Promise) {
+    fun measureLineStarts(params: ReadableMap, promise: Promise) {
         try {
-            val texts = params.getArray("texts") ?: Arguments.createArray()
-            val mode = params.getString("mode") ?: "nospacing"
-            val pageWidth = params.getInt("pageWidth")
-            val pageHeight = params.getInt("pageHeight")
-            var nextTop = params.getInt("nextTop")
-            val occupiedArray = params.getArray("occupiedRanges")
-
-            val cfg = modeConfigs[mode] ?: modeConfigs["nospacing"]!!
-            val topMargin = (TOP_MARGIN_BASE * (pageHeight.toDouble() / BASE_PAGE_HEIGHT)).roundToInt()
-            val left = floor(pageWidth * PAGE_MARGIN_LEFT).toInt()
-            val right = pageWidth - floor(pageWidth * PAGE_MARGIN_RIGHT).toInt()
-            val maxH = floor(pageHeight * cfg.threshold).toInt()
-            val boxWidth = right - left
-
-            val occupied = parseOccupiedRanges(occupiedArray).toMutableList()
-            val results = Arguments.createArray()
-
-            for (i in 0 until texts.size()) {
-                val text = texts.getString(i) ?: ""
-
-                val layout = buildStaticLayout(text, boxWidth)
-                val nativeHeight = layout.height
-
-                val segments = text.split("\n").filter { it.trim().isNotEmpty() }
-                val gapCount = if (cfg.newlineGapLines > 0 && segments.size > 1) segments.size - 1 else 0
-                val extraGap = ceil(gapCount * cfg.newlineGapLines * FONT_SIZE * cfg.lineHeightRatio).toInt()
-                val boxH = ceil((nativeHeight + extraGap) * HEIGHT_SAFETY_FACTOR).toInt() + BOTTOM_PAD
-
-                val top = skipOccupiedArea(nextTop, boxH, max(cfg.boxGap, 10), occupied)
-                val bottom = min(top + boxH, pageHeight - topMargin)
-                val batchUsableH = pageHeight - 2 * topMargin
-                val newPage = top >= maxH
-                    || (top > topMargin + 80 && top + boxH > pageHeight - topMargin)
-                    || (top <= topMargin + 80 && boxH > batchUsableH)
-
-                val item = Arguments.createMap().apply {
-                    putInt("top", top)
-                    putInt("boxHeight", boxH)
-                    putInt("bottom", bottom)
-                    putBoolean("newPage", newPage)
-                }
-                results.pushMap(item)
-
-                if (newPage) break
-
-                occupied.add(Pair(top, bottom))
-                occupied.sortBy { it.first }
-                nextTop = bottom + cfg.boxGap
+            val text = params.getString("text") ?: ""
+            val boxWidth = params.getInt("boxWidth")
+            val layout = buildStaticLayout(text, boxWidth)
+            val starts = Arguments.createArray()
+            for (i in 0 until layout.lineCount) starts.pushInt(layout.getLineStart(i))
+            val result = Arguments.createMap().apply {
+                putInt("lineCount", layout.lineCount)
+                putInt("nativeHeight", layout.height)
+                putArray("lineStarts", starts)
+                putDouble("spaceWidth", textPaint.measureText(" ").toDouble())
             }
-
-            promise.resolve(results)
+            if (params.hasKey("offsets") && !params.isNull("offsets")) {
+                val offs = params.getArray("offsets")!!
+                val infos = Arguments.createArray()
+                for (i in 0 until offs.size()) {
+                    val o = offs.getInt(i).coerceIn(0, text.length)
+                    infos.pushMap(Arguments.createMap().apply {
+                        putInt("line", layout.getLineForOffset(o))
+                        putDouble("x", layout.getPrimaryHorizontal(o).toDouble())
+                    })
+                }
+                result.putArray("offsetInfo", infos)
+            }
+            promise.resolve(result)
         } catch (e: Exception) {
-            promise.reject("BATCH_LAYOUT_ERROR", e.message, e)
+            promise.reject("MEASURE_ERROR", e.message, e)
         }
     }
 

@@ -26,7 +26,7 @@ import kotlin.concurrent.thread
 
 class ImagePanel(
     ctx: ReactApplicationContext,
-    toolbar: FloatingToolbarModule
+    private val toolbar: FloatingToolbarModule
 ) : PanelBase(ctx, toolbar) {
 
     override val tag = "ImagePanel"
@@ -35,6 +35,7 @@ class ImagePanel(
     companion object {
         @Volatile var currentInstance: ImagePanel? = null
         val imageQueue = mutableListOf<String>()
+        val pendingReceivedDeletes = mutableListOf<String>()
 
         fun getInstance(ctx: ReactApplicationContext, module: FloatingToolbarModule): ImagePanel {
             val inst = currentInstance ?: ImagePanel(ctx, module)
@@ -76,6 +77,8 @@ class ImagePanel(
     private var currentBrowsePath: String = "/sdcard"
     private var selectedImagePath: String? = null
     private var allItems: List<GridItem> = emptyList()
+    private var fileReadPermissionRequestPending = false
+    private var lastFilePermissionToastAt = 0L
     private val multi = MultiSelectState()
     private val cellFrameMap = mutableMapOf<String, FrameLayout>()
 
@@ -91,6 +94,7 @@ class ImagePanel(
         currentInstance = this
         selectedImagePath = null
         multi.clear()
+        fileReadPermissionRequestPending = false
         activeTab = "received"; browseDir = null; currentBrowsePath = "/sdcard"
         showPanel()
         handler.post { refreshContent() }
@@ -188,37 +192,85 @@ class ImagePanel(
 
     private fun loadItems(path: String) {
         val dir = File(path)
-        if (!dir.exists() || !dir.isDirectory) {
-            allItems = emptyList()
-            return
+        try {
+            if (!dir.exists() || !dir.isDirectory) {
+                allItems = emptyList()
+                return
+            }
+            val files = try {
+                dir.listFiles() ?: emptyArray()
+            } catch (e: SecurityException) {
+                handleFileReadBlocked(path, e)
+                return
+            }
+            allItems = files
+                .filter { !it.name.startsWith(".") }
+                .filter { f ->
+                    try {
+                        if (f.isDirectory) {
+                            if (path == "/sdcard") ALLOWED_ROOT_FOLDERS.contains(f.name) else true
+                        } else {
+                            IMAGE_EXTS.contains(f.extension.lowercase())
+                        }
+                    } catch (e: SecurityException) {
+                        handleFileReadBlocked(f.absolutePath, e, showToast = false)
+                        false
+                    }
+                }
+                .sortedWith(compareByDescending<File> { try { it.isDirectory } catch (_: SecurityException) { false } }.thenBy { it.name })
+                .map { f ->
+                    if (try { f.isDirectory } catch (_: SecurityException) { false }) {
+                        val children = try {
+                            f.listFiles()
+                        } catch (e: SecurityException) {
+                            handleFileReadBlocked(f.absolutePath, e, showToast = false)
+                            null
+                        }
+                        val previews = children
+                            ?.asSequence()
+                            ?.filter { c ->
+                                try { !c.name.startsWith(".") && !c.isDirectory } catch (_: SecurityException) { false }
+                            }
+                            ?.filter { c -> IMAGE_EXTS.contains(c.extension.lowercase()) }
+                            ?.sortedBy { it.name }
+                            ?.take(4)
+                            ?.map { it.absolutePath }
+                            ?.toList()
+                            ?: emptyList()
+                        GridItem(f.name, f.absolutePath, true, 0L, children?.size ?: 0, previews)
+                    } else {
+                        GridItem(f.name, f.absolutePath, false, try { f.length() } catch (_: SecurityException) { 0L }, 0, emptyList())
+                    }
+                }
+        } catch (e: SecurityException) {
+            handleFileReadBlocked(path, e)
         }
-        allItems = (dir.listFiles() ?: emptyArray())
-            .filter { !it.name.startsWith(".") }
-            .filter { f ->
-                if (f.isDirectory) {
-                    if (path == "/sdcard") ALLOWED_ROOT_FOLDERS.contains(f.name) else true
-                } else {
-                    IMAGE_EXTS.contains(f.extension.lowercase())
-                }
+    }
+
+    private fun handleFileReadBlocked(path: String, e: SecurityException, showToast: Boolean = true) {
+        allItems = emptyList()
+        if (BuildConfig.ENABLE_DEBUG) Log.w(tag, "file read blocked for $path: ${e.message}")
+        requestFileReadPermissionOnce()
+        if (showToast) {
+            val now = System.currentTimeMillis()
+            if (now - lastFilePermissionToastAt > 2500L) {
+                lastFilePermissionToastAt = now
+                Toast.makeText(reactContext, NativeLocale.t("file_read_permission_needed"), Toast.LENGTH_LONG).show()
             }
-            .sortedWith(compareByDescending<File> { it.isDirectory }.thenBy { it.name })
-            .map { f ->
-                if (f.isDirectory) {
-                    val children = f.listFiles()
-                    val previews = children
-                        ?.asSequence()
-                        ?.filter { c -> !c.name.startsWith(".") && !c.isDirectory }
-                        ?.filter { c -> IMAGE_EXTS.contains(c.extension.lowercase()) }
-                        ?.sortedBy { it.name }
-                        ?.take(4)
-                        ?.map { it.absolutePath }
-                        ?.toList()
-                        ?: emptyList()
-                    GridItem(f.name, f.absolutePath, true, 0L, children?.size ?: 0, previews)
-                } else {
-                    GridItem(f.name, f.absolutePath, false, f.length(), 0, emptyList())
-                }
+        }
+    }
+
+    private fun requestFileReadPermissionOnce() {
+        if (fileReadPermissionRequestPending) return
+        fileReadPermissionRequestPending = true
+        toolbar.requestPluginFileReadPermission { granted ->
+            fileReadPermissionRequestPending = false
+            if (granted && activeTab == "browse" && rootView != null) {
+                refreshContent(clearSelection = false)
+            } else if (!granted) {
+                toolbar.openPluginSettingsAfterFileReadDenied()
             }
+        }
     }
 
     private fun gridCell(host: PanelHost, item: GridItem, colW: Int): View {
@@ -240,16 +292,19 @@ class ImagePanel(
                     chipsH.setSelection(matchedKey)
                     refreshContent()
                 } else if (multi.isActive) {
+                    val wasSelected = multi.isSelected(item.path)
                     multi.toggle(item.path)
                     updateMultiSelectUI()
-                    gridH.refresh()
+                    updateCellSelection(host, item.path, !wasSelected)
                 } else {
+                    val prev = selectedImagePath
                     selectedImagePath = if (selectedImagePath == item.path) null else item.path
                     val hasSelection = selectedImagePath != null
                     cropBtn.enabled = hasSelection
                     insertBtn.enabled = hasSelection
                     updateCheckboxEnabled()
-                    gridH.refresh()
+                    if (prev != null) updateCellSelection(host, prev, false)
+                    if (selectedImagePath != null) updateCellSelection(host, selectedImagePath!!, true)
                 }
             }
         }
@@ -311,18 +366,18 @@ class ImagePanel(
             setPadding(host.dp(2), host.dp(6), host.dp(2), host.dp(4))
         }
         textContainer.addView(TextView(host.ctx).apply {
-            text = item.name; textSize = host.sp(12f); setTextColor(Color.BLACK)
+            text = item.name; textSize = host.gridSp(12f); setTextColor(Color.BLACK)
             typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
             maxLines = 2
         })
         if (item.isDir) {
             textContainer.addView(TextView(host.ctx).apply {
                 text = NativeLocale.itemCount(item.childCount)
-                textSize = host.sp(10f); setTextColor(Color.parseColor("#666666"))
+                textSize = host.gridSp(10f); setTextColor(Color.parseColor("#666666"))
             })
         } else if (item.size > 0) {
             textContainer.addView(TextView(host.ctx).apply {
-                text = PanelWidgets.formatSize(item.size); textSize = host.sp(10f)
+                text = PanelWidgets.formatSize(item.size); textSize = host.gridSp(10f)
                 setTextColor(Color.parseColor("#666666"))
             })
         }
@@ -340,6 +395,24 @@ class ImagePanel(
                 val bmp = BitmapFactory.decodeFile(path, opts) ?: return@thread
                 handler.post { imageView.setImageBitmap(bmp) }
             } catch (_: Exception) {}
+        }
+    }
+
+    private fun updateCellSelection(host: PanelHost, path: String, selected: Boolean) {
+        val frame = cellFrameMap[path] ?: return
+        (frame.background as? GradientDrawable)?.setStroke(
+            if (selected) host.dp(2) else host.dp(1),
+            if (selected) Color.BLACK else Color.parseColor("#CCCCCC")
+        )
+        if (multi.isActive) {
+            val existing = (0 until frame.childCount).firstOrNull {
+                frame.getChildAt(it).tag == "checkmark"
+            }
+            if (selected && existing == null) {
+                frame.addView(makeCheckmark(host))
+            } else if (!selected && existing != null) {
+                frame.removeViewAt(existing)
+            }
         }
     }
 
@@ -366,6 +439,7 @@ class ImagePanel(
     }
 
     private fun doInsertOriginal() {
+        val fromReceived = activeTab == "received"
         if (multi.isActive) {
             if (multi.count == 0) return
             val paths = multi.selectedPaths
@@ -373,35 +447,42 @@ class ImagePanel(
             synchronized(ImagePanel::class.java) {
                 imageQueue.clear()
                 imageQueue.addAll(paths.drop(1))
+                if (fromReceived) pendingReceivedDeletes.addAll(paths)
                 if (BuildConfig.ENABLE_DEBUG) Log.i(tag, "[QUEUE-DBG] doInsertOriginal: selected=${paths.size} queued=${imageQueue.size} queue=${imageQueue.toList()}")
             }
+            FloatingToolbarModule.beginInsertImageGuard()
             hide()
-            toolbarModule.requestInsertImage(paths.first())
+            handler.postDelayed({ toolbar.requestInsertImage(paths.first()) }, 300)
         } else {
             val path = selectedImagePath ?: return
+            if (fromReceived) {
+                synchronized(ImagePanel::class.java) { pendingReceivedDeletes.add(path) }
+            }
+            FloatingToolbarModule.beginInsertImageGuard()
             hide()
-            toolbarModule.requestInsertImage(path)
+            handler.postDelayed({ toolbar.requestInsertImage(path) }, 300)
         }
     }
 
     private fun doCropAndInsert() {
         val path = selectedImagePath ?: return
-        if (BuildConfig.ENABLE_DEBUG) Log.i("ImagePanel", "[CROP] doCropAndInsert path=$path")
+        val fromReceived = activeTab == "received"
+        if (BuildConfig.ENABLE_DEBUG) Log.i("ImagePanel", "[CROP] doCropAndInsert path=$path fromReceived=$fromReceived")
         hide()
         handler.postDelayed({
             if (BuildConfig.ENABLE_DEBUG) Log.i("ImagePanel", "[CROP] opening CropPanel")
-            CropPanel.getInstance(reactContext, toolbarModule).show(path) { crop ->
+            CropPanel.getInstance(reactContext, toolbar).show(path) { crop ->
+            FloatingToolbarModule.beginInsertImageGuard()
             kotlin.concurrent.thread(isDaemon = true) {
                 try {
                     val src = BitmapFactory.decodeFile(path) ?: return@thread
                     val cropped = Bitmap.createBitmap(src, crop.offsetX, crop.offsetY, crop.width, crop.height)
-                    val output = if (crop.opacity < 100) {
-                        val alphaBmp = Bitmap.createBitmap(cropped.width, cropped.height, Bitmap.Config.ARGB_8888)
-                        val canvas = android.graphics.Canvas(alphaBmp)
-                        val paint = android.graphics.Paint().apply { alpha = (255 * crop.opacity / 100) }
-                        canvas.drawBitmap(cropped, 0f, 0f, paint)
-                        cropped.recycle()
-                        alphaBmp
+                    val needsFilter = crop.filter != ImageFilter.FILTER_NONE || crop.density < 100
+                    val output = if (needsFilter) {
+                        val work = cropped.copy(Bitmap.Config.ARGB_8888, true)
+                        if (cropped != src) cropped.recycle()
+                        ImageFilter.process(work, crop.filter, crop.density)
+                        work
                     } else cropped
                     val outPath = "${reactContext.cacheDir.absolutePath}/crop_${System.currentTimeMillis()}.png"
                     java.io.FileOutputStream(outPath).use { fos ->
@@ -409,7 +490,10 @@ class ImagePanel(
                     }
                     if (output != src) output.recycle()
                     src.recycle()
-                    handler.post { toolbarModule.requestInsertImage(outPath) }
+                    if (fromReceived) {
+                        synchronized(ImagePanel::class.java) { pendingReceivedDeletes.add(path) }
+                    }
+                    handler.post { toolbar.requestInsertImage(outPath) }
                 } catch (e: Exception) {
                     if (BuildConfig.ENABLE_DEBUG) Log.e("ImagePanel", "crop failed: ${e.message}", e)
                     handler.post { toolbarModule.restoreToolbar() }

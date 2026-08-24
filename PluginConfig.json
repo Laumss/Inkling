@@ -1,11 +1,22 @@
-{
-    "pluginID": "Inkling",
-    "pluginKey": "inkling_quicktoolbar",
-    "iconPath": "./assets/toolbar_icon.png",
-    "desc": "Floating quick toolbar for Supernote NOTE app.\n\nDraggable overlay with customizable tool buttons, edge snapping, auto horizontal/vertical layout, minimize/expand, and 10 preset slots.\n\nTools: layer switching, visibility toggle, insert images, insert text, and more.",
-    "name": "Inkling",
-    "versionCode": "4",
-    "versionName": "0.2.1",
-    "jsMainPath": "index",
-    "author": "Laumss"
+﻿{
+    "pluginID":  "Inkling",
+    "pluginKey":  "inkling_quicktoolbar",
+    "iconPath":  "./assets/toolbar_icon.png",
+    "desc":  "Floating quick toolbar for Supernote NOTE app.\n\nDraggable overlay with customizable tool buttons, edge snapping, auto horizontal/vertical layout, minimize/expand, and 10 preset slots.\n\nTools: layer switching, visibility toggle, insert images, insert text, and more.",
+    "name":  "Inkling",
+    "versionCode":  "102",
+    "versionName":  "0.4.415",
+    "jsMainPath":  "index",
+    "author":  "Laumss",
+    "uses-permissions":  [
+                             "plugin.permission.FILE:READ",
+                             "plugin.permission.FILE:WRITE",
+                             "plugin.permission.FILE:DELETE",
+                             "plugin.permission.INTERNET"
+                         ],
+    "reactPackages":  [
+                          "com.supernote_quicktoolbar.InklingPackages",
+                          "com.reactnativecommunity.imageeditor.ImageEditorPackage",
+                          "com.rnfs.RNFSPackage"
+                      ]
 }

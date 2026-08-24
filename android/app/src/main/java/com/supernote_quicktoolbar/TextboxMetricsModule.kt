@@ -149,9 +149,16 @@ class TextboxMetricsModule(
                 return
             }
 
+            // getLineBottom() excludes StaticLayout's bottom padding (font
+            // descent + leading when includePad=true), while layout.height —
+            // which the single-box path (TextLayoutEngine) uses — includes it.
+            // Without this, the split path under-reports the last box height
+            // and clips descenders (g/y/p/q, CJK punctuation) on its last line.
+            val bottomPad = layout.height - layout.getLineBottom(layout.lineCount - 1)
+
             var lastFittingLine = -1
             for (i in 0 until layout.lineCount) {
-                val lineBottom = layout.getLineBottom(i)
+                val lineBottom = layout.getLineBottom(i) + bottomPad
                 if (lineBottom <= availableHeight) {
                     lastFittingLine = i
                 } else {
@@ -185,7 +192,28 @@ class TextboxMetricsModule(
                 if (breakLine < lastFittingLine) actualLastLine = breakLine
             }
 
-            val fittingHeight = layout.getLineBottom(actualLastLine)
+            // Never start the overflow box with a punctuation mark: pull the
+            val leadingPunct = "，。、；：！？）》」』”’,.;:!?)]}"
+            while (overflowText.isNotEmpty() && overflowText.first() in leadingPunct &&
+                fittingText.isNotEmpty()
+            ) {
+                overflowText = fittingText.last() + overflowText
+                fittingText = fittingText.dropLast(1).trimEnd()
+            }
+            if (fittingText.isEmpty()) {
+                // Degenerate: everything migrated to overflow — give up splitting here.
+                val result = Arguments.createMap().apply {
+                    putString("fittingText", "")
+                    putString("overflowText", ctx.text)
+                    putInt("fittingHeight", 0)
+                    putInt("fittingLineCount", 0)
+                    putBoolean("didSplit", true)
+                }
+                promise.resolve(result)
+                return
+            }
+
+            val fittingHeight = layout.getLineBottom(actualLastLine) + bottomPad
             val result = Arguments.createMap().apply {
                 putString("fittingText", fittingText)
                 putString("overflowText", overflowText)

@@ -1,11 +1,12 @@
-import { PluginCommAPI, PluginFileAPI, PluginNoteAPI, PluginManager, NativeUIUtils } from 'sn-plugin-lib';
+import { PluginCommAPI, PluginFileAPI, PluginNoteAPI, PluginManager, NativeUIUtils, FileUtils } from 'sn-plugin-lib';
 import { NativeModules, EmitterSubscription, Dimensions } from 'react-native';
-import RNFS from 'react-native-fs';
-import { loadClips, saveClips } from './ToolPresets';
+import { loadClips, saveClips, loadSnapshots, saveSnapshots } from './ToolPresets';
 import { t } from './i18n';
 import { toggleMode, handleAiSend, getLastMode, stopAiMode } from './BackgroundService';
+import { getRNFS } from './rnfs';
 import FloatingToolbarBridge from './FloatingToolbarBridge';
 import FloatingBubbleBridge from './BubbleBridges';
+import { layerIdOf, moveLiveElements } from './ElementOps';
 
 const { FloatingToolbar } = NativeModules;
 
@@ -19,6 +20,8 @@ let _clipBusy = false;
 const STICKER_DIR = '/sdcard/MyStyle/Sticker';
 
 async function ensureStickerDir(): Promise<void> {
+  const RNFS = getRNFS();
+  if (!RNFS) return;
   try {
     const parentExists = await RNFS.exists('/sdcard/MyStyle');
     if (!parentExists) {
@@ -58,9 +61,6 @@ function isRecognitionNote(): boolean {
 }
 
 async function _insertDocLinkDirect(docPath: string): Promise<void> {
-
-  try { await (PluginCommAPI as any).setLassoBoxState?.(2); } catch (_) {}
-
   const rawName = docPath.split('/').pop() ?? 'link';
   const dotIdx = rawName.lastIndexOf('.');
   const linkName = dotIdx > 0 ? rawName.substring(0, dotIdx) : rawName;
@@ -76,6 +76,17 @@ async function _insertDocLinkDirect(docPath: string): Promise<void> {
     if (fpRes?.success && fpRes.result) notePath = fpRes.result;
     if (pgRes?.success && pgRes.result !== undefined) pageNum = pgRes.result;
     if (notePath && pageNum !== undefined) {
+      const layersRes: any = await PluginFileAPI.getLayers(notePath, pageNum);
+      const currentLayer = Array.isArray(layersRes?.result)
+        ? layersRes.result.find((layer: any) => layer.isCurrentLayer)
+        : null;
+      const currentLayerId = currentLayer?.layerId ?? currentLayer?.layerNum;
+      if (currentLayerId !== undefined && currentLayerId !== 0) {
+        console.warn('[ToolActions] insertDocLink blocked on non-main layer:', currentLayerId);
+        NativeUIUtils.showErrorTipDialog(t('doc_link_main_only'));
+        return;
+      }
+
       const psRes: any = await PluginFileAPI.getPageSize(notePath, pageNum);
       if (psRes?.success && psRes.result) {
         pageW = psRes.result.width;
@@ -83,6 +94,8 @@ async function _insertDocLinkDirect(docPath: string): Promise<void> {
       }
     }
   } catch (_) {}
+
+  try { await (PluginCommAPI as any).setLassoBoxState?.(2); } catch (_) {}
 
   const linkW = Math.min(linkName.length * 30 + 40, pageW * 0.6);
   const left = Math.round((pageW - linkW) / 2);
@@ -144,6 +157,7 @@ async function _insertDocLinkDirect(docPath: string): Promise<void> {
   }
 
   const ext = docPath.split('.').pop()?.toLowerCase() || '';
+  const isNoteFile = ext === 'note';
   const isDocFile = ['epub', 'pdf', 'cbz', 'doc', 'docx', 'djvu', 'mobi', 'fb2'].includes(ext);
   const destPath = docPath.replace('/sdcard/', '/storage/emulated/0/');
 
@@ -151,14 +165,22 @@ async function _insertDocLinkDirect(docPath: string): Promise<void> {
     destPath,
     destPage: -1,
     style: 0,
-    linkType: isDocFile ? 2 : 0,
+    linkType: isNoteFile ? 1 : isDocFile ? 2 : 0,
     rect: { left, top, right: left + Math.round(linkW), bottom: top + lineH },
     fontSize,
     fullText: linkName,
     showText: linkName,
     isItalic: 0,
   };
-  await (PluginNoteAPI as any).insertTextLink(textLink);
+  const insertRes: any = await (PluginNoteAPI as any).insertTextLink(textLink);
+  console.log('[ToolActions] insertTextLink result:', insertRes);
+  if (!insertRes?.success || insertRes.result !== 0) {
+    console.warn('[ToolActions] insertTextLink failed:', insertRes);
+    if (insertRes?.error?.code === 810) {
+      NativeUIUtils.showErrorTipDialog(t('doc_link_main_only'));
+    }
+    return;
+  }
 
   try {
     await new Promise(r => setTimeout(r, 500));
@@ -214,6 +236,19 @@ export async function executeAction(action: string): Promise<string> {
 
   if (action === 'lasso_smart_send') {
     if (await hasLassoSelection()) {
+      const { LassoExtractor } = require('./LassoExtractor');
+      const { markLassoDataPrePopulated } = require('../App');
+      const extracted = await LassoExtractor.extract();
+      if (!extracted.text && extracted.imagePaths.length === 0 && extracted.linkedFiles.length === 0) {
+        NativeUIUtils.showErrorTipDialog(t('lasso_send_ocr_failed'));
+        return 'Send aborted: nothing to send';
+      }
+      FloatingToolbarBridge.setLassoData(
+        extracted.text,
+        JSON.stringify(extracted.imagePaths),
+        JSON.stringify(extracted.linkedFiles),
+      );
+      markLassoDataPrePopulated();
       FloatingToolbarBridge.showSendPanelFromBubble();
       return 'Send panel opened';
     }
@@ -227,24 +262,48 @@ export async function executeAction(action: string): Promise<string> {
   }
 
   if (action === 'screenshot_ai') {
-    console.log('[ToolActions]: screenshot_ai — placeholder');
-    return 'Screenshot AI: coming soon';
+    const { handleScreenshotAi } = require('./BackgroundService');
+    await handleScreenshotAi();
+    return 'Screenshot AI: delegated to native';
   }
 
   if (action === 'invert_ink') {
     try {
-      await FloatingToolbar?.launchActivity(
-        'com.dictation.server.relay',
-        'com.dictation.server.MainActivity',
-      );
-      return 'Launched dictation relay';
+      await NativeModules.AIRelayModule?.openRelayMain?.('AIRelay');
+      return 'Opened AIRelay';
     } catch (e: any) {
-      console.warn('[ToolActions]: launchActivity failed:', e);
-      return `Launch failed: ${e?.message ?? e}`;
+      console.warn('[ToolActions]: open AIRelay failed:', e);
+      return `Open AIRelay failed: ${e?.message ?? e}`;
     }
   }
 
   if (action === 'insert_link') {
+    try {
+      const fpRes: any = await PluginCommAPI.getCurrentFilePath();
+      const pgRes: any = await PluginCommAPI.getCurrentPageNum();
+      if (fpRes?.success && fpRes.result) _filePath = fpRes.result;
+      if (pgRes?.success && pgRes.result !== undefined) _pageNum = pgRes.result;
+    } catch (e) {
+      console.warn('[ToolActions] insert_link context refresh failed:', e);
+    }
+
+    if (_filePath && _pageNum !== null) {
+      try {
+        const layersRes: any = await PluginFileAPI.getLayers(_filePath, _pageNum);
+        const currentLayer = Array.isArray(layersRes?.result)
+          ? layersRes.result.find((layer: any) => layer.isCurrentLayer)
+          : null;
+        const currentLayerId = currentLayer?.layerId ?? currentLayer?.layerNum;
+        if (currentLayerId !== undefined && currentLayerId !== 0) {
+          console.warn('[ToolActions] insert_link blocked on non-main layer:', currentLayerId);
+          NativeUIUtils.showErrorTipDialog(t('doc_link_main_only'));
+          return 'Document links require the main layer';
+        }
+      } catch (e) {
+        console.warn('[ToolActions] insert_link layer check failed:', e);
+      }
+    }
+
     if (_docLinkQueue.length === 0) {
       _docLinkQueue = FloatingToolbarBridge.drainDocLinkQueue();
     }
@@ -254,7 +313,7 @@ export async function executeAction(action: string): Promise<string> {
       try { await _insertDocLinkDirect(docPath); } catch (_) {}
       return 'Doc link inserted from queue';
     }
-    FloatingToolbarBridge.showDocLinkPanel();
+    FloatingToolbarBridge.showDocLinkPanel(_filePath);
     return 'Doc link panel opened';
   }
 
@@ -396,36 +455,68 @@ async function moveLassoElementsLayer(direction: 'up' | 'down'): Promise<string>
 
   const fullRes = await PluginFileAPI.getElements(_pageNum, _filePath) as any;
   if (!fullRes?.success || !fullRes.result) return 'Get page elements failed';
+  const allEls = fullRes.result as any[];
 
-  const toMove = (fullRes.result as any[])
-    .filter((e: any) => targetLayerMap.has(e.numInPage));
-  const toInsert = toMove.map((e: any) => ({
-    ...e,
-    layerNum: targetLayerMap.get(e.numInPage),
-  }));
-  const numsToDelete = toMove.map((e: any) => e.numInPage as number);
+  try {
+    const toMove = allEls.filter((e: any) => targetLayerMap.has(e.numInPage));
+    if (toMove.length === 0) return 'No matching page elements';
 
-  console.log('[ToolActions] moveLayer: deleting', numsToDelete.length,
-    'elements, inserting to target layers');
+    const insertByTarget = new Map<number, any[]>();
+    const deleteBySource = new Map<number, number[]>();
+    for (const el of toMove) {
+      const src = el.layerNum ?? 0;
+      const dst = targetLayerMap.get(el.numInPage)!;
+      el.layerNum = dst;
+      const ins = insertByTarget.get(dst);
+      if (ins) ins.push(el); else insertByTarget.set(dst, [el]);
+      const del = deleteBySource.get(src);
+      if (del) del.push(el.numInPage); else deleteBySource.set(src, [el.numInPage]);
+    }
 
-  await PluginNoteAPI.saveCurrentNote();
-
-  const delRes = await PluginFileAPI.deleteElements(_filePath, _pageNum, numsToDelete) as any;
-  console.log('[ToolActions] deleteElements result:', delRes?.success, delRes?.error);
-  if (!delRes?.success) {
-    await PluginCommAPI.reloadFile();
-    return `Delete failed: ${delRes?.error?.message ?? 'unknown'}`;
+    console.log('[ToolActions] moveLayer live insert/delete', toMove.length, 'elements');
+    const moved = await moveLiveElements(_pageNum, insertByTarget, deleteBySource);
+    if (!moved.ok) {
+      NativeUIUtils.showErrorTipDialog(moved.error ?? 'Move layer failed');
+      return `Move failed: ${moved.error ?? 'unknown'}`;
+    }
+    return `Moved ${toMove.length} element(s) ${direction}`;
+  } finally {
+    for (const el of allEls) { try { el?.recycle?.(); } catch (_) {} }
+    for (const el of lassoElements) { try { el?.recycle?.(); } catch (_) {} }
   }
+}
 
-  const insRes = await PluginFileAPI.insertElements(_filePath, _pageNum, toInsert) as any;
-  console.log('[ToolActions] insertElements result:', insRes?.success, insRes?.error);
-  if (!insRes?.success) {
-    await PluginCommAPI.reloadFile();
-    return `Insert failed: ${insRes?.error?.message ?? 'unknown'}`;
+function normalizeLayerName(layer: any, id: number): void {
+  if (typeof layer.name !== 'string' || !layer.name.trim()) {
+    layer.name = id === 0 ? 'Main Layer' : `Layer ${id}`;
   }
+  if (typeof layer.isVisible !== 'boolean') layer.isVisible = true;
+  layer.layerId = id;
+}
 
-  await PluginCommAPI.reloadFile();
-  return `Moved ${toMove.length} element(s) ${direction}`;
+async function switchCurrentLayer(targetId: number, layers: any[]): Promise<boolean> {
+  // LayerSchema rejects layerId=-1 (background). Mutate in place so names match the file.
+  const toSend = layers.filter((l: any) => {
+    const id = layerIdOf(l);
+    return id >= 0 && id <= 3;
+  });
+  for (const l of toSend) {
+    const id = layerIdOf(l);
+    normalizeLayerName(l, id);
+    l.isCurrentLayer = id === targetId;
+  }
+  console.log('[Layer] modifyLayers →', toSend.map((l: any) => ({
+    id: l.layerId, name: l.name, cur: l.isCurrentLayer, vis: l.isVisible,
+  })));
+  const r: any = await PluginFileAPI.modifyLayers(_filePath!, _pageNum!, toSend);
+  console.log('[Layer] modifyLayers ok=', r?.success, 'err=', r?.error, 'result=', r?.result);
+  if (!r?.success) {
+    if (r?.error?.message) NativeUIUtils.showErrorTipDialog(r.error.message);
+    return false;
+  }
+  // Host loadNoteData already refreshes the open page. reloadFile races that write
+  // and can restore the previous current layer.
+  return true;
 }
 
 async function layerPrev(): Promise<string> {
@@ -433,46 +524,32 @@ async function layerPrev(): Promise<string> {
   const lr = await PluginFileAPI.getLayers(_filePath, _pageNum);
   if (!lr.success || !lr.result) return 'Get layers failed';
 
-  const allLayers = lr.result.map((l: any) => ({
-    ...l,
-    id: l.layerId !== undefined ? l.layerId : l.layerNum
-  })).sort((a: any, b: any) => a.id - b.id);
-
+  const allLayers = (lr.result as any[]).slice().sort((a: any, b: any) => layerIdOf(a) - layerIdOf(b));
   const current = allLayers.find((l: any) => l.isCurrentLayer) || allLayers[allLayers.length - 1];
-  const currentId = current.id;
+  const currentId = layerIdOf(current);
 
-  const above = allLayers.filter((l: any) => l.id > currentId);
+  const above = allLayers.filter((l: any) => layerIdOf(l) > currentId);
   if (above.length > 0) {
-    const target = above[0];
-    const updated = allLayers
-      .filter((l: any) => l.id >= 0)
-      .map((l: any) => ({
-        layerId: l.id,
-        name: l.name,
-        isVisible: l.isVisible,
-        isCurrentLayer: l.id === target.id
-      }));
-    const r = await PluginFileAPI.modifyLayers(_filePath, _pageNum, updated);
-    if (r.success) { await PluginCommAPI.reloadFile(); return `Layer ${target.id}`; }
-    return 'Switch failed';
+    const targetId = layerIdOf(above[0]);
+    const ok = await switchCurrentLayer(targetId, allLayers);
+    return ok ? `Layer ${targetId}` : 'Switch failed';
   }
 
-  const userLayers = allLayers.filter((l: any) => l.id >= 0);
-  const maxUserId = userLayers.length > 0 ? Math.max(...userLayers.map((l: any) => l.id)) : -1;
+  const userLayers = allLayers.filter((l: any) => layerIdOf(l) >= 0);
+  const maxUserId = userLayers.length > 0 ? Math.max(...userLayers.map((l: any) => layerIdOf(l))) : -1;
   if (maxUserId >= 3) { NativeUIUtils.showErrorTipDialog(t('layer_err_max')); return 'Max 4 user layers'; }
 
   const newId = maxUserId + 1;
-  const ir = await PluginFileAPI.insertLayer(_filePath, _pageNum, {
+  const ir: any = await PluginFileAPI.insertLayer(_filePath, _pageNum, {
     layerId: newId,
     name: `Layer ${newId + 1}`,
     isVisible: true,
     isCurrentLayer: true,
   });
+  console.log('[Layer] insertLayer ok=', ir?.success, 'err=', ir?.error);
 
-  if (ir.success) {
-    await PluginCommAPI.reloadFile();
-    return `New layer ${newId}`;
-  }
+  if (ir?.success) return `New layer ${newId}`;
+  NativeUIUtils.showErrorTipDialog(ir?.error?.message ?? t('layer_err_max'));
   return 'Create layer failed';
 }
 
@@ -481,29 +558,18 @@ async function layerNext(): Promise<string> {
   const lr = await PluginFileAPI.getLayers(_filePath, _pageNum);
   if (!lr.success || !lr.result) return 'Get layers failed';
 
-  const allLayers = lr.result.map((l: any) => ({
-    ...l,
-    id: l.layerId !== undefined ? l.layerId : l.layerNum
-  })).sort((a: any, b: any) => a.id - b.id);
-
+  const allLayers = (lr.result as any[]).slice().sort((a: any, b: any) => layerIdOf(a) - layerIdOf(b));
   const current = allLayers.find((l: any) => l.isCurrentLayer) || allLayers[allLayers.length - 1];
-  const currentId = current.id;
+  const currentId = layerIdOf(current);
 
-  const below = allLayers.filter((l: any) => l.id >= 0 && l.id < currentId).sort((a: any, b: any) => b.id - a.id);
+  const below = allLayers
+    .filter((l: any) => layerIdOf(l) >= 0 && layerIdOf(l) < currentId)
+    .sort((a: any, b: any) => layerIdOf(b) - layerIdOf(a));
   if (below.length === 0) { NativeUIUtils.showErrorTipDialog(t('layer_err_at_main')); return 'Already at bottom layer'; }
 
-  const target = below[0];
-  const updated = allLayers
-    .filter((l: any) => l.id >= 0)
-    .map((l: any) => ({
-      layerId: l.id,
-      name: l.name,
-      isVisible: l.isVisible,
-      isCurrentLayer: l.id === target.id
-    }));
-  const r = await PluginFileAPI.modifyLayers(_filePath, _pageNum, updated);
-  if (r.success) { await PluginCommAPI.reloadFile(); return `Layer ${target.id}`; }
-  return 'Switch failed';
+  const targetId = layerIdOf(below[0]);
+  const ok = await switchCurrentLayer(targetId, allLayers);
+  return ok ? `Layer ${targetId}` : 'Switch failed';
 }
 
 async function clipSmartAction(slot: string): Promise<string> {
@@ -531,6 +597,19 @@ async function clipSmartAction(slot: string): Promise<string> {
 async function clipSave(slot: string): Promise<string> {
   await ensureStickerDir();
 
+  try {
+    const cntRes = await (PluginCommAPI as any).getLassoElementTypeCounts?.();
+    const c = cntRes?.result;
+    const hasTitle = (c?.titleNum ?? 0) > 0;
+    const hasLink = ((c?.textLinkNum ?? 0) + (c?.trailLinkNum ?? 0) + (c?.todoLinkNum ?? 0)) > 0;
+    const hasTextBox = ((c?.normalTextBoxNum ?? 0) + (c?.digestTextBoxNum ?? 0) + (c?.digestTextBoxEditableNum ?? 0)) > 0;
+    const hasImage = (c?.bitmapNum ?? 0) > 0;
+    if (hasTitle) { NativeUIUtils.showErrorTipDialog(t('clip_err_title')); return 'Unsupported: title'; }
+    if (hasLink)  { NativeUIUtils.showErrorTipDialog(t('clip_err_link'));  return 'Unsupported: link'; }
+    if (hasTextBox) { NativeUIUtils.showErrorTipDialog(t('clip_err_textbox')); return 'Unsupported: textbox'; }
+    if (hasImage) { NativeUIUtils.showErrorTipDialog(t('clip_err_image')); return 'Unsupported: image'; }
+  } catch (_) {}
+
   const existingClips = await loadClips();
   const oldPath = existingClips[slot];
   const name = `quickbar_clip_${slot}_${Date.now()}.sticker`;
@@ -538,19 +617,17 @@ async function clipSave(slot: string): Promise<string> {
 
   console.log('[ToolActions]: clipSave slot=', slot, 'path=', path);
 
+  if (oldPath && await getRNFS()?.exists(oldPath).catch(() => false)) {
+    const confirmed = await NativeUIUtils.showRattaDialog(
+      t('clip_overwrite'), t('btn_cancel'), t('btn_confirm'), false
+    ).catch(() => true);
+    if (!confirmed) return `Clip ${slot} overwrite cancelled`;
+  }
+
   const commitSave = async (): Promise<string> => {
-    const oldFileExists = oldPath ? await RNFS.exists(oldPath).catch(() => false) : false;
-    if (oldFileExists) {
-      try {
-        const confirmed = await NativeUIUtils.showRattaDialog(
-          t('clip_overwrite'), t('btn_cancel'), t('btn_confirm'), false
-        );
-        if (!confirmed) {
-          try { await RNFS.unlink(path); } catch (_) {}
-          return 'Clip save cancelled';
-        }
-      } catch (_) {}
-      try { await RNFS.unlink(oldPath!); } catch (_) {}
+    if (oldPath) {
+      try { await FileUtils.deleteFile(oldPath); } catch (_) {}
+      try { await FileUtils.deleteFile(oldPath + '.meta.json'); } catch (_) {}
     }
     await PluginCommAPI.setLassoBoxState(2);
     const clips = await loadClips();
@@ -559,40 +636,18 @@ async function clipSave(slot: string): Promise<string> {
     return `Saved to clip ${slot}`;
   };
 
-  console.log('[CLIP-DBG] trying saveStickerByLasso (fast path)');
-  const fastRes = await PluginCommAPI.saveStickerByLasso(path);
-  console.log('[CLIP-DBG] saveStickerByLasso result:', JSON.stringify(fastRes));
-
-  if (fastRes.success && fastRes.result !== false) {
-    return await commitSave();
-  }
-
-  console.warn('[CLIP-DBG] saveStickerByLasso failed (code:', (fastRes as any).error?.code,
-    'msg:', (fastRes as any).error?.message, '), falling back to convertElement2Sticker');
-
-  try {
-    const cntRes = await (PluginCommAPI as any).getLassoElementTypeCounts?.();
-    const c = cntRes?.result;
-    if ((c?.titleNum ?? 0) > 0) { NativeUIUtils.showErrorTipDialog(t('clip_err_title')); return 'Title clip not supported'; }
-    const linkCount = (c?.textLinkNum ?? 0) + (c?.trailLinkNum ?? 0) + (c?.todoLinkNum ?? 0);
-    if (linkCount > 0) { NativeUIUtils.showErrorTipDialog(t('clip_err_link')); return 'Link clip not supported'; }
-    const tbCount = (c?.normalTextBoxNum ?? 0) + (c?.digestTextBoxNum ?? 0) + (c?.digestTextBoxEditableNum ?? 0);
-    if (tbCount > 0) { NativeUIUtils.showErrorTipDialog(t('clip_err_textbox')); return 'TextBox clip not supported'; }
-    if ((c?.bitmapNum ?? 0) > 0) { NativeUIUtils.showErrorTipDialog(t('clip_err_image')); return 'Image clip not supported'; }
-  } catch (e) {
-    console.warn('[ToolActions]: getLassoElementTypeCounts failed, fall through:', e);
-  }
-
+  console.log('[CLIP-DBG] ===== clipSave v2 (no saveStickerByLasso) =====');
   const elemRes = await PluginCommAPI.getLassoElements() as any;
   if (!elemRes?.success || !elemRes.result || !Array.isArray(elemRes.result) || elemRes.result.length === 0) {
     console.warn('[CLIP-DBG] getLassoElements failed or empty:', elemRes?.error);
+    if (await lassoContainsPicture()) {
+      NativeUIUtils.showErrorTipDialog(t('clip_err_image'));
+      return 'Unsupported: image';
+    }
     NativeUIUtils.showErrorTipDialog(t('clip_err_read_failed'));
     return `Save clip ${slot} failed (no elements)`;
   }
 
-  // The sticker render must use the NOTE's coordinate system (file machine type),
-  // not the running device. They usually match, but the file type is authoritative —
-  // a note drawn on device A keeps A's EMR range even when opened on device B.
   const deviceType = await PluginManager.getDeviceType();
   let fileType: number | null = null;
   try {
@@ -601,11 +656,11 @@ async function clipSave(slot: string): Promise<string> {
       const ftRes: any = await (PluginFileAPI as any).getFileMachineType(fpRes.result);
       if (ftRes?.success && typeof ftRes.result === 'number') fileType = ftRes.result;
     }
-  } catch (e) { console.warn('[CLIP-DBG] getFileMachineType failed:', e); }
+  } catch (_) {}
 
-  const machineType = fileType != null ? fileType : deviceType;
-  console.log('[CLIP-DBG] convertElement2Sticker elements=', elemRes.result.length,
-    'machineType=', machineType, '(device=', deviceType, 'file=', fileType, ')');
+  const machineType = pickStickerMachineType(elemRes.result, fileType, deviceType);
+  console.log('[CLIP-DBG] deviceType=', deviceType, 'fileType=', fileType, 'machineType=', machineType);
+  console.log('[CLIP-DBG] convertElement2Sticker elements=', elemRes.result.length, 'machineType=', machineType);
   const convertRes: any = await NativeModules.NativePluginAPI.convertElement2Sticker({
     machineType,
     elements: elemRes.result,
@@ -613,22 +668,75 @@ async function clipSave(slot: string): Promise<string> {
   });
   console.log('[CLIP-DBG] convertElement2Sticker result:', JSON.stringify(convertRes));
 
-  // Diagnostic: measure the saved sticker vs the lasso bbox to localize any width
-  // halving — if stickerSize.width ≈ lassoRect.width/2, the SAVE step is the culprit.
-  try {
-    const szRes: any = await PluginCommAPI.getStickerSize(path);
-    const rectRes: any = await (PluginCommAPI as any).getLassoRect?.();
-    console.log('[CLIP-DBG] stickerSize=', JSON.stringify(szRes?.result),
-      'lassoRect=', JSON.stringify(rectRes?.result));
-  } catch (e) { console.warn('[CLIP-DBG] size diag failed:', e); }
-
   if (!convertRes?.success || convertRes.result === false) {
-    console.warn('[CLIP-DBG] convertElement2Sticker FAILED', JSON.stringify(convertRes));
+    console.warn('[CLIP-DBG] convertElement2Sticker FAILED');
     NativeUIUtils.showErrorTipDialog(t('clip_save_failed'));
     return `Save clip ${slot} failed`;
   }
 
   return await commitSave();
+}
+
+async function lassoContainsPicture(): Promise<boolean> {
+  let elements: any[] = [];
+  try {
+    const rectRes: any = await PluginCommAPI.getLassoRect();
+    const rect = rectRes?.success ? rectRes.result : null;
+    if (!rect || rect.right <= rect.left || rect.bottom <= rect.top) return false;
+
+    const fpRes: any = await PluginCommAPI.getCurrentFilePath();
+    const pgRes: any = await PluginCommAPI.getCurrentPageNum();
+    if (!fpRes?.success || !fpRes.result || !pgRes?.success || pgRes.result == null) return false;
+
+    const psRes: any = await PluginFileAPI.getPageSize(fpRes.result, pgRes.result);
+    const pageW = psRes?.result?.width ?? 0;
+    const pageH = psRes?.result?.height ?? 0;
+    if (!pageW || !pageH) return false;
+
+    const elemRes: any = await PluginFileAPI.getElements(pgRes.result, fpRes.result);
+    elements = elemRes?.success && Array.isArray(elemRes.result) ? elemRes.result : [];
+    for (const el of elements) {
+      if (el?.type !== 200 || !el.picture?.rect) continue; // 200 = Element.TYPE_PICTURE
+      if (!(el.maxX > 0) || !(el.maxY > 0)) continue;
+      const sx = pageW / el.maxX;
+      const sy = pageH / el.maxY;
+      const p = el.picture.rect;
+      const hit = p.left * sx < rect.right && p.right * sx > rect.left &&
+                  p.top * sy < rect.bottom && p.bottom * sy > rect.top;
+      if (hit) {
+        console.log('[CLIP-DBG] lassoContainsPicture: hit picRect=', JSON.stringify(p),
+          'scale=', sx.toFixed(3), sy.toFixed(3), 'lasso=', JSON.stringify(rect));
+        return true;
+      }
+    }
+  } catch (e) {
+    console.warn('[CLIP-DBG] lassoContainsPicture error:', e);
+  } finally {
+    for (const el of elements) { try { el?.recycle?.(); } catch (_) {} }
+  }
+  return false;
+}
+
+function pickStickerMachineType(elements: any[], fileType: number | null, deviceType: number): number {
+  const A5X2 = 5;
+  let big = 0, small = 0;
+  for (const el of elements) {
+    const mx = el?.maxX;
+    if (typeof mx !== 'number' || mx <= 0) continue;
+    if (mx >= 16000 && mx !== 21098) big++; else small++;
+  }
+  console.log('[CLIP-DBG] pickStickerMachineType big=', big, 'small=', small,
+    'maxXs=', JSON.stringify(elements.map((el: any) => el?.maxX)));
+  if (big === 0 && small === 0) {
+    return fileType != null ? fileType : deviceType;
+  }
+  if (big > 0 && small > 0) {
+    console.warn('[CLIP-DBG] mixed maxX families in one lasso; sizes of minority family will drift');
+  }
+  if (big >= small) return A5X2;
+  if (fileType != null && fileType !== A5X2) return fileType;
+  if (deviceType !== A5X2) return deviceType;
+  return 4; // A6X2
 }
 
 async function clipPasteSticker(slot: string): Promise<string> {
@@ -652,6 +760,8 @@ async function clipPasteSticker(slot: string): Promise<string> {
 
     if (path.endsWith('.textclip.json')) {
       try {
+        const RNFS = getRNFS();
+        if (!RNFS) return `Paste clip ${slot} failed (no fs)`;
         const content = await RNFS.readFile(path, 'utf8');
         const payload = JSON.parse(content);
         const items: any[] = Array.isArray(payload?.items) ? payload.items : [];
@@ -702,52 +812,236 @@ async function clipPasteSticker(slot: string): Promise<string> {
 
     console.log('[CLIP-DBG] clipPaste path=', path);
     try {
+      const pasteSzRes: any = await PluginCommAPI.getStickerSize(path);
+      console.log('[CLIP-DBG] paste getStickerSize before insert=', JSON.stringify(pasteSzRes));
+    } catch (e) {
+      console.warn('[CLIP-DBG] paste getStickerSize before insert failed:', e);
+    }
+    try {
       const r = await PluginCommAPI.insertSticker(path);
       console.log('[CLIP-DBG] insertSticker result:', JSON.stringify(r));
-      if (r.success) return `Pasted clip ${slot}`;
+      if (r.success) {
+        return `Pasted clip ${slot}`;
+      }
     } catch (e) { console.warn('[CLIP-DBG] insertSticker error:', e); }
 
     try {
       const r2 = await PluginCommAPI.insertSticker(path + '.sticker');
       console.log('[CLIP-DBG] insertSticker(.sticker) result:', JSON.stringify(r2));
-      if (r2.success) return `Pasted clip ${slot}`;
+      if (r2.success) {
+        return `Pasted clip ${slot}`;
+      }
     } catch (e) { console.warn('[CLIP-DBG] insertSticker(.sticker) error:', e); }
   }
 
   return `Paste clip ${slot} failed`;
 }
 
+const ELEMENT_TYPE_PICTURE = 200;
+
+async function repairPictureElementPaths(
+  elements: any[], notePath: string, page: number,
+): Promise<string[]> {
+  const RNFS = getRNFS();
+  const broken: any[] = [];
+  for (const el of elements) {
+    if (el?.type !== ELEMENT_TYPE_PICTURE) continue;
+    const p = el.picture?.picturePath;
+    let exists = false;
+    if (p && RNFS) { try { exists = await RNFS.exists(p); } catch (_) {} }
+    if (!exists) broken.push(el);
+  }
+  if (broken.length === 0) return [];
+
+  const tmpFiles: string[] = [];
+  const ts = Date.now();
+  const previewPath = `${STICKER_DIR}/tmp_layer0_${ts}.png`;
+
+  let ok = false;
+  try {
+    const r0: any = await PluginNoteAPI.generateLayerPreviewImage(notePath, page, 0, previewPath);
+    ok = r0?.success === true && r0.result !== false &&
+      (RNFS ? await RNFS.exists(previewPath) : true);
+  } catch (e) { console.warn('[SNAP] layer preview(0) error:', e); }
+  if (!ok) {
+    try {
+      const r1: any = await PluginNoteAPI.generateLayerPreviewImage(notePath, page, -1, previewPath);
+      ok = r1?.success === true && r1.result !== false &&
+        (RNFS ? await RNFS.exists(previewPath) : true);
+    } catch (e) { console.warn('[SNAP] layer preview(-1) error:', e); }
+  }
+  if (!ok) {
+    console.warn('[SNAP] layer preview unavailable, pictures cannot be repaired');
+    return tmpFiles;
+  }
+  tmpFiles.push(previewPath);
+
+  let pageW = 0;
+  let pageH = 0;
+  try {
+    const psRes: any = await PluginFileAPI.getPageSize(notePath, page);
+    if (psRes?.success && psRes.result) {
+      pageW = psRes.result.width;
+      pageH = psRes.result.height;
+    }
+  } catch (_) {}
+
+  for (let i = 0; i < broken.length; i++) {
+    const el = broken[i];
+    const rect = el.picture?.rect;
+    if (!rect) continue;
+    const outPath = `${STICKER_DIR}/tmp_pic_${ts}_${i}.png`;
+    try {
+      await NativeModules.InklingImageUtil.cropRegion(
+        previewPath, pageW, pageH,
+        rect.left, rect.top, rect.right, rect.bottom, outPath,
+      );
+      el.picture.picturePath = outPath;
+      tmpFiles.push(outPath);
+      console.log('[SNAP] picture repaired:', JSON.stringify(rect), '→', outPath);
+    } catch (e) {
+      console.warn('[SNAP] picture crop failed:', e);
+    }
+  }
+  return tmpFiles;
+}
+
+export async function snapshotCreate(): Promise<string> {
+  await ensureStickerDir();
+
+  const fpRes: any = await PluginCommAPI.getCurrentFilePath();
+  const pgRes: any = await PluginCommAPI.getCurrentPageNum();
+  if (!fpRes?.success || !fpRes.result || !pgRes?.success || pgRes.result == null) {
+    NativeUIUtils.showErrorTipDialog(t('snapshot_create_failed'));
+    return 'Snapshot: no note context';
+  }
+  const notePath: string = fpRes.result;
+  const page: number = pgRes.result;
+
+  const elemRes: any = await PluginFileAPI.getElements(page, notePath);
+  const elements: any[] = elemRes?.success && Array.isArray(elemRes.result) ? elemRes.result : [];
+  if (elements.length === 0) {
+    NativeUIUtils.showErrorTipDialog(t('snapshot_empty_page'));
+    return 'Snapshot: page empty';
+  }
+
+  let tmpFiles: string[] = [];
+  try {
+    const deviceType = await PluginManager.getDeviceType();
+    let fileType: number | null = null;
+    try {
+      const ftRes: any = await (PluginFileAPI as any).getFileMachineType(notePath);
+      if (ftRes?.success && typeof ftRes.result === 'number') fileType = ftRes.result;
+    } catch (_) {}
+    const machineType = pickStickerMachineType(elements, fileType, deviceType);
+
+    const ts = Date.now();
+    const stickerPath = `${STICKER_DIR}/quickbar_snapshot_${ts}.sticker`;
+
+    tmpFiles = await repairPictureElementPaths(elements, notePath, page);
+    let convertElements = elements;
+    if (elements.some(el => el?.type === ELEMENT_TYPE_PICTURE)) {
+      const RNFS = getRNFS();
+      const usable: any[] = [];
+      for (const el of elements) {
+        if (el?.type === ELEMENT_TYPE_PICTURE) {
+          const p = el.picture?.picturePath;
+          let exists = false;
+          if (p && RNFS) { try { exists = await RNFS.exists(p); } catch (_) {} }
+          if (!exists) {
+            console.warn('[SNAP] dropping picture with unreadable path:', p);
+            continue;
+          }
+        }
+        usable.push(el);
+      }
+      convertElements = usable;
+    }
+    if (convertElements.length === 0) {
+      NativeUIUtils.showErrorTipDialog(t('snapshot_create_failed'));
+      return 'Snapshot: no convertible elements';
+    }
+
+    console.log('[SNAP] create page=', page, 'elements=', convertElements.length,
+      '(raw=', elements.length, ') machineType=', machineType, 'path=', stickerPath);
+    const convertRes: any = await NativeModules.NativePluginAPI.convertElement2Sticker({
+      machineType,
+      elements: convertElements,
+      stickerPath,
+    });
+    if (!convertRes?.success || convertRes.result === false) {
+      console.warn('[SNAP] convertElement2Sticker FAILED:', JSON.stringify(convertRes));
+      NativeUIUtils.showErrorTipDialog(t('snapshot_create_failed'));
+      return 'Snapshot: convert failed';
+    }
+
+    let thumbPath = `${STICKER_DIR}/quickbar_snapshot_${ts}.png`;
+    try {
+      const pngRes: any = await PluginFileAPI.generateNotePng({
+        notePath, page, times: 1, pngPath: thumbPath, type: 1,
+      });
+      if (!pngRes?.success || pngRes.result === false) {
+        console.warn('[SNAP] generateNotePng failed:', JSON.stringify(pngRes));
+        thumbPath = '';
+      }
+    } catch (e) {
+      console.warn('[SNAP] generateNotePng error:', e);
+      thumbPath = '';
+    }
+
+    const records = await loadSnapshots();
+    records.unshift({
+      id: String(ts),
+      sticker: stickerPath,
+      thumb: thumbPath,
+      note: notePath,
+      page,
+      ts,
+    });
+    await saveSnapshots(records);
+    return 'Snapshot created';
+  } finally {
+    for (const f of tmpFiles) { try { await FileUtils.deleteFile(f); } catch (_) {} }
+    for (const el of elements) { try { el?.recycle?.(); } catch (_) {} }
+  }
+}
+
+export async function snapshotRestore(stickerPath: string): Promise<string> {
+  const RNFS = getRNFS();
+  if (RNFS && !(await RNFS.exists(stickerPath).catch(() => false))) {
+    NativeUIUtils.showErrorTipDialog(t('snapshot_missing'));
+    return 'Snapshot file missing';
+  }
+  try { await (PluginCommAPI as any).setLassoBoxState?.(2); } catch (_) {}
+  try {
+    const r: any = await PluginCommAPI.insertSticker(stickerPath);
+    console.log('[SNAP] insertSticker result:', JSON.stringify(r));
+    if (r?.success) return 'Snapshot restored';
+  } catch (e) { console.warn('[SNAP] insertSticker error:', e); }
+  NativeUIUtils.showErrorTipDialog(t('snapshot_restore_failed'));
+  return 'Snapshot restore failed';
+}
+
+export async function snapshotDelete(id: string): Promise<string> {
+  const records = await loadSnapshots();
+  const target = records.find(r => r.id === id);
+  if (!target) return 'Snapshot not found';
+  try { await FileUtils.deleteFile(target.sticker); } catch (_) {}
+  if (target.thumb) { try { await FileUtils.deleteFile(target.thumb); } catch (_) {} }
+  await saveSnapshots(records.filter(r => r.id !== id));
+  return 'Snapshot deleted';
+}
+
 async function clipClear(slot: string): Promise<string> {
   const clips = await loadClips();
+  const oldPath = clips[slot];
+  if (oldPath) {
+    try { await FileUtils.deleteFile(oldPath); } catch (_) {}
+    try { await FileUtils.deleteFile(oldPath + '.meta.json'); } catch (_) {}
+  }
   clips[slot] = null;
   await saveClips(clips);
   return `Clip ${slot} cleared`;
-}
-
-export async function queryLayerInfo(): Promise<{ current: number; total: number } | null> {
-  try {
-    const fp = await PluginCommAPI.getCurrentFilePath();
-    if (!fp.success || !fp.result) return null;
-    const pg = await PluginCommAPI.getCurrentPageNum();
-    if (!pg.success || pg.result === undefined) return null;
-
-    const lr = await PluginFileAPI.getLayers(fp.result, pg.result);
-    if (!lr.success || !lr.result) return null;
-
-    const layers = lr.result.map((l: any) => ({
-      id: l.layerId !== undefined ? l.layerId : l.layerNum,
-      isCurrent: !!l.isCurrentLayer,
-    })).sort((a: any, b: any) => a.id - b.id);
-
-    const userLayers = layers.filter((l: any) => l.id >= 0);
-    const currentIdx = userLayers.findIndex((l: any) => l.isCurrent);
-    return {
-      current: currentIdx >= 0 ? currentIdx + 1 : 1,
-      total: userLayers.length,
-    };
-  } catch {
-    return null;
-  }
 }
 
 export interface PaletteLassoInfo {

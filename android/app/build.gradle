@@ -1,5 +1,6 @@
 apply plugin: "com.android.application"
 apply plugin: "org.jetbrains.kotlin.android"
+apply plugin: "org.jetbrains.kotlin.plugin.compose"
 apply plugin: "com.facebook.react"
 
 def processCustomApk(String buildType) {
@@ -123,6 +124,20 @@ android {
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1
         versionName "1.0"
+
+        ndk { abiFilters "arm64-v8a" }
+
+        externalNativeBuild {
+            cmake {
+                arguments "-DANDROID_STL=c++_static"
+            }
+        }
+    }
+    externalNativeBuild {
+        cmake {
+            path file("src/main/cpp/CMakeLists.txt")
+            version "3.22.1"
+        }
     }
     signingConfigs {
         debug {
@@ -133,16 +148,22 @@ android {
         }
     }
     buildTypes {
+        def inklingDbg = findProperty("inklingEnableDebug")?.toString()?.toLowerCase()
+        def debugEnableDebug = (inklingDbg == "false") ? "false" : "true"
+        def releaseEnableDebug = (inklingDbg == "true") ? "true" : "false"
         debug {
             signingConfig signingConfigs.debug
-            buildConfigField "boolean", "ENABLE_DEBUG", "true"
+            buildConfigField "boolean", "ENABLE_DEBUG", debugEnableDebug
         }
         release {
-            buildConfigField "boolean", "ENABLE_DEBUG", "false"
+            buildConfigField "boolean", "ENABLE_DEBUG", releaseEnableDebug
             signingConfig signingConfigs.debug
             minifyEnabled enableProguardInReleaseBuilds
             proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
         }
+    }
+    buildFeatures {
+        compose true
     }
     aaptOptions {
         additionalParameters "--package-id", "0x71", "--allow-reserved-package-id"
@@ -154,6 +175,18 @@ android {
 }
 
 dependencies {
+
+    // Compose 1.6+ requires a SparseArrayCompat constructor unavailable in PluginHost.
+    def composeBom = platform("androidx.compose:compose-bom:2023.10.01")
+    implementation(composeBom)
+    implementation("androidx.compose.foundation:foundation")
+    implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.runtime:runtime")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
+    implementation("androidx.lifecycle:lifecycle-viewmodel:2.8.7")
+    implementation("androidx.savedstate:savedstate:1.2.1")
+    implementation("org.java-websocket:Java-WebSocket:1.5.7")
 
     implementation("com.facebook.react:react-android")
 

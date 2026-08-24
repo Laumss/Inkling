@@ -5,13 +5,16 @@ import com.supernote_quicktoolbar.*
 
 import android.content.Context
 import android.graphics.*
-import android.graphics.drawable.GradientDrawable
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.view.*
 import android.widget.*
 import com.facebook.react.bridge.ReactApplicationContext
 import com.supernote_quicktoolbar.ui_common.PanelBar
 import com.supernote_quicktoolbar.ui_common.PanelBase
+import com.supernote_quicktoolbar.ui_common.ScreenScale
+import com.supernote_quicktoolbar.ui_common.SelectField
 import com.supernote_quicktoolbar.ui_common.UiUtils
 import java.io.File
 import java.io.FileOutputStream
@@ -56,6 +59,9 @@ class CropPanel(
         private const val FRAME_STROKE_DP = 2f
         private const val DASH_ON_DP = 16
         private const val DASH_OFF_DP = 10
+        private const val FULL_AUTO_RELEASE_DELAY_MS = 300L
+
+        private val DENSITY_STEPS = listOf(100, 80, 60, 40, 20)
     }
 
     private var imagePath: String? = null
@@ -65,18 +71,74 @@ class CropPanel(
     private var multiMode = false
     private var hasStitchSession = false
     private var onLongScreenshot: (() -> Unit)? = null
+    private var onSendToOtherDevices: ((CropResult) -> Unit)? = null
     private var onAddToHistory: ((CropResult) -> Unit)? = null
     private var onFooterCancel: (() -> Unit)? = null
 
     private var actionBar: PanelBar.Handle? = null
-    private var opacity: Int = 100
-    private var opacityLabel: TextView? = null
+
+    private var filterMode: Int = ImageFilter.FILTER_NONE
+    private var inkDensity: Int = 100
+    private var filterField: LinearLayout? = null
+    private var densityField: LinearLayout? = null
+
+    private var origW = 0
+    private var origH = 0
+    private var filteredBitmap: Bitmap? = null
+    private var previewGen = 0
+    private val fullAutoHandler = Handler(Looper.getMainLooper())
+    private var fullAutoEnabled = false
+    private val releaseFullAutoRunnable = Runnable {
+        setFullUiAuto(false, "release-delay")
+    }
+
+    private fun setFullUiAuto(enable: Boolean, reason: String) {
+        fullAutoHandler.removeCallbacks(releaseFullAutoRunnable)
+        if (fullAutoEnabled == enable) return
+        try {
+            val eink = reactContext.getSystemService("eink") ?: return
+            val methods = eink.javaClass.methods
+            val twoArg = methods.firstOrNull {
+                it.name == "enableFullUiAuto" && it.parameterTypes.contentEquals(
+                    arrayOf(Boolean::class.javaPrimitiveType, Boolean::class.javaPrimitiveType)
+                )
+            }
+            if (twoArg != null) {
+                twoArg.invoke(eink, enable, true)
+            } else {
+                val oneArg = methods.firstOrNull {
+                    it.name == "enableFullUiAuto" && it.parameterTypes.contentEquals(
+                        arrayOf(Boolean::class.javaPrimitiveType)
+                    )
+                } ?: return
+                oneArg.invoke(eink, enable)
+            }
+            fullAutoEnabled = enable
+            if (BuildConfig.ENABLE_DEBUG) Log.i(tag, "fullUiAuto=$enable reason=$reason")
+        } catch (e: Exception) {
+            if (BuildConfig.ENABLE_DEBUG) {
+                Log.w(tag, "fullUiAuto call exception reason=$reason: ${e.message}")
+            }
+        }
+    }
+
+    private fun scheduleFullUiAutoRelease(reason: String) {
+        fullAutoHandler.removeCallbacks(releaseFullAutoRunnable)
+        fullAutoHandler.postDelayed(releaseFullAutoRunnable, FULL_AUTO_RELEASE_DELAY_MS)
+        if (BuildConfig.ENABLE_DEBUG) {
+            Log.i(tag, "schedule fullUiAuto release reason=$reason delayMs=$FULL_AUTO_RELEASE_DELAY_MS")
+        }
+    }
 
     data class CropResult(
         val offsetX: Int, val offsetY: Int,
         val width: Int, val height: Int,
-        val opacity: Int = 100
+        val filter: Int = ImageFilter.FILTER_NONE,
+        val density: Int = 100
     )
+
+    private fun filterPrefs() =
+        reactContext.getSharedPreferences("inkling_crop_filter", Context.MODE_PRIVATE)
 
     fun show(path: String, onConfirm: (CropResult) -> Unit) {
         if (BuildConfig.ENABLE_DEBUG) Log.i(tag, "show() path=$path")
@@ -84,6 +146,11 @@ class CropPanel(
         imagePath = path
         onCropConfirm = onConfirm
         showFooter = false
+        filterPrefs().let {
+            filterMode = it.getInt("filter", ImageFilter.FILTER_NONE)
+                .coerceIn(ImageFilter.FILTER_NONE, ImageFilter.FILTER_TEXT_BW)
+            inkDensity = it.getInt("density", 100)
+        }
         showPanel()
     }
 
@@ -92,9 +159,10 @@ class CropPanel(
         hasStitchSession: Boolean,
         onConfirm: (CropResult, Boolean) -> Unit,
         onLongScreenshot: () -> Unit,
+        onSendToOtherDevices: (CropResult) -> Unit,
         onAddToHistory: (CropResult, Boolean) -> Unit,
-        onScreenshotToNote: (CropResult) -> Unit,
-        onCancel: () -> Unit
+        onCancel: () -> Unit,
+        onShowResult: ((Boolean) -> Unit)? = null
     ) {
         if (BuildConfig.ENABLE_DEBUG) Log.i(tag, "showWithFooter() path=$path stitch=$hasStitchSession")
         currentInstance = this
@@ -104,38 +172,56 @@ class CropPanel(
         this.multiMode = false
         this.onCropConfirmMulti = onConfirm
         this.onLongScreenshot = onLongScreenshot
+        this.onSendToOtherDevices = onSendToOtherDevices
         this.onAddToHistoryMulti = onAddToHistory
-        this.onScreenshotToNote = onScreenshotToNote
         this.onFooterCancel = onCancel
-        showPanel()
+        showPanel(onShowResult)
     }
 
     private var onCropConfirmMulti: ((CropResult, Boolean) -> Unit)? = null
     private var onAddToHistoryMulti: ((CropResult, Boolean) -> Unit)? = null
-    private var onScreenshotToNote: ((CropResult) -> Unit)? = null
 
     override fun onHide() {
+        fullAutoHandler.removeCallbacks(releaseFullAutoRunnable)
+        setFullUiAuto(false, "hide")
+        SelectField.dismissAllPopups()
+        previewGen++
         bitmap?.recycle()
         bitmap = null
+        filteredBitmap?.recycle()
+        filteredBitmap = null
+        origW = 0
+        origH = 0
         imagePath = null
         onCropConfirm = null
         onCropConfirmMulti = null
         onAddToHistoryMulti = null
-        onScreenshotToNote = null
         showFooter = false
         multiMode = false
         hasStitchSession = false
         onLongScreenshot = null
+        onSendToOtherDevices = null
         onAddToHistory = null
         onFooterCancel = null
         actionBar = null
-        opacity = 100
-        opacityLabel = null
+        filterMode = ImageFilter.FILTER_NONE
+        inkDensity = 100
+        filterField = null
+        densityField = null
         currentInstance = null
     }
 
     override fun buildFullScreenContent(): View {
-        val bmp = BitmapFactory.decodeFile(imagePath)
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(imagePath, bounds)
+        origW = bounds.outWidth
+        origH = bounds.outHeight
+        val dm = reactContext.resources.displayMetrics
+        val bmp = if (origW > 0 && origH > 0) {
+            BitmapFactory.decodeFile(imagePath, BitmapFactory.Options().apply {
+                inSampleSize = calcPreviewSampleSize(origW, origH, dm.widthPixels, dm.heightPixels)
+            })
+        } else null
         bitmap = bmp
 
         val root = FrameLayout(reactContext).apply {
@@ -152,22 +238,20 @@ class CropPanel(
                 },
                 PanelBar.Action("icons/ic_edit_save.xml", NativeLocale.t("add_to_history")) {
                     val cv = cropView ?: return@Action
-                    val bmpW = bitmap?.width ?: return@Action
-                    val bmpH = bitmap?.height ?: return@Action
+                    if (origW <= 0 || origH <= 0) return@Action
                     val wasMulti = multiMode
-                    onAddToHistoryMulti?.invoke(cv.getCropResult(bmpW, bmpH), wasMulti)
+                    onAddToHistoryMulti?.invoke(cv.getCropResult(origW, origH), wasMulti)
 
                     if (wasMulti) clearMultiAfterAction() else hide()
                 },
-                PanelBar.Action("icons/ic_edit_confirm.xml", NativeLocale.t("insert_next")) {
-                    doConfirm()
-                },
-
-                PanelBar.Action("icons/ic_edit_to_note.xml", NativeLocale.t("screenshot_to_note")) {
+                PanelBar.Action("icons/ic_send_localsend.xml", NativeLocale.t("send_to_other_devices")) {
                     val cv = cropView ?: return@Action
-                    val bmpW = bitmap?.width ?: return@Action
-                    val bmpH = bitmap?.height ?: return@Action
-                    onScreenshotToNote?.invoke(cv.getCropResult(bmpW, bmpH))
+                    if (origW <= 0 || origH <= 0) return@Action
+                    onSendToOtherDevices?.invoke(cv.getCropResult(origW, origH))
+                    hide()
+                },
+                PanelBar.Action("icons/ic_edit_to_note.xml", NativeLocale.t("insert_next")) {
+                    doConfirm()
                 }
             )
         } else {
@@ -184,11 +268,8 @@ class CropPanel(
             listOf(PanelBar.TextBtn(NativeLocale.t("confirm")) { doConfirm() })
         }
 
-        val left: List<PanelBar.Cell> = if (showFooter) {
+        val left: List<PanelBar.Cell> =
             listOf(PanelBar.TextBtn(NativeLocale.t("cancel")) { closeAndRestore() })
-        } else {
-            listOf(PanelBar.IconBtn("icons/ic_arrow_left.xml") { closeAndRestore() })
-        }
 
         val centerCells: List<PanelBar.Cell> = if (showFooter) center else {
             listOf(PanelBar.Title(NativeLocale.t("cropper_title")))
@@ -196,7 +277,7 @@ class CropPanel(
 
         val bar = PanelBar.build(
             ctx = reactContext,
-            style = if (showFooter) PanelBar.Style.INBOX else PanelBar.Style.PAGE_HEADER,
+            style = if (showFooter) PanelBar.Style.INBOX else PanelBar.Style.PAGE_HEADER_ALIGNED,
             left = left,
             center = centerCells,
             right = right
@@ -208,7 +289,7 @@ class CropPanel(
         ).apply { gravity = Gravity.TOP }
         root.addView(bar.view)
 
-        val bottomH = if (!showFooter) buildOpacityBar(root) else 0
+        val bottomH = if (!showFooter) buildFilterBar(root) else 0
 
         if (bmp != null) {
             val cropView = CropView(reactContext, bmp, headerH)
@@ -218,9 +299,19 @@ class CropPanel(
             ).apply { topMargin = headerH; bottomMargin = bottomH }
             root.addView(cropView)
             this.cropView = cropView
+            applyPreviewFilter()
         }
 
         return root
+    }
+
+    private fun calcPreviewSampleSize(outW: Int, outH: Int, reqW: Int, reqH: Int): Int {
+        var sample = 1
+        if (outH > reqH || outW > reqW) {
+            val halfH = outH / 2; val halfW = outW / 2
+            while (halfH / sample >= reqH && halfW / sample >= reqW) sample *= 2
+        }
+        return sample
     }
 
     private fun clearMultiAfterAction() {
@@ -234,8 +325,8 @@ class CropPanel(
 
     private fun doConfirm() {
         val cv = cropView ?: return
-        val bmp = bitmap ?: return
-        val result = cv.getCropResult(bmp.width, bmp.height)
+        if (origW <= 0 || origH <= 0) return
+        val result = cv.getCropResult(origW, origH)
         val hasFooter = showFooter
         val multi = multiMode
         if (hasFooter) {
@@ -252,80 +343,104 @@ class CropPanel(
         if (!hasFooter) toolbarModule.restoreToolbar()
     }
 
-    private fun buildOpacityBar(root: FrameLayout): Int {
-        val contentH = dp(60)
-        val dividerH = dp(1)
-        val totalH = contentH + dividerH
+    private fun buildFilterBar(root: FrameLayout): Int {
+        fun px(v: Int) = ScreenScale.px(reactContext, v)
 
         val wrapper = LinearLayout(reactContext).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.WHITE)
             layoutParams = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT, totalH
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
             ).apply { gravity = Gravity.BOTTOM }
         }
         wrapper.addView(View(reactContext).apply {
-            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dividerH)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, px(1).coerceAtLeast(1)
+            )
             setBackgroundColor(Color.BLACK)
         })
 
-        val bar = LinearLayout(reactContext).apply {
+        val row = LinearLayout(reactContext).apply {
             orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            setPadding(dp(20), 0, dp(20), 0)
+            setPadding(px(52), dp(14), px(52), dp(18))
+        }
+
+        val filterOptions = listOf(
+            NativeLocale.t("filter_original"),
+            NativeLocale.t("filter_enhance"),
+            NativeLocale.t("filter_text_bw")
+        )
+        filterField = SelectField.create(
+            reactContext, NativeLocale.t("filter"), filterOptions, filterMode
+        ) { idx ->
+            filterMode = idx
+            filterPrefs().edit().putInt("filter", idx).apply()
+            filterField?.let { SelectField.setValue(it, idx) }
+            applyPreviewFilter()
+        }.apply {
             layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, contentH
+                dp(200), LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { marginEnd = dp(30) }
+        }
+        row.addView(filterField)
+
+        val densityLabels = DENSITY_STEPS.map { "$it%" }
+        val densityIdx = DENSITY_STEPS.indexOf(inkDensity).coerceAtLeast(0)
+        inkDensity = DENSITY_STEPS[densityIdx]
+        densityField = SelectField.create(
+            reactContext, NativeLocale.t("density"), densityLabels, densityIdx
+        ) { idx ->
+            inkDensity = DENSITY_STEPS[idx]
+            filterPrefs().edit().putInt("density", inkDensity).apply()
+            densityField?.let { SelectField.setValue(it, idx) }
+            applyPreviewFilter()
+        }.apply {
+            layoutParams = LinearLayout.LayoutParams(
+                dp(200), LinearLayout.LayoutParams.WRAP_CONTENT
             )
         }
+        row.addView(densityField)
 
-        bar.addView(TextView(reactContext).apply {
-            text = NativeLocale.t("opacity"); textSize = sp(15f); setTextColor(Color.BLACK)
-            setPadding(0, 0, dp(12), 0)
-        })
-
-        opacityLabel = TextView(reactContext).apply {
-            text = "100%"; textSize = sp(15f); setTextColor(Color.BLACK)
-            setPadding(0, 0, dp(16), 0)
-            typeface = android.graphics.Typeface.DEFAULT_BOLD
-        }
-        bar.addView(opacityLabel)
-
-        for (pct in listOf(100, 75, 50, 25)) {
-            bar.addView(TextView(reactContext).apply {
-                text = "$pct%"; textSize = sp(14f)
-                setTextColor(if (pct == 100) Color.WHITE else Color.BLACK)
-                gravity = Gravity.CENTER
-                setPadding(dp(12), dp(6), dp(12), dp(6))
-                background = GradientDrawable().apply {
-                    setColor(if (pct == 100) Color.BLACK else Color.WHITE)
-                    setStroke(dp(1), Color.BLACK)
-                }
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                ).apply { marginEnd = dp(8) }
-                setOnClickListener {
-                    opacity = pct
-                    opacityLabel?.text = "$pct%"
-                    updateOpacityBtnHighlights(bar, pct)
-                }
-            })
-        }
-
-        wrapper.addView(bar)
+        wrapper.addView(row)
         root.addView(wrapper)
-        return totalH
+
+        val screenWpx = reactContext.resources.displayMetrics.widthPixels
+        wrapper.measure(
+            View.MeasureSpec.makeMeasureSpec(screenWpx, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+        )
+        return wrapper.measuredHeight
     }
 
-    private fun updateOpacityBtnHighlights(bar: LinearLayout, activePct: Int) {
-        for (pct in listOf(100, 75, 50, 25)) {
-            val idx = listOf(100, 75, 50, 25).indexOf(pct) + 2
-            val btn = bar.getChildAt(idx) as? TextView ?: continue
-            val isActive = pct == activePct
-            btn.setTextColor(if (isActive) Color.WHITE else Color.BLACK)
-            btn.background = GradientDrawable().apply {
-                setColor(if (isActive) Color.BLACK else Color.WHITE)
-                setStroke(dp(1), Color.BLACK)
+    private fun applyPreviewFilter() {
+        val base = bitmap ?: return
+        val gen = ++previewGen
+        val f = filterMode
+        val d = inkDensity
+        if (f == ImageFilter.FILTER_NONE && d >= 100) {
+            val old = filteredBitmap
+            filteredBitmap = null
+            cropView?.setBitmap(base)
+            old?.recycle()
+            return
+        }
+        kotlin.concurrent.thread(isDaemon = true) {
+            val work = try {
+                base.copy(Bitmap.Config.ARGB_8888, true)
+            } catch (e: Exception) {
+                null
+            } ?: return@thread
+            ImageFilter.process(work, f, d)
+            handler.post {
+                if (gen != previewGen || bitmap !== base) {
+                    work.recycle()
+                    return@post
+                }
+                val old = filteredBitmap
+                filteredBitmap = work
+                cropView?.setBitmap(work)
+                old?.recycle()
             }
         }
     }
@@ -342,9 +457,16 @@ class CropPanel(
 
     private inner class CropView(
         ctx: Context,
-        private val bmp: Bitmap,
+        initialBmp: Bitmap,
         private val headerH: Int
     ) : View(ctx) {
+
+        private var bmp: Bitmap = initialBmp
+
+        fun setBitmap(b: Bitmap) {
+            bmp = b
+            invalidate()
+        }
 
         private val imgPad = dp(IMAGE_PAD_DP)
         private val edgeHitZone = dp(EDGE_HIT_ZONE_DP)
@@ -476,6 +598,7 @@ class CropPanel(
                 }
                 MotionEvent.ACTION_MOVE -> {
                     val mode = dragMode ?: return false
+                    setFullUiAuto(true, "crop-move")
                     val dx = event.x - dragStartX
                     val dy = event.y - dragStartY
                     val orig = dragStartBox
@@ -498,6 +621,9 @@ class CropPanel(
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     dragMode = null
+                    scheduleFullUiAutoRelease(
+                        if (event.action == MotionEvent.ACTION_UP) "crop-up" else "crop-cancel"
+                    )
                     return true
                 }
             }
@@ -558,7 +684,7 @@ class CropPanel(
             val oy = max(0, (relY * scaleY).roundToInt())
             val cw = min(origW - ox, (cropBox.width() * scaleX).roundToInt())
             val ch = min(origH - oy, (cropBox.height() * scaleY).roundToInt())
-            return CropResult(ox, oy, max(1, cw), max(1, ch), opacity)
+            return CropResult(ox, oy, max(1, cw), max(1, ch), filterMode, inkDensity)
         }
     }
 }

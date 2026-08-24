@@ -73,6 +73,10 @@ object PanelBar {
                 height = 135, btnSize = 40, iconSize = 48,
                 divider = true, horizontalPad = 20
             )
+
+            val PAGE_HEADER_ALIGNED = PAGE_HEADER.copy(
+                horizontalPad = 0, btnPadH = 52, btnPadV = 24
+            )
         }
     }
 
@@ -83,6 +87,7 @@ object PanelBar {
         private val style: Style,
         private val checkIcon: ImageView?,
         val outlineBtns: List<TextView> = emptyList(),
+        private val titles: List<TextView> = emptyList(),
         private val tabUnderlines: List<View> = emptyList()
     ) {
         var isChecked: Boolean = false
@@ -112,6 +117,10 @@ object PanelBar {
             outlineBtns.getOrNull(index)?.text = label
         }
 
+        fun setTitleLabel(index: Int, label: String) {
+            titles.getOrNull(index)?.text = label
+        }
+
         fun setActiveTab(index: Int) {
             tabUnderlines.forEachIndexed { i, v ->
                 v.visibility = if (i == index) View.VISIBLE else View.INVISIBLE
@@ -131,6 +140,7 @@ object PanelBar {
         val barHeight = u(style.height)
         var checkIcon: ImageView? = null
         val outlineBtnList = mutableListOf<TextView>()
+        val titleList = mutableListOf<TextView>()
         val tabUnderlineList = mutableListOf<View>()
 
         fun render(cell: Cell, inWeightCenter: Boolean): View = when (cell) {
@@ -139,7 +149,7 @@ object PanelBar {
             is Check -> makeCheck(ctx, style, cell).also { (_, icon) -> checkIcon = icon }.first
             is IconBtn -> makeIconBtn(ctx, style, cell, barHeight)
             is OutlineBtn -> makeOutlineBtn(ctx, style, cell).also { outlineBtnList.add(it.second) }.first
-            is Title -> makeTitle(ctx, style, cell)
+            is Title -> makeTitle(ctx, style, cell).also { titleList.add(it) }
             is TabPair -> makeTabPair(ctx, style, cell).also { tabUnderlineList.addAll(it.second) }.first
         }
 
@@ -230,7 +240,16 @@ object PanelBar {
             }
         } else bar
 
-        val handle = Handle(root, barHeight + if (style.divider) 1 else 0, ctx, style, checkIcon, outlineBtnList, tabUnderlineList)
+        val handle = Handle(
+            root,
+            barHeight + if (style.divider) 1 else 0,
+            ctx,
+            style,
+            checkIcon,
+            outlineBtnList,
+            titleList,
+            tabUnderlineList,
+        )
         if (checkIcon != null) handle.setChecked(false)
         return handle
     }

@@ -4,22 +4,14 @@ import com.supernote_quicktoolbar.*
 import com.supernote_quicktoolbar.overlays.*
 import com.supernote_quicktoolbar.bubbles.*
 
-import android.graphics.*
-import android.graphics.Bitmap
-import android.graphics.Typeface
 import android.graphics.BitmapFactory
-import android.graphics.Canvas
-import android.graphics.Paint
-import android.graphics.Rect
-import android.graphics.RectF
+import android.graphics.Color
+import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.util.Log
 import android.view.*
 import android.widget.*
-import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
-import com.facebook.react.bridge.ReactContextBaseJavaModule
-import com.facebook.react.bridge.ReactMethod
 import com.supernote_quicktoolbar.ui_common.ButtonHandle
 import com.supernote_quicktoolbar.ui_common.PanelBase
 import com.supernote_quicktoolbar.ui_common.PanelGrid
@@ -29,13 +21,11 @@ import com.supernote_quicktoolbar.ui_common.PanelTabBar
 import com.supernote_quicktoolbar.ui_common.PanelWidgets
 import com.supernote_quicktoolbar.ui_common.TabBarHandle
 import java.io.File
-import java.io.FileOutputStream
 import kotlin.concurrent.thread
-import org.json.JSONObject
 
 class DocScreenshotPanel(
     ctx: ReactApplicationContext,
-    toolbar: FloatingToolbarModule
+    private val toolbar: FloatingToolbarModule
 ) : PanelBase(ctx, toolbar) {
 
     override val tag = "DocScreenshotPanel"
@@ -61,10 +51,11 @@ class DocScreenshotPanel(
     private lateinit var tabBarH: TabBarHandle
     private lateinit var insertBtn: ButtonHandle
     private lateinit var deleteBtn: ButtonHandle
+    private lateinit var pasteBtn: ButtonHandle
     private var gridRebuild: (() -> Unit)? = null
     private var gridScrollTop: (() -> Unit)? = null
 
-    fun show(initialTab: String = "history") {
+    fun show(initialTab: String = "history", onResult: ((Boolean) -> Unit)? = null) {
         ScreenshotBubble.pendingReshow = false
         ScreenshotBubble.hide()
         currentInstance = this
@@ -75,7 +66,7 @@ class DocScreenshotPanel(
             val hasFiles = queueDir.exists() && queueDir.listFiles()?.any { it.name.endsWith(".png") } == true
             if (!hasFiles) activeTab = "history"
         }
-        showPanel()
+        showPanel(onResult)
     }
 
     override fun onHide() {
@@ -105,7 +96,7 @@ class DocScreenshotPanel(
                             if (activeTab == "queue") NativeLocale.t("no_queue")
                             else NativeLocale.t("no_history")))
                     } else {
-                        PanelGrid.build(host.ctx, scroll, host.screenW, host.panelW, files) { file, colW ->
+                        PanelGrid.build(host.ctx, scroll, host.screenW, host.screenH, host.panelW, files) { file, colW ->
                             screenshotCell(host, file, colW)
                         }
                     }
@@ -134,7 +125,9 @@ class DocScreenshotPanel(
                     layoutParams = LinearLayout.LayoutParams(0, 1, 1f)
                 })
                 bar.addView(PanelWidgets.outlinedButton(host, NativeLocale.t("cancel")) { closeAndRestore() })
-                bar.addView(PanelWidgets.outlinedButton(host, NativeLocale.t("screenshot_bubble")) { showBubbleAndClose() })
+                val pasteTv = PanelWidgets.outlinedButton(host, NativeLocale.t("paste_image")) { doPaste() }
+                pasteBtn = ButtonHandle().also { it.view = pasteTv }
+                bar.addView(pasteTv)
                 bar.addView(insertTv)
                 wrapper.addView(bar)
                 wrapper
@@ -142,6 +135,7 @@ class DocScreenshotPanel(
         }
         insertBtn.enabled = false
         deleteBtn.enabled = false
+        pasteBtn.enabled = false
     }
 
     private fun switchTab(tab: String) {
@@ -156,6 +150,7 @@ class DocScreenshotPanel(
         val hasSel = selectedPath != null
         insertBtn.enabled = hasSel
         deleteBtn.enabled = hasSel
+        pasteBtn.enabled = hasSel
     }
 
     private fun loadFiles(): List<File> {
@@ -216,12 +211,12 @@ class DocScreenshotPanel(
             java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault()).format(java.util.Date(ts))
         } else file.name
         textContainer.addView(TextView(host.ctx).apply {
-            text = timeStr; textSize = host.sp(12f); setTextColor(Color.BLACK)
+            text = timeStr; textSize = host.gridSp(12f); setTextColor(Color.BLACK)
             typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
             maxLines = 2
         })
         textContainer.addView(TextView(host.ctx).apply {
-            text = PanelWidgets.formatSize(file.length()); textSize = host.sp(10f)
+            text = PanelWidgets.formatSize(file.length()); textSize = host.gridSp(10f)
             setTextColor(Color.parseColor("#666666"))
         })
         cell.addView(textContainer)
@@ -230,6 +225,7 @@ class DocScreenshotPanel(
 
     private fun doInsert() {
         val path = selectedPath ?: return
+        FloatingToolbarModule.beginInsertImageGuard()
         hide()
         if (BuildConfig.ENABLE_DEBUG) Log.i(tag, "[INSERT-DBG/Kt] panel insert path=$path fromQueue=${activeTab == "queue"}")
         thread(isDaemon = true) {
@@ -238,7 +234,7 @@ class DocScreenshotPanel(
             )
         }
         handler.postDelayed({
-            try { toolbarModule.requestInsertImage(path) }
+            try { toolbar.requestInsertImage(path) }
             catch (_: Exception) { toolbarModule.restoreToolbar() }
         }, 300)
     }
@@ -246,18 +242,29 @@ class DocScreenshotPanel(
     private fun doDelete() {
         val path = selectedPath ?: return
         val fileName = File(path).name
-        try { File(path).delete() } catch (_: Exception) {}
+        toolbarModule.emitEvent("nativeDeleteFile",
+            com.facebook.react.bridge.Arguments.createMap().apply {
+                putString("path", path)
+            })
         kotlin.concurrent.thread(isDaemon = true) { DocScreenshotService.unmarkInsertNext(fileName) }
         selectedPath = null
-        updateButtons()
-        gridRebuild?.invoke()
+        handler.post {
+            updateButtons()
+            gridRebuild?.invoke()
+        }
     }
 
-    private fun showBubbleAndClose() {
+    private fun doPaste() {
+        val path = selectedPath ?: return
+        if (StickyNotes.isFull) {
+            com.supernote_quicktoolbar.ui_common.Dialog.tip(reactContext, NativeLocale.t("sticky_limit_reached"))
+            return
+        }
         dismissWithoutPenRelease()
         handler.postDelayed({
-            ScreenshotBubble.show(reactContext, toolbarModule)
+            StickyNotes.add(reactContext, toolbar, path)
             toolbarModule.restoreToolbar()
+            releasePenGuardOwner()
         }, 200)
     }
 
@@ -280,221 +287,5 @@ class DocScreenshotPanel(
                 handler.post { imageView.setImageBitmap(bmp) }
             } catch (_: Exception) {}
         }
-    }
-}
-
-class ScreenshotModule(reactContext: ReactApplicationContext) :
-    ReactContextBaseJavaModule(reactContext) {
-
-    override fun getName(): String = "ScreenshotModule"
-
-    companion object {
-        @Volatile
-        var pendingPath: String? = null
-
-        @Volatile
-        var pendingLassoPath: String? = null
-    }
-
-    private val cacheDir: String
-        get() = reactApplicationContext.cacheDir.absolutePath
-
-    @ReactMethod
-    fun takeScreenshot(promise: Promise) {
-        if (BuildConfig.ENABLE_DEBUG) android.util.Log.i("ScreenshotModule", "[LASSO-DBG/Kt] takeScreenshot invoked")
-        Thread {
-            try {
-                val ts = System.currentTimeMillis()
-                val outPath = "$cacheDir/screenshot_crop_$ts.png"
-                if (BuildConfig.ENABLE_DEBUG) android.util.Log.i("ScreenshotModule", "[LASSO-DBG/Kt] takeScreenshot running screencap -> $outPath")
-                val process = Runtime.getRuntime().exec(arrayOf("screencap", "-p", outPath))
-                val exitCode = process.waitFor()
-                val file = File(outPath)
-                if (BuildConfig.ENABLE_DEBUG) android.util.Log.i("ScreenshotModule", "[LASSO-DBG/Kt] screencap exit=$exitCode size=${file.length()}")
-                if (exitCode == 0 && file.exists() && file.length() > 500) {
-                    promise.resolve(outPath)
-                } else {
-                    promise.reject("SCREENCAP_FAILED", "exit=$exitCode size=${file.length()}")
-                }
-            } catch (e: Exception) {
-                if (BuildConfig.ENABLE_DEBUG) android.util.Log.e("ScreenshotModule", "[LASSO-DBG/Kt] takeScreenshot EX: ${e.message}", e)
-                promise.reject("SCREENCAP_ERROR", e.message, e)
-            }
-        }.also { it.isDaemon = false }.start()
-    }
-
-    @ReactMethod
-    fun captureAndReopen(delayMs: Int, promise: Promise) {
-        val appContext = reactApplicationContext.applicationContext
-        val cachePath = cacheDir
-        promise.resolve(true)
-
-        Thread {
-            try {
-                var activity = currentActivity
-                if (activity == null) {
-                    for (i in 0 until 50) {
-                        Thread.sleep(100)
-                        activity = currentActivity
-                        if (activity != null) break
-                    }
-                }
-                if (activity == null) return@Thread
-
-                val restartIntent = android.content.Intent(activity.intent).apply {
-                    addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-
-                activity.finish()
-                Thread.sleep(800)
-
-                val ts = System.currentTimeMillis()
-                val outPath = "$cachePath/screenshot_crop_$ts.png"
-                val proc = Runtime.getRuntime().exec(arrayOf("screencap", "-p", outPath))
-                val exitCode = proc.waitFor()
-                val file = File(outPath)
-
-                if (exitCode == 0 && file.exists() && file.length() > 500) {
-                    pendingPath = outPath
-                }
-
-                Thread.sleep(delayMs.toLong())
-                appContext.startActivity(restartIntent)
-
-            } catch (e: Exception) {
-                if (BuildConfig.ENABLE_DEBUG) android.util.Log.e("ScreenshotModule", "captureAndReopen error: ${e.message}", e)
-            }
-        }.also { it.isDaemon = false }.start()
-    }
-
-    @ReactMethod
-    fun getPendingPath(promise: Promise) {
-        val path = pendingPath
-        pendingPath = null
-        promise.resolve(path)
-    }
-
-    @ReactMethod(isBlockingSynchronousMethod = true)
-    fun hasPendingPath(): Boolean = pendingPath != null
-
-    @ReactMethod
-    fun setPendingLassoPath(path: String?) {
-        if (BuildConfig.ENABLE_DEBUG) android.util.Log.i("ScreenshotModule", "[LASSO-DBG/Kt] setPendingLassoPath: $path (prev=$pendingLassoPath)")
-        pendingLassoPath = path
-    }
-
-    @ReactMethod
-    fun getPendingLassoPath(promise: Promise) {
-        val path = pendingLassoPath
-        if (BuildConfig.ENABLE_DEBUG) android.util.Log.i("ScreenshotModule", "[LASSO-DBG/Kt] getPendingLassoPath returning: $path")
-        pendingLassoPath = null
-        promise.resolve(path)
-    }
-
-    @ReactMethod
-    fun peekPendingLassoPath(promise: Promise) {
-        if (BuildConfig.ENABLE_DEBUG) android.util.Log.i("ScreenshotModule", "[LASSO-DBG/Kt] peekPendingLassoPath: $pendingLassoPath")
-        promise.resolve(pendingLassoPath)
-    }
-
-    @ReactMethod
-    fun compositeImages(paramsJson: String, promise: Promise) {
-        Thread {
-            try {
-                val json = JSONObject(paramsJson)
-                val direction = json.getString("direction")
-                val overlap = json.getInt("overlap")
-                val topLayerIndex = json.getInt("topLayerIndex")
-                val imagesArr = json.getJSONArray("images")
-
-                if (imagesArr.length() < 2) {
-                    promise.reject("INVALID_PARAMS", "Need at least 2 images")
-                    return@Thread
-                }
-
-                data class ImgInfo(
-                    val path: String, val width: Int, val height: Int,
-                    val cropTop: Float, val cropBottom: Float,
-                    val cropLeft: Float, val cropRight: Float
-                )
-
-                val imgs = (0 until imagesArr.length()).map { i ->
-                    val obj = imagesArr.getJSONObject(i)
-                    val crop = obj.optJSONObject("crop")
-                    ImgInfo(
-                        path = obj.getString("path"),
-                        width = obj.getInt("width"),
-                        height = obj.getInt("height"),
-                        cropTop = crop?.optDouble("cropTop", 0.0)?.toFloat() ?: 0f,
-                        cropBottom = crop?.optDouble("cropBottom", 0.0)?.toFloat() ?: 0f,
-                        cropLeft = crop?.optDouble("cropLeft", 0.0)?.toFloat() ?: 0f,
-                        cropRight = crop?.optDouble("cropRight", 0.0)?.toFloat() ?: 0f,
-                    )
-                }
-
-                val bitmaps = imgs.map { img ->
-                    BitmapFactory.decodeFile(img.path) ?: throw Exception("Failed to decode ${img.path}")
-                }
-
-                val srcRects = imgs.mapIndexed { i, img ->
-                    Rect(
-                        (img.width * img.cropLeft).toInt(),
-                        (img.height * img.cropTop).toInt(),
-                        (img.width * (1f - img.cropRight)).toInt(),
-                        (img.height * (1f - img.cropBottom)).toInt()
-                    )
-                }
-
-                val effW = srcRects.map { it.width() }
-                val effH = srcRects.map { it.height() }
-
-                val canvasW: Int
-                val canvasH: Int
-                if (direction == "vertical") {
-                    canvasW = maxOf(effW[0], effW[1])
-                    canvasH = effH[0] + effH[1] - overlap
-                } else {
-                    canvasW = effW[0] + effW[1] - overlap
-                    canvasH = maxOf(effH[0], effH[1])
-                }
-
-                if (canvasW <= 0 || canvasH <= 0) {
-                    promise.reject("INVALID_SIZE", "Canvas size invalid: ${canvasW}x${canvasH}")
-                    return@Thread
-                }
-
-                val result = Bitmap.createBitmap(canvasW, canvasH, Bitmap.Config.ARGB_8888)
-                val canvas = Canvas(result)
-                val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-
-                val dstRects = Array(2) { RectF() }
-                if (direction == "vertical") {
-                    dstRects[0].set(0f, 0f, effW[0].toFloat(), effH[0].toFloat())
-                    dstRects[1].set(0f, (effH[0] - overlap).toFloat(), effW[1].toFloat(), (effH[0] - overlap + effH[1]).toFloat())
-                } else {
-                    dstRects[0].set(0f, 0f, effW[0].toFloat(), effH[0].toFloat())
-                    dstRects[1].set((effW[0] - overlap).toFloat(), 0f, (effW[0] - overlap + effW[1]).toFloat(), effH[1].toFloat())
-                }
-
-                val drawOrder = if (topLayerIndex == 0) intArrayOf(1, 0) else intArrayOf(0, 1)
-                for (idx in drawOrder) {
-                    canvas.drawBitmap(bitmaps[idx], srcRects[idx], dstRects[idx], paint)
-                }
-
-                val ts = System.currentTimeMillis()
-                val outPath = "$cacheDir/stitch_result_$ts.png"
-                FileOutputStream(outPath).use { fos ->
-                    result.compress(Bitmap.CompressFormat.PNG, 100, fos)
-                }
-
-                result.recycle()
-                bitmaps.forEach { it.recycle() }
-
-                promise.resolve(outPath)
-
-            } catch (e: Exception) {
-                promise.reject("COMPOSITE_ERROR", e.message, e)
-            }
-        }.also { it.isDaemon = false }.start()
     }
 }

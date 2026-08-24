@@ -1,77 +1,29 @@
 package com.supernote_quicktoolbar
 
-import com.facebook.react.bridge.ReactApplicationContext
-import com.supernote_quicktoolbar.panels.*
 import com.supernote_quicktoolbar.bubbles.*
-import com.supernote_quicktoolbar.ui_common.PanelBase
+import com.supernote_quicktoolbar.ui_common.PanelRegistry
 
+// Panels self-register in PanelRegistry (via PanelBase.rootView); this facade
+// only adds the bubble overlays, which are not PanelBase subclasses.
 object ToolRegistry {
 
-    private lateinit var toolbarModule: FloatingToolbarModule
-
-    private val panelFactories = mutableMapOf<String, () -> PanelBase>()
-
-    private val activePanels: List<PanelBase>
-        get() = panelFactories.values.mapNotNull { it().takeIf { p -> p.isShowing } }
-
-    fun init(module: FloatingToolbarModule, ctx: ReactApplicationContext) {
-        toolbarModule = module
-
-        panelFactories["image"] = { ImagePanel.getInstance(ctx, module) }
-        panelFactories["docLink"] = { DocLinkPanel.getInstance(ctx, module) }
-        panelFactories["docScreenshot"] = { DocScreenshotPanel.getInstance(ctx, module) }
-        panelFactories["send"] = { SendPanel.getInstance(ctx, module) }
-        panelFactories["lassoScreenshot"] = { LassoScreenshotPanel.getInstance(ctx, module) }
-        panelFactories["config"] = { ConfigPanel.getInstance(ctx, module) }
-        panelFactories["palette"] = { PalettePanel.getInstance(ctx, module) }
-    }
-
-    fun registerPanel(id: String, factory: () -> PanelBase) {
-        panelFactories[id] = factory
-    }
-
-    fun getPanel(id: String): PanelBase? = panelFactories[id]?.invoke()
-
     fun hideAll() {
-        ImagePanel.currentInstance?.hide()
-        DocLinkPanel.currentInstance?.hide()
-        SendPanel.currentInstance?.hide()
-        LassoScreenshotPanel.currentInstance?.hide()
-        DocScreenshotPanel.currentInstance?.hide()
-        ConfigPanel.currentInstance?.hide()
-        PalettePanel.currentInstance?.hide()
+        PanelRegistry.hideAll()
         FloatingBubbleModule.hideStatic()
         AiBubbleModule.hideStatic()
         PaletteBubbleModule.hideStatic()
     }
 
-    fun handleRotation(): Boolean {
-        var restoreToolbar = false
-        for (panel in activePanels) if (panel.onRotation()) restoreToolbar = true
-        return restoreToolbar
+    fun handleRotation(): Boolean = PanelRegistry.handleRotation()
+
+    fun anyPanelShowing(): Boolean = PanelRegistry.anyShowing()
+
+    /** Hooks the empty↔non-empty edge of the live panel set (see PanelRegistry). */
+    fun setPanelActiveEdgeListener(l: ((anyShowing: Boolean) -> Unit)?) {
+        PanelRegistry.onActiveEdge = l
     }
 
-    fun suspendAll() {
-        ImagePanel.currentInstance?.suspendVisibility()
-        DocLinkPanel.currentInstance?.suspendVisibility()
-        SendPanel.currentInstance?.suspendVisibility()
-        LassoScreenshotPanel.currentInstance?.suspendVisibility()
-        DocScreenshotPanel.currentInstance?.suspendVisibility()
-        ConfigPanel.currentInstance?.suspendVisibility()
-        PalettePanel.currentInstance?.suspendVisibility()
-    }
+    fun suspendAll() = PanelRegistry.suspendAll()
 
-    fun resumeAll() {
-        ImagePanel.currentInstance?.resumeVisibility()
-        DocLinkPanel.currentInstance?.resumeVisibility()
-        SendPanel.currentInstance?.resumeVisibility()
-        LassoScreenshotPanel.currentInstance?.resumeVisibility()
-        DocScreenshotPanel.currentInstance?.resumeVisibility()
-        ConfigPanel.currentInstance?.resumeVisibility()
-        PalettePanel.currentInstance?.resumeVisibility()
-    }
-
-    fun destroyAll() {
-        hideAll()
-    }
+    fun resumeAll() = PanelRegistry.resumeAll()
 }

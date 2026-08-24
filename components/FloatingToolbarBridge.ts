@@ -2,9 +2,12 @@
 
 import { NativeModules, NativeEventEmitter } from 'react-native';
 
-const { FloatingToolbar } = NativeModules;
+function getFT(): any {
+  return NativeModules.FloatingToolbar;
+}
 
-export const ENABLE_DEBUG: boolean = FloatingToolbar?.getConstants?.()?.ENABLE_DEBUG ?? FloatingToolbar?.ENABLE_DEBUG ?? true;
+export const ENABLE_DEBUG: boolean =
+  getFT()?.getConstants?.()?.ENABLE_DEBUG ?? getFT()?.ENABLE_DEBUG ?? true;
 
 export interface ToolTapEvent {
   toolId: string;
@@ -15,166 +18,165 @@ export interface ToolTapEvent {
 let _emitter: NativeEventEmitter | null = null;
 
 function getEmitter(): NativeEventEmitter | null {
-  if (!FloatingToolbar) return null;
+  const mod = getFT();
+  if (!mod) return null;
   if (!_emitter) {
-    _emitter = new NativeEventEmitter(FloatingToolbar);
+    _emitter = new NativeEventEmitter(mod);
   }
   return _emitter;
 }
 
 const FloatingToolbarBridge = {
 
-  isAvailable: !!FloatingToolbar,
+  get isAvailable(): boolean {
+    return !!getFT();
+  },
 
   showCurrent(): void {
     try {
-      FloatingToolbar?.showCurrent();
+      getFT()?.showCurrent();
     } catch (e) {
       console.warn('[FloatingToolbarBridge]: showCurrent failed:', e);
     }
   },
 
+  toggleFromPluginButton(): void {
+    try {
+      getFT()?.toggleFromPluginButton();
+    } catch (e) {
+      console.warn('[FloatingToolbarBridge]: toggleFromPluginButton failed:', e);
+    }
+  },
+
+  async inspectAndFlushHostEntry(): Promise<'none' | 'config' | 'localsend' | 'flushed'> {
+    try {
+      const result = await getFT()?.inspectAndFlushHostEntry();
+      return result === 'config' || result === 'localsend' || result === 'flushed' ? result : 'none';
+    } catch (e) {
+      console.warn('[FloatingToolbarBridge]: inspectAndFlushHostEntry failed:', e);
+      return 'none';
+    }
+  },
+
+  reportHostButtonChannel(working: boolean): void {
+    try {
+      getFT()?.reportHostButtonChannel(working);
+    } catch (e) {
+      console.warn('[FloatingToolbarBridge]: reportHostButtonChannel failed:', e);
+    }
+  },
+
+  reportHostButtonRaw(payload: string): void {
+    try { getFT()?.reportHostButtonRaw?.(payload); } catch (_) {}
+  },
+
   hide(): void {
     try {
-      FloatingToolbar?.hide();
+      getFT()?.hide();
     } catch (e) {
       console.warn('[FloatingToolbarBridge]: hide failed:', e);
     }
   },
 
-  collapse(): void {
-    try {
-      FloatingToolbar?.collapse();
-    } catch (e) {
-      console.warn('[FloatingToolbarBridge]: collapse failed:', e);
-    }
-  },
-
-  dockToEdge(): void {
-    try {
-      FloatingToolbar?.dockToEdge();
-    } catch (e) {
-      console.warn('[FloatingToolbarBridge]: dockToEdge failed:', e);
-    }
-  },
-
-  expand(): void {
-    try {
-      FloatingToolbar?.expand();
-    } catch (e) {
-      console.warn('[FloatingToolbarBridge]: expand failed:', e);
-    }
-  },
-
   restoreToolbar(): void {
     try {
-      FloatingToolbar?.restoreToolbar();
+      getFT()?.restoreToolbar();
     } catch (e) {
       console.warn('[FloatingToolbarBridge]: restoreToolbar failed:', e);
     }
   },
 
-  setSide(side: 'left' | 'right'): void {
+  paletteSnapshotsChanged(): void {
     try {
-      FloatingToolbar?.setSide(side);
+      getFT()?.paletteSnapshotsChanged();
     } catch (e) {
-      console.warn('[FloatingToolbarBridge]: setSide failed:', e);
+      console.warn('[FloatingToolbarBridge]: paletteSnapshotsChanged failed:', e);
     }
-  },
-
-  async isShowing(): Promise<boolean> {
-    try {
-      return await FloatingToolbar?.isShowing() ?? false;
-    } catch { return false; }
   },
 
   isShowingSync(): boolean {
     try {
-      return FloatingToolbar?.isShowingSync() ?? false;
-    } catch { return false; }
-  },
-
-  async checkPendingOpenMain(): Promise<boolean> {
-    try {
-      return await FloatingToolbar?.checkPendingOpenMain() ?? false;
+      return getFT()?.isShowingSync() ?? false;
     } catch { return false; }
   },
 
   checkPendingOpenMainSync(): boolean {
     try {
-      return FloatingToolbar?.checkPendingOpenMainSync() ?? false;
+      return getFT()?.checkPendingOpenMainSync() ?? false;
     } catch { return false; }
   },
 
   ackOpenMain(): void {
-    try { FloatingToolbar?.ackOpenMain(); } catch (_) {}
-  },
-
-  setPendingScreen(name: string): void {
-    try { FloatingToolbar?.setPendingScreen(name); } catch (_) {}
+    try { getFT()?.ackOpenMain(); } catch (_) {}
   },
 
   getPendingScreenSync(): string {
-    try { return FloatingToolbar?.getPendingScreenSync() ?? ''; } catch { return ''; }
+    try { return getFT()?.getPendingScreenSync() ?? ''; } catch { return ''; }
   },
 
   ackPendingScreen(): void {
-    try { FloatingToolbar?.ackPendingScreen(); } catch (_) {}
+    try { getFT()?.ackPendingScreen(); } catch (_) {}
   },
 
   async deleteQueueFile(path: string): Promise<boolean> {
-    try { return await FloatingToolbar?.deleteQueueFile(path) ?? false; } catch { return false; }
+    try { return await getFT()?.deleteQueueFile(path) ?? false; } catch { return false; }
   },
 
-  openPluginView(): void {
-    try { FloatingToolbar?.openPluginView(); } catch (_) {}
-  },
-
-  forceClosePluginView(): void {
-    try { FloatingToolbar?.forceClosePluginView(); } catch (_) {}
-  },
-
-  dumpNativePluginManagerMethods(): void {
-    try { FloatingToolbar?.dumpNativePluginManagerMethods(); } catch (_) {}
-  },
-
-  dumpPluginAppFields(): void {
-    try { FloatingToolbar?.dumpPluginAppFields(); } catch (_) {}
+  setLocale(loc: 'zh' | 'en'): void {
+    try { getFT()?.setLocale(loc); } catch (_) {}
   },
 
   openPanel(screen: string): void {
-    try { FloatingToolbar?.openPanel(screen); } catch (_) {}
+    try { getFT()?.openPanel(screen); } catch (_) {}
   },
 
-  async checkPermission(): Promise<boolean> {
+  openPluginSettingsAfterFileWritePermissionDenied(): void {
     try {
-      return await FloatingToolbar?.checkOverlayPermission() ?? false;
-    } catch { return false; }
-  },
-
-  async getStickerDir(): Promise<string | null> {
-    try {
-      return await FloatingToolbar?.getStickerDir() ?? null;
-    } catch { return null; }
-  },
-
-  async ensureStickerDir(): Promise<string | null> {
-    try {
-      return await FloatingToolbar?.ensureStickerDir() ?? null;
-    } catch { return null; }
-  },
-
-  requestPermission(): void {
-    try {
-      FloatingToolbar?.requestOverlayPermission();
+      getFT()?.openPluginSettingsAfterFileWritePermissionDenied?.();
     } catch (e) {
-      console.warn('[FloatingToolbarBridge]: requestPermission failed:', e);
+      console.warn('[FloatingToolbarBridge]: openPluginSettingsAfterFileWritePermissionDenied failed:', e);
+    }
+  },
+
+  async requestFileReadPermission(): Promise<boolean> {
+    try {
+      return await getFT()?.requestFileReadPermission?.() ?? false;
+    } catch (e) {
+      console.warn('[FloatingToolbarBridge]: requestFileReadPermission failed:', e);
+      return false;
+    }
+  },
+
+  async requestFileWritePermission(): Promise<boolean> {
+    try {
+      return await getFT()?.requestFileWritePermission?.() ?? false;
+    } catch (e) {
+      console.warn('[FloatingToolbarBridge]: requestFileWritePermission failed:', e);
+      return false;
+    }
+  },
+
+  async requestFileDeletePermission(): Promise<boolean> {
+    try {
+      return await getFT()?.requestFileDeletePermission?.() ?? false;
+    } catch (e) {
+      console.warn('[FloatingToolbarBridge]: requestFileDeletePermission failed:', e);
+      return false;
+    }
+  },
+
+  async requestInternetPermission(): Promise<boolean> {
+    try {
+      return await getFT()?.requestInternetPermission?.() ?? false;
+    } catch (e) {
+      console.warn('[FloatingToolbarBridge]: requestInternetPermission failed:', e);
+      return false;
     }
   },
 
   setLassoData(text: string, imagePathsJson: string, linkedFilesJson?: string): void {
     try {
-      FloatingToolbar?.setLassoData(text, imagePathsJson, linkedFilesJson ?? '[]');
+      getFT()?.setLassoData(text, imagePathsJson, linkedFilesJson ?? '[]');
     } catch (e) {
       console.warn('[FloatingToolbarBridge]: setLassoData failed:', e);
     }
@@ -182,7 +184,16 @@ const FloatingToolbarBridge = {
 
   drainImageQueue(): string[] {
     try {
-      const json = FloatingToolbar?.drainImageQueue();
+      const json = getFT()?.drainImageQueue();
+      return json ? JSON.parse(json) : [];
+    } catch (e) {
+      return [];
+    }
+  },
+
+  drainReceivedDeletes(): string[] {
+    try {
+      const json = getFT()?.drainReceivedDeletes();
       return json ? JSON.parse(json) : [];
     } catch (e) {
       return [];
@@ -191,7 +202,7 @@ const FloatingToolbarBridge = {
 
   drainDocLinkQueue(): string[] {
     try {
-      const json = FloatingToolbar?.drainDocLinkQueue();
+      const json = getFT()?.drainDocLinkQueue();
       return json ? JSON.parse(json) : [];
     } catch (e) {
       return [];
@@ -200,15 +211,15 @@ const FloatingToolbarBridge = {
 
   showImagePanel(): void {
     try {
-      FloatingToolbar?.showImagePanel();
+      getFT()?.showImagePanel();
     } catch (e) {
       console.warn('[FloatingToolbarBridge]: showImagePanel failed:', e);
     }
   },
 
-  showDocLinkPanel(): void {
+  showDocLinkPanel(currentFilePath?: string | null): void {
     try {
-      FloatingToolbar?.showDocLinkPanel();
+      getFT()?.showDocLinkPanel(currentFilePath ?? null);
     } catch (e) {
       console.warn('[FloatingToolbarBridge]: showDocLinkPanel failed:', e);
     }
@@ -216,7 +227,7 @@ const FloatingToolbarBridge = {
 
   showPalettePanel(infoJson: string): void {
     try {
-      FloatingToolbar?.showPalettePanel(infoJson);
+      getFT()?.showPalettePanel(infoJson);
     } catch (e) {
       console.warn('[FloatingToolbarBridge]: showPalettePanel failed:', e);
     }
@@ -224,23 +235,23 @@ const FloatingToolbarBridge = {
 
   handleDocScreenshot(): void {
     try {
-      (FloatingToolbar as any)?.handleDocScreenshot?.();
+      getFT()?.handleDocScreenshot?.();
     } catch (e) {
       console.warn('[FloatingToolbarBridge]: handleDocScreenshot failed:', e);
     }
   },
 
-  handleDocScreenshotCrop(): void {
+  toggleScreenshotBubble(): void {
     try {
-      (FloatingToolbar as any)?.handleDocScreenshotCrop?.();
+      getFT()?.toggleScreenshotBubble?.();
     } catch (e) {
-      console.warn('[FloatingToolbarBridge]: handleDocScreenshotCrop failed:', e);
+      console.warn('[FloatingToolbarBridge]: toggleScreenshotBubble failed:', e);
     }
   },
 
   showSendPanelFromBubble(): void {
     try {
-      FloatingToolbar?.showSendPanelFromBubble();
+      getFT()?.showSendPanelFromBubble();
     } catch (e) {
       console.warn('[FloatingToolbarBridge]: showSendPanelFromBubble failed:', e);
     }
@@ -248,7 +259,7 @@ const FloatingToolbarBridge = {
 
   openSendPanelClipboardSync(): void {
     try {
-      FloatingToolbar?.openSendPanelClipboardSync();
+      getFT()?.openSendPanelClipboardSync();
     } catch (e) {
       console.warn('[FloatingToolbarBridge]: openSendPanelClipboardSync failed:', e);
     }
@@ -256,7 +267,7 @@ const FloatingToolbarBridge = {
 
   showLassoScreenshotPanelFromBubble(): void {
     try {
-      FloatingToolbar?.showLassoScreenshotPanelFromBubble();
+      getFT()?.showLassoScreenshotPanelFromBubble();
     } catch (e) {
       console.warn('[FloatingToolbarBridge]: showLassoScreenshotPanelFromBubble failed:', e);
     }
@@ -264,7 +275,7 @@ const FloatingToolbarBridge = {
 
   showLassoScreenshotPanelForSendFromBubble(): void {
     try {
-      FloatingToolbar?.showLassoScreenshotPanelForSendFromBubble();
+      getFT()?.showLassoScreenshotPanelForSendFromBubble();
     } catch (e) {
       console.warn('[FloatingToolbarBridge]: showLassoScreenshotPanelForSendFromBubble failed:', e);
     }
@@ -278,22 +289,8 @@ const FloatingToolbarBridge = {
     return emitter.addListener('onToolModeExit', cb);
   },
 
-  async queryActiveMode(): Promise<string | null> {
-    try { return await FloatingToolbar?.queryActiveMode() ?? null; } catch { return null; }
-  },
-
-  async exitActiveMode(): Promise<void> {
-
-    try { await FloatingToolbar?.exitActiveMode(); } catch (_) {}
-  },
-
-  async exitMode(toolId: string): Promise<void> {
-
-    try { await FloatingToolbar?.exitMode?.(toolId); } catch (_) {}
-  },
-
   setActiveModes(modeIds: string[]): void {
-    try { FloatingToolbar?.setActiveModes(JSON.stringify(modeIds)); } catch (_) {}
+    try { getFT()?.setActiveModes(JSON.stringify(modeIds)); } catch (_) {}
   },
 
   onToolTap(callback: (event: ToolTapEvent) => void): { remove(): void } {
@@ -308,40 +305,10 @@ const FloatingToolbarBridge = {
     return emitter.addListener('onToolLongPress', callback);
   },
 
-  onDragEnd(callback: (pos: { x: number; y: number }) => void): { remove(): void } {
-    const emitter = getEmitter();
-    if (!emitter) return { remove() {} };
-    return emitter.addListener('onToolbarDragEnd', callback);
-  },
-
   onToolbarOpenMain(callback: () => void): { remove(): void } {
     const emitter = getEmitter();
     if (!emitter) return { remove() {} };
     return emitter.addListener('onToolbarOpenMain', () => callback());
-  },
-
-  onTap(callback: () => void): { remove(): void } {
-    const emitter = getEmitter();
-    if (!emitter) return { remove() {} };
-    return emitter.addListener('onToolbarTap', () => callback());
-  },
-
-  onPermissionDenied(callback: () => void): { remove(): void } {
-    const emitter = getEmitter();
-    if (!emitter) return { remove() {} };
-    return emitter.addListener('onToolbarPermissionDenied', () => callback());
-  },
-
-  onCollapseChange(callback: (data: { collapsed: boolean; side: string }) => void): { remove(): void } {
-    const emitter = getEmitter();
-    if (!emitter) return { remove() {} };
-    return emitter.addListener('onToolbarCollapseChange', callback);
-  },
-
-  onNativePanelOpen(callback: (data: { panel: string }) => void): { remove(): void } {
-    const emitter = getEmitter();
-    if (!emitter) return { remove() {} };
-    return emitter.addListener('onNativePanelOpen', callback);
   },
 
   onNativePanelClose(
@@ -356,27 +323,11 @@ const FloatingToolbarBridge = {
     return emitter.addListener('onNativePanelClose', callback);
   },
 
-  setOrientation(value: 'horizontal' | 'vertical'): void {
-    try { (FloatingToolbar as any)?.setOrientation(value); } catch (_) {}
-  },
-
-  getOrientationSync(): 'horizontal' | 'vertical' {
-    try {
-      const v = (FloatingToolbar as any)?.getOrientationSync?.();
-      return v === 'vertical' ? 'vertical' : 'horizontal';
-    } catch { return 'horizontal'; }
-  },
-
-  hideNativePanels(): void {
-    try { (FloatingToolbar as any)?.hideAllNativePanelsFromJs?.(); } catch (_) {}
-  },
-
-  closeAllForSettings(): void {
-    try { (FloatingToolbar as any)?.closeAllForSettings?.(); } catch (_) {}
-  },
-
-  destroyAll(): void {
-    try { FloatingToolbar?.destroyAllFromJs(); } catch (_) {}
+  /** Note app entered/left the foreground (from the native foreground monitor). */
+  onNoteForegroundChanged(callback: (data: { inNote: boolean }) => void): { remove(): void } {
+    const emitter = getEmitter();
+    if (!emitter) return { remove() {} };
+    return emitter.addListener('onNoteForegroundChanged', callback);
   },
 
   onDestroyAll(callback: () => void): { remove(): void } {
@@ -385,32 +336,8 @@ const FloatingToolbarBridge = {
     return emitter.addListener('onToolbarDestroyAll', () => callback());
   },
 
-  isPenLockedSync(): boolean {
-    try { return (FloatingToolbar as any)?.isPenLockedSync?.() ?? false; } catch { return false; }
-  },
-
-  setPenLocked(locked: boolean): void {
-    try { FloatingToolbar?.setPenLocked(locked); } catch (_) {}
-  },
-
-  openPenLockView(): void {
-    try { FloatingToolbar?.openPenLockView(); } catch (_) {}
-  },
-
-  disablePenBlock(): void {
-    try { (FloatingToolbar as any)?.disablePenBlock?.(); } catch (_) {}
-  },
-
-  engagePenLock(): void {
-    try { (FloatingToolbar as any)?.engagePenLock?.(); } catch (_) {}
-  },
-
-  releasePenLock(): void {
-    try { (FloatingToolbar as any)?.releasePenLock?.(); } catch (_) {}
-  },
-
   updateTitleClips(filled: boolean[]): void {
-    try { FloatingToolbar?.updateTitleClips(JSON.stringify(filled)); } catch (_) {}
+    try { getFT()?.updateTitleClips(JSON.stringify(filled)); } catch (_) {}
   },
 
   onTitleClipTap(callback: (event: { slot: string }) => void): { remove(): void } {
@@ -431,24 +358,6 @@ const FloatingToolbarBridge = {
     return emitter.addListener('onTitleLayerAction', callback);
   },
 
-  onPenLockRequest(callback: () => void): { remove(): void } {
-    const emitter = getEmitter();
-    if (!emitter) return { remove() {} };
-    return emitter.addListener('onPenLockRequest', callback);
-  },
-
-  onPenLockRelease(callback: () => void): { remove(): void } {
-    const emitter = getEmitter();
-    if (!emitter) return { remove() {} };
-    return emitter.addListener('onPenLockRelease', callback);
-  },
-
-  onTitlePenLassoAction(callback: () => void): { remove(): void } {
-    const emitter = getEmitter();
-    if (!emitter) return { remove() {} };
-    return emitter.addListener('onTitlePenLassoAction', callback);
-  },
-
   onAppendPageAction(callback: () => void): { remove(): void } {
     const emitter = getEmitter();
     if (!emitter) return { remove() {} };
@@ -456,14 +365,8 @@ const FloatingToolbarBridge = {
   },
 
   showPenLassoOverlay(): void {
-    try { FloatingToolbar?.showPenLassoOverlay(); } catch (e) {
+    try { getFT()?.showPenLassoOverlay(); } catch (e) {
       console.warn('[FloatingToolbarBridge]: showPenLassoOverlay failed:', e);
-    }
-  },
-
-  dismissPenLassoOverlay(): void {
-    try { FloatingToolbar?.dismissPenLassoOverlay(); } catch (e) {
-      console.warn('[FloatingToolbarBridge]: dismissPenLassoOverlay failed:', e);
     }
   },
 
@@ -479,29 +382,6 @@ const FloatingToolbarBridge = {
     return emitter.addListener('onPenLassoCancel', callback);
   },
 
-  showStrokeEraserOverlay(): void {
-    try { FloatingToolbar?.showStrokeEraserOverlay(); } catch (e) {
-      console.warn('[FloatingToolbarBridge]: showStrokeEraserOverlay failed:', e);
-    }
-  },
-
-  dismissStrokeEraserOverlay(): void {
-    try { FloatingToolbar?.dismissStrokeEraserOverlay(); } catch (e) {
-      console.warn('[FloatingToolbarBridge]: dismissStrokeEraserOverlay failed:', e);
-    }
-  },
-
-  onStrokeEraserPath(callback: (event: { points: Array<{ x: number; y: number }> }) => void): { remove(): void } {
-    const emitter = getEmitter();
-    if (!emitter) return { remove() {} };
-    return emitter.addListener('onStrokeEraserPath', callback);
-  },
-
-  onStrokeEraserCancel(callback: () => void): { remove(): void } {
-    const emitter = getEmitter();
-    if (!emitter) return { remove() {} };
-    return emitter.addListener('onStrokeEraserCancel', callback);
-  },
 };
 
 export default FloatingToolbarBridge;

@@ -1,16 +1,18 @@
 package com.supernote_quicktoolbar.bubbles
+
+import com.supernote_quicktoolbar.TouchInput
+import com.supernote_quicktoolbar.FloatingPenGuard
 import com.supernote_quicktoolbar.BuildConfig
 import com.supernote_quicktoolbar.*
 import com.supernote_quicktoolbar.overlays.*
 
+import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.PixelFormat
+import android.graphics.Paint
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
-import android.provider.Settings
 import android.util.Log
 import android.view.*
 import android.widget.FrameLayout
@@ -39,7 +41,7 @@ class PaletteBubbleModule(reactContext: ReactApplicationContext) :
 
     companion object {
         @Volatile @JvmStatic private var windowManager: WindowManager? = null
-        @Volatile @JvmStatic private var bubbleView: LinearLayout? = null
+        @Volatile @JvmStatic private var bubbleView: DraggablePaletteLayout? = null
         @Volatile @JvmStatic private var layoutParams: WindowManager.LayoutParams? = null
 
         @Volatile @JvmStatic private var startX = 0
@@ -108,6 +110,7 @@ class PaletteBubbleModule(reactContext: ReactApplicationContext) :
             if (!wantShown) return
             val h = Handler(Looper.getMainLooper())
             h.post {
+                if (FloatingToolbarModule.anyNativeOverlayOwnsScreen()) return@post
                 if (bubbleView != null) return@post
                 reloadPresetsInternal()
                 val inst = currentInstance
@@ -198,37 +201,29 @@ class PaletteBubbleModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    @ReactMethod fun hide() {
-        wantShown = false
-        handler.post { removeBubble() }
-    }
-
-    @ReactMethod fun isShowing(promise: Promise) { promise.resolve(bubbleView != null) }
-
     private fun createBubble() {
         val context = reactApplicationContext
         removeBubble()
-        if (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(context)) return
 
         windowManager = context.getSystemService(android.content.Context.WINDOW_SERVICE) as WindowManager
         val dm = context.resources.displayMetrics
         screenHeight = dm.heightPixels
         screenWidth = dm.widthPixels
         val d = dm.density
-        val sf = maxOf(0.86f, com.supernote_quicktoolbar.ui_common.ScreenScale.factor(context))
-        val borderW = (1.5f * d * sf).toInt().coerceAtLeast(1)
+        val sf = BubbleWindowSupport.bubbleScale(context)
         val slotSz = (48 * d * sf).toInt()
         val gap = (4.5f * d * sf).toInt()
         val pad = (9 * d * sf).toInt()
 
-        bubbleView = TouchSinkLayout(context).apply {
+        bubbleView = DraggablePaletteLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(pad, pad, pad, pad)
             background = GradientDrawable().apply {
-                setColor(Color.parseColor("#F4F4F0"))
+                setColor(Color.WHITE)
                 setStroke((2f * d * sf).toInt().coerceAtLeast(1), Color.parseColor("#1E1E1B"))
                 cornerRadius = 14 * d * sf
             }
+            frameWidth = 0f
         }
 
         for (row in 0 until ROWS) {
@@ -247,49 +242,34 @@ class PaletteBubbleModule(reactContext: ReactApplicationContext) :
             bubbleView!!.addView(rowLayout)
         }
 
-        @Suppress("DEPRECATION")
-        val wmType = WindowManager.LayoutParams.TYPE_PHONE
-        layoutParams = WindowManager.LayoutParams(
+        layoutParams = BubbleWindowSupport.overlayParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            wmType,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
-            PixelFormat.TRANSLUCENT
+            WindowManager.LayoutParams.WRAP_CONTENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
             x = stickyX.coerceIn(0, (screenWidth - 80).coerceAtLeast(0))
             y = stickyY.coerceIn(0, (screenHeight - 80).coerceAtLeast(0))
         }
 
-        bubbleView!!.setOnTouchListener { _, ev ->
-            val lp = layoutParams ?: return@setOnTouchListener false
-            val view = bubbleView ?: return@setOnTouchListener false
-            when (ev.action) {
-                MotionEvent.ACTION_DOWN -> {
-                    startX = lp.x; startY = lp.y
-                    startRawX = ev.rawX; startRawY = ev.rawY
-                    isDragging = false; true
-                }
-                MotionEvent.ACTION_MOVE -> {
-                    val dx = ev.rawX - startRawX; val dy = ev.rawY - startRawY
-                    if (!isDragging && (Math.abs(dx) > 10 || Math.abs(dy) > 10)) isDragging = true
-                    if (isDragging) {
-                        lp.x = (startX + dx.toInt()).coerceIn(0, (screenWidth - 80).coerceAtLeast(0))
-                        lp.y = (startY + dy.toInt()).coerceIn(0, (screenHeight - 80).coerceAtLeast(0))
-                        try { windowManager?.updateViewLayout(view, lp) } catch (_: Exception) {}
-                    }; true
-                }
-                MotionEvent.ACTION_CANCEL -> true
-                MotionEvent.ACTION_UP -> {
-                    if (isDragging) { stickyX = lp.x; stickyY = lp.y }
-                    true
-                }
-                else -> false
+        bubbleView!!.onDragStart = {
+            layoutParams?.let { startX = it.x; startY = it.y }
+        }
+        bubbleView!!.onDrag = { dx, dy ->
+            val lp = layoutParams
+            val view = bubbleView
+            if (lp != null && view != null) {
+                lp.x = (startX + dx).coerceIn(0, (screenWidth - 80).coerceAtLeast(0))
+                lp.y = (startY + dy).coerceIn(0, (screenHeight - 80).coerceAtLeast(0))
+                try { windowManager?.updateViewLayout(view, lp) } catch (_: Exception) {}
             }
+        }
+        bubbleView!!.onDragEnd = {
+            layoutParams?.let { stickyX = it.x; stickyY = it.y }
         }
 
         try {
             windowManager?.addView(bubbleView, layoutParams)
+            bubbleView?.let { FloatingPenGuard.track("restyle_bubble", it) }
         } catch (e: Exception) {
             Log.e(TAG, "addView FAILED: ${e.message}", e)
             bubbleView = null; layoutParams = null
@@ -303,7 +283,7 @@ class PaletteBubbleModule(reactContext: ReactApplicationContext) :
         val preset = presets[index]
         val borderW = (1.5f * scaledD).toInt().coerceAtLeast(1)
         val ctx = context as ReactApplicationContext
-        val sf = maxOf(0.86f, com.supernote_quicktoolbar.ui_common.ScreenScale.factor(ctx))
+        val sf = BubbleWindowSupport.bubbleScale(ctx)
 
         val col = index % COLS
         val frame = FrameLayout(context).apply {
@@ -314,7 +294,7 @@ class PaletteBubbleModule(reactContext: ReactApplicationContext) :
 
         if (preset == null) {
             frame.background = GradientDrawable().apply {
-                setColor(Color.parseColor("#F4F4F0"))
+                setColor(Color.WHITE)
                 setStroke(borderW, Color.parseColor("#CBCBC4"))
                 cornerRadius = 0f
             }
@@ -385,7 +365,7 @@ class PaletteBubbleModule(reactContext: ReactApplicationContext) :
         val context = reactApplicationContext
         val dm = context.resources.displayMetrics
         val d = dm.density
-        val sf = maxOf(0.86f, com.supernote_quicktoolbar.ui_common.ScreenScale.factor(context))
+        val sf = BubbleWindowSupport.bubbleScale(context)
         val slotSz = (48 * d * sf).toInt()
         val gap = (4.5f * d * sf).toInt()
 
@@ -416,10 +396,8 @@ class PaletteBubbleModule(reactContext: ReactApplicationContext) :
         notifyToolbarHighlight()
     }
 
-    private fun emitEvent(name: String, params: WritableMap) {
-        try { reactApplicationContext.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java).emit(name, params) }
-        catch (e: Exception) { if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "emitEvent($name): ${e.message}") }
-    }
+    private fun emitEvent(name: String, params: WritableMap) =
+        BubbleWindowSupport.emitEvent(reactApplicationContext, TAG, name, params)
 
     private fun notifyToolbarHighlight() {
         try {
@@ -434,4 +412,71 @@ class PaletteBubbleModule(reactContext: ReactApplicationContext) :
 
     @ReactMethod fun addListener(eventName: String) {}
     @ReactMethod fun removeListeners(count: Int) {}
+}
+
+class DraggablePaletteLayout(context: android.content.Context) : LinearLayout(context) {
+    var onDragStart: (() -> Unit)? = null
+    var onDrag: ((Int, Int) -> Unit)? = null
+    var onDragEnd: (() -> Unit)? = null
+
+    private val slop = ViewConfiguration.get(context).scaledTouchSlop
+    private var downRawX = 0f
+    private var downRawY = 0f
+    private var dragging = false
+
+    var frameWidth = 0f
+    var frameColor = Color.BLACK
+    private val framePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+
+    override fun dispatchDraw(canvas: Canvas) {
+        super.dispatchDraw(canvas)
+        if (frameWidth > 0f) {
+            framePaint.strokeWidth = frameWidth
+            framePaint.color = frameColor
+            val h = frameWidth / 2f
+            canvas.drawRect(h, h, width - h, height - h, framePaint)
+        }
+    }
+
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        super.dispatchTouchEvent(ev)
+        return true
+    }
+
+    override fun dispatchGenericMotionEvent(ev: MotionEvent): Boolean {
+        if (ev.isFromSource(InputDevice.SOURCE_STYLUS)) return true
+        return super.dispatchGenericMotionEvent(ev)
+    }
+
+    override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
+        when (ev.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                downRawX = ev.rawX; downRawY = ev.rawY
+                dragging = false
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (!TouchInput.isFinger(ev)) return false
+                if (!dragging && (Math.abs(ev.rawX - downRawX) > slop || Math.abs(ev.rawY - downRawY) > slop)) {
+                    dragging = true
+                    onDragStart?.invoke()
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    override fun onTouchEvent(ev: MotionEvent): Boolean {
+        when (ev.actionMasked) {
+            MotionEvent.ACTION_MOVE ->
+                if (TouchInput.isFinger(ev) && dragging) onDrag?.invoke((ev.rawX - downRawX).toInt(), (ev.rawY - downRawY).toInt())
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                if (dragging) {
+                    onDragEnd?.invoke()
+                    dragging = false
+                }
+            }
+        }
+        return true
+    }
 }

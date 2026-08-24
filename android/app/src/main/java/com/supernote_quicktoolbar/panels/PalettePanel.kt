@@ -37,6 +37,11 @@ class PalettePanel(
         private const val ACTIVE_COLS_KEY = "palette_active_cols"
         private const val TIER_PREFS_KEY = "palette_tier_prefs"
 
+        private const val SNAPSHOT_PREF_KEY = "preset_95"
+        private const val SNAP_COLS = 3
+        private const val SNAP_ROWS = 2
+        private const val SNAP_PAGE_SIZE = SNAP_COLS * SNAP_ROWS
+
         const val COLS = 6
         const val ROWS = 2
         const val MAX_SLOTS = COLS * ROWS
@@ -149,8 +154,6 @@ class PalettePanel(
     private var activeTierKey: String? = null
 
     private var thicknessLabel: TextView? = null
-    private var thicknessPreview: ImageView? = null
-    private var thicknessContainer: LinearLayout? = null
     private var gridContainer: LinearLayout? = null
     private var addColBtn: View? = null
     private var removeColBtn: View? = null
@@ -163,6 +166,19 @@ class PalettePanel(
     private val penBtns = mutableMapOf<String, View>()
     private val colorBtns = mutableMapOf<String, View>()
     private val tierBtns = mutableMapOf<String, View>()
+
+    data class SnapshotRec(
+        val id: String, val sticker: String, val thumb: String,
+        val note: String, val page: Int, val ts: Long
+    )
+    private var snapshots = listOf<SnapshotRec>()
+    private var snapshotPage = 0
+    private var snapshotGrid: LinearLayout? = null
+    private var snapshotPagerLabel: TextView? = null
+    private var snapshotPrevBtn: TextView? = null
+    private var snapshotNextBtn: TextView? = null
+    private var snapshotCreateBtn: TextView? = null
+    private var snapshotBusy = false
 
     fun show(infoJson: String) {
         currentInstance = this
@@ -195,9 +211,13 @@ class PalettePanel(
 
     override fun onHide() {
         thicknessLabel = null
-        thicknessPreview = null
-        thicknessContainer = null
         gridContainer = null
+        snapshotGrid = null
+        snapshotPagerLabel = null
+        snapshotPrevBtn = null
+        snapshotNextBtn = null
+        snapshotCreateBtn = null
+        snapshotBusy = false
         addColBtn = null
         removeColBtn = null
         slotInfoLabel = null
@@ -253,22 +273,8 @@ class PalettePanel(
                 content.addView(makeFullDivider())
 
                 content.addView(buildTripleSection())
-
-                thicknessContainer = LinearLayout(host.ctx).apply {
-                    orientation = LinearLayout.VERTICAL
-                }
-                thicknessPreview = ImageView(host.ctx).apply {
-                    adjustViewBounds = true
-                    layoutParams = LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT,
-                        LinearLayout.LayoutParams.WRAP_CONTENT
-                    ).apply {
-                        leftMargin = host.dp(18); rightMargin = host.dp(18)
-                        topMargin = host.dp(4); bottomMargin = host.dp(4)
-                    }
-                }
-                thicknessContainer!!.addView(thicknessPreview)
-                content.addView(thicknessContainer)
+                content.addView(makeFullDivider())
+                content.addView(buildSnapshotSection())
 
                 updatePenSelection()
                 updateColorSelection()
@@ -589,6 +595,271 @@ class PalettePanel(
         }
     }
 
+    fun reloadSnapshots() {
+        handler.post {
+            snapshotBusy = false
+            snapshotCreateBtn?.alpha = 1f
+            loadSnapshots()
+            val maxPage = ((snapshots.size - 1).coerceAtLeast(0)) / SNAP_PAGE_SIZE
+            if (snapshotPage > maxPage) snapshotPage = maxPage
+            rebuildSnapshotGrid()
+        }
+    }
+
+    private fun loadSnapshots() {
+        snapshots = try {
+            val json = reactContext.getSharedPreferences(PREFS_NAME, 0)
+                .getString(SNAPSHOT_PREF_KEY, null)
+            if (json == null) emptyList() else {
+                val arr = JSONArray(json)
+                (0 until arr.length()).mapNotNull { i ->
+                    val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                    val sticker = o.optString("sticker", "")
+                    if (sticker.isEmpty()) return@mapNotNull null
+                    SnapshotRec(
+                        o.optString("id", ""), sticker, o.optString("thumb", ""),
+                        o.optString("note", ""), o.optInt("page", 0), o.optLong("ts", 0L)
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            if (BuildConfig.ENABLE_DEBUG) Log.w(tag, "loadSnapshots: ${e.message}")
+            emptyList()
+        }
+    }
+
+    private fun buildSnapshotSection(): LinearLayout {
+        val section = LinearLayout(reactContext).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(15), 0, dp(15))
+        }
+
+        val headerRow = LinearLayout(reactContext).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(18), 0, dp(18), dp(12))
+        }
+        headerRow.addView(TextView(reactContext).apply {
+            text = NativeLocale.t("palette_snapshot_header")
+            textSize = sp(14.5f)
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            setTextColor(INK)
+        })
+        headerRow.addView(View(reactContext).apply {
+            layoutParams = LinearLayout.LayoutParams(0, 0, 1f)
+        })
+        snapshotCreateBtn = TextView(reactContext).apply {
+            text = "＋ " + NativeLocale.t("palette_snapshot_create")
+            textSize = sp(12.5f)
+            setTextColor(INK2)
+            gravity = Gravity.CENTER
+            setPadding(dp(14), dp(6), dp(14), dp(6))
+            background = GradientDrawable().apply {
+                setColor(Color.TRANSPARENT)
+                setStroke(dp(1.5f), LINE2, dp(4).toFloat(), dp(3).toFloat())
+                cornerRadius = 0f
+            }
+            setOnClickListener { requestSnapshotCreate() }
+        }
+        headerRow.addView(snapshotCreateBtn)
+        section.addView(headerRow)
+
+        snapshotGrid = LinearLayout(reactContext).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), 0, dp(18), 0)
+        }
+        section.addView(snapshotGrid)
+
+        val pager = LinearLayout(reactContext).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(8) }
+        }
+        snapshotPrevBtn = makeStepperBtn("‹") { turnSnapshotPage(-1) }
+        snapshotNextBtn = makeStepperBtn("›") { turnSnapshotPage(1) }
+        snapshotPagerLabel = TextView(reactContext).apply {
+            textSize = sp(12.5f)
+            setTextColor(INK2)
+            gravity = Gravity.CENTER
+            setPadding(dp(12), 0, dp(12), 0)
+        }
+        pager.addView(snapshotPrevBtn)
+        pager.addView(snapshotPagerLabel)
+        pager.addView(snapshotNextBtn)
+        section.addView(pager)
+
+        loadSnapshots()
+        val maxPage = ((snapshots.size - 1).coerceAtLeast(0)) / SNAP_PAGE_SIZE
+        if (snapshotPage > maxPage) snapshotPage = maxPage
+        rebuildSnapshotGrid()
+        return section
+    }
+
+    private fun turnSnapshotPage(direction: Int) {
+        val maxPage = ((snapshots.size - 1).coerceAtLeast(0)) / SNAP_PAGE_SIZE
+        val next = (snapshotPage + direction).coerceIn(0, maxPage)
+        if (next == snapshotPage) return
+        snapshotPage = next
+        rebuildSnapshotGrid()
+    }
+
+    private fun rebuildSnapshotGrid() {
+        val container = snapshotGrid ?: return
+        container.removeAllViews()
+        val gap = dp(7)
+
+        if (snapshots.isEmpty()) {
+            container.addView(TextView(reactContext).apply {
+                text = NativeLocale.t("palette_snapshot_empty")
+                textSize = sp(12.5f)
+                setTextColor(FAINT)
+                gravity = Gravity.CENTER
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, dp(80)
+                )
+            })
+        } else {
+            val start = snapshotPage * SNAP_PAGE_SIZE
+            for (r in 0 until SNAP_ROWS) {
+                if (start + r * SNAP_COLS >= snapshots.size && r > 0) break
+                val row = LinearLayout(reactContext).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    layoutParams = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    ).apply { if (r > 0) topMargin = gap }
+                }
+                for (c in 0 until SNAP_COLS) {
+                    if (c > 0) row.addView(View(reactContext).apply {
+                        layoutParams = LinearLayout.LayoutParams(gap, 0)
+                    })
+                    val idx = start + r * SNAP_COLS + c
+                    if (idx < snapshots.size) {
+                        row.addView(makeSnapshotCard(snapshots[idx]))
+                    } else {
+                        row.addView(View(reactContext).apply {
+                            layoutParams = LinearLayout.LayoutParams(0, 0, 1f)
+                        })
+                    }
+                }
+                container.addView(row)
+            }
+        }
+
+        val pages = ((snapshots.size - 1).coerceAtLeast(0)) / SNAP_PAGE_SIZE + 1
+        snapshotPagerLabel?.text = "${snapshotPage + 1} / $pages"
+        val pagerVisible = snapshots.size > SNAP_PAGE_SIZE
+        snapshotPrevBtn?.apply {
+            alpha = if (snapshotPage > 0) 1f else 0.3f
+            isEnabled = snapshotPage > 0
+        }
+        snapshotNextBtn?.apply {
+            alpha = if (snapshotPage < pages - 1) 1f else 0.3f
+            isEnabled = snapshotPage < pages - 1
+        }
+        (snapshotPagerLabel?.parent as? View)?.visibility =
+            if (pagerVisible) View.VISIBLE else View.GONE
+    }
+
+    private fun makeSnapshotCard(rec: SnapshotRec): View {
+        val cardH = dp(150)
+        val card = FrameLayout(reactContext).apply {
+            layoutParams = LinearLayout.LayoutParams(0, cardH, 1f)
+            background = GradientDrawable().apply {
+                setColor(Color.WHITE)
+                setStroke(dp(1.5f), LINE2)
+                cornerRadius = 0f
+            }
+            setOnClickListener { requestSnapshotRestore(rec) }
+        }
+
+        val inner = LinearLayout(reactContext).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+            setPadding(dp(4), dp(4), dp(4), dp(3))
+        }
+        inner.addView(ImageView(reactContext).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
+            )
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            decodeThumb(rec.thumb, dp(140))?.let { setImageBitmap(it) }
+                ?: setImageDrawable(null)
+        })
+        inner.addView(TextView(reactContext).apply {
+            text = "P${rec.page + 1} · " + java.text.SimpleDateFormat(
+                "MM-dd HH:mm", java.util.Locale.getDefault()
+            ).format(java.util.Date(rec.ts))
+            textSize = sp(9.5f)
+            setTextColor(INK2)
+            gravity = Gravity.CENTER
+            maxLines = 1
+            setPadding(0, dp(2), 0, 0)
+        })
+        card.addView(inner)
+
+        card.addView(TextView(reactContext).apply {
+            text = "✕"
+            textSize = sp(12f)
+            setTextColor(INK2)
+            gravity = Gravity.CENTER
+            val sz = dp(24)
+            layoutParams = FrameLayout.LayoutParams(sz, sz, Gravity.TOP or Gravity.END)
+            setOnClickListener { requestSnapshotDelete(rec) }
+        })
+
+        return card
+    }
+
+    private fun decodeThumb(path: String, targetW: Int): Bitmap? {
+        if (path.isEmpty()) return null
+        return try {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(path, bounds)
+            if (bounds.outWidth <= 0) return null
+            var sample = 1
+            while (bounds.outWidth / (sample * 2) >= targetW) sample *= 2
+            BitmapFactory.decodeFile(path, BitmapFactory.Options().apply { inSampleSize = sample })
+        } catch (e: Exception) {
+            if (BuildConfig.ENABLE_DEBUG) Log.w(tag, "decodeThumb: ${e.message}")
+            null
+        }
+    }
+
+    private fun requestSnapshotCreate() {
+        if (snapshotBusy) return
+        snapshotBusy = true
+        snapshotCreateBtn?.alpha = 0.4f
+        toolbarModule.emitEvent("paletteSnapshot", Arguments.createMap().apply {
+            putString("op", "create")
+        })
+    }
+
+    private fun requestSnapshotRestore(rec: SnapshotRec) {
+        showConfirmDialog(NativeLocale.t("palette_snapshot_restore_confirm")) {
+            hide()
+            toolbarModule.restoreToolbar()
+            toolbarModule.emitEvent("paletteSnapshot", Arguments.createMap().apply {
+                putString("op", "restore")
+                putString("sticker", rec.sticker)
+            })
+        }
+    }
+
+    private fun requestSnapshotDelete(rec: SnapshotRec) {
+        showConfirmDialog(NativeLocale.t("palette_snapshot_delete_confirm")) {
+            toolbarModule.emitEvent("paletteSnapshot", Arguments.createMap().apply {
+                putString("op", "delete")
+                putString("id", rec.id)
+            })
+        }
+    }
+
     private fun buildTripleSection(): LinearLayout {
         val triple = LinearLayout(reactContext).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -758,7 +1029,6 @@ class PalettePanel(
             label.setTextColor(if (selected) INK else INK2)
         }
         updatePenTypeLabel()
-        thicknessContainer?.visibility = if (isMarkerSelected()) View.GONE else View.VISIBLE
     }
 
     private var colorHeaderLabel: TextView? = null
@@ -776,18 +1046,6 @@ class PalettePanel(
         parent.addView(colorHeaderLabel)
 
         buildColorGrid(parent, PRODUCT_COLORS, 2)
-
-        if (BuildConfig.ENABLE_DEBUG) {
-            parent.addView(View(reactContext).apply {
-                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(8))
-            })
-
-            buildColorGrid(parent, EXTENDED_COLORS, 4)
-            parent.addView(View(reactContext).apply {
-                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(4))
-            })
-            buildColorGrid(parent, EXTENDED_BRIGHT, 4)
-        }
 
         markerLockNote = LinearLayout(reactContext).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -1040,14 +1298,6 @@ class PalettePanel(
         val labelText = if (isMarker) "—" else PenSizeSpec.label(effectivePenType(), thickness)
         thicknessLabel?.text = labelText
         thicknessHeaderLabel?.text = "${NativeLocale.t("palette_thickness")} $labelText"
-        thicknessPreview?.setImageBitmap(
-            VectorAssets.loadBitmapTinted(
-                reactContext,
-                PenSizeSpec.previewAsset(effectivePenType(), thickness),
-                dp(280),
-                Color.BLACK
-            )
-        )
         updateSlotHeaderText()
     }
 
@@ -1152,7 +1402,10 @@ class PalettePanel(
     }
 
     private fun showDeleteConfirm(count: Int, onConfirm: () -> Unit) {
-        val msg = NativeLocale.t("palette_delete_confirm", count)
+        showConfirmDialog(NativeLocale.t("palette_delete_confirm", count), onConfirm)
+    }
+
+    private fun showConfirmDialog(msg: String, onConfirm: () -> Unit) {
         com.ratta.supernote.pluginlib.api.HostUIAPI.getInstance().showRattaDialog(
             reactContext.currentActivity, msg,
             NativeLocale.t("cancel"), NativeLocale.t("confirm"), false,
@@ -1215,7 +1468,7 @@ class PalettePanel(
             // before modify, else marker internal data is incomplete and the host wipes them.
             putBoolean("hasMarkerStroke", hasMarkerStroke)
         }
-        toolbarModule.emitEventPublic("paletteApply", map)
+        toolbarModule.emitEvent("paletteApply", map)
         hide()
         toolbarModule.restoreToolbar()
     }

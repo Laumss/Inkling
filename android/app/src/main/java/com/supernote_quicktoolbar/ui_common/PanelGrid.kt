@@ -8,16 +8,15 @@ import com.facebook.react.bridge.ReactApplicationContext
 
 object PanelGrid {
 
-    private const val THREE_COL_MIN_PX = 1920
-
     fun <T> build(
         ctx: ReactApplicationContext,
         host: PanelScrollHost,
         screenWidthPx: Int,
+        screenHeightPx: Int,
         panelWidthPx: Int,
         items: List<T>,
         sideLeftDp: Int = 22,
-        sideRightDp: Int = 0,
+        sideRightDp: Int = 22,
         midGapDp: Int = 18,
         rowTopPadDp: Int = 6,
         cell: (item: T, colWidthPx: Int) -> View
@@ -25,15 +24,18 @@ object PanelGrid {
         fun dp(v: Int) = ScreenScale.dp(ctx, v)
 
         val grid = host.content
+        val landscape = screenWidthPx > screenHeightPx
+        val cols = ScreenScale.gridColumns(screenWidthPx, screenHeightPx)
+        val sideDp = if (landscape) 16 else sideLeftDp
+        val gapDp = if (landscape) 12 else midGapDp
 
-        val sideLeft = dp(sideLeftDp)
-        val sideRight = dp(sideRightDp)
-        val midGap = dp(midGapDp)
+        val sideLeft = dp(sideDp)
+        val sideRight = dp(if (landscape) 16 else sideRightDp)
+        val midGap = dp(gapDp)
         val rowTopPad = dp(rowTopPadDp)
         val innerW = host.availableContentWidth(panelWidthPx)
-        val cols = if (screenWidthPx >= THREE_COL_MIN_PX) 3 else 2
         val colW = (innerW - sideLeft - sideRight - midGap * (cols - 1)) / cols
-        if (BuildConfig.ENABLE_DEBUG) Log.i("PanelGrid", "panelW=$panelWidthPx screenW=$screenWidthPx innerW=$innerW cols=$cols colW=$colW sideL=$sideLeft sideR=$sideRight midGap=$midGap padL=${grid.paddingLeft} padR=${grid.paddingRight} scrollbarLane=${host.scrollBarLaneWidthPx}")
+        if (BuildConfig.ENABLE_DEBUG) Log.i("PanelGrid", "panelW=$panelWidthPx screenW=$screenWidthPx screenH=$screenHeightPx innerW=$innerW cols=$cols colW=$colW sideL=$sideLeft sideR=$sideRight midGap=$midGap padL=${grid.paddingLeft} padR=${grid.paddingRight} scrollbarLane=${host.scrollBarLaneWidthPx}")
 
         var row: LinearLayout? = null
         for ((idx, item) in items.withIndex()) {

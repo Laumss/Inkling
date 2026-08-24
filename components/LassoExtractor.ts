@@ -1,6 +1,8 @@
-import { PluginCommAPI, PluginFileAPI, PluginNoteAPI } from 'sn-plugin-lib';
-import RNFS from 'react-native-fs';
+import { PluginCommAPI, PluginFileAPI, PluginNoteAPI, NativeUIUtils } from 'sn-plugin-lib';
+import { getRNFS } from './rnfs';
 import { FileLogger } from './FileLogger';
+import FloatingToolbarBridge from './FloatingToolbarBridge';
+import { t } from './i18n';
 
 export interface LinkedFile {
   path: string;
@@ -148,6 +150,17 @@ export class LassoExtractor {
     if (unrecognizedStrokes.length > 0) {
       try { onProgress?.('recognizing'); } catch (_) {}
       try {
+        // recognizeElements makes the host write a trails temp file to
+        // /sdcard/.data/plugin/ — without the FILE:WRITE grant it throws a
+        // SecurityException that tears down the whole React instance. Same
+        // check-and-prompt pattern as the LocalSend server startup.
+        const canWrite = await FloatingToolbarBridge.requestFileWritePermission();
+        if (!canWrite) {
+          FileLogger.logEvent('LassoExtract', 'recognizeElements skipped: no FILE:WRITE permission');
+          try { NativeUIUtils.showErrorTipDialog(t('perm_required')); } catch (_) {}
+          try { FloatingToolbarBridge.openPluginSettingsAfterFileWritePermissionDenied(); } catch (_) {}
+          throw new Error('no FILE:WRITE permission');
+        }
         const fpRes: any = await PluginCommAPI.getCurrentFilePath();
         const pgRes: any = await PluginCommAPI.getCurrentPageNum();
         if (fpRes?.success && fpRes.result && pgRes?.success && pgRes.result !== undefined) {
@@ -211,7 +224,7 @@ export class LassoExtractor {
             }
           } else if ([1, 2, 3, 6].includes(lt) && dest) {
 
-            const exists = await RNFS.exists(dest);
+            const exists = await getRNFS()?.exists(dest);
             if (exists) {
               const name = dest.split('/').pop()?.replace(/\.[^.]+$/, '') ?? 'file';
               result.linkedFiles.push({ path: dest, linkType: lt, label: name });
@@ -290,11 +303,5 @@ export class LassoExtractor {
     }
   }
 
-  static invalidateWarm(): void {
-    if (_warmEntry) {
-      _warmEntry = null;
-      FileLogger.logEvent('LassoExtract', `warmup invalidated`);
-    }
-  }
 }
 

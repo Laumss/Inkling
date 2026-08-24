@@ -10,13 +10,14 @@ import android.view.Gravity
 import android.view.View
 import android.widget.*
 import com.facebook.react.bridge.ReactApplicationContext
+import com.supernote_quicktoolbar.relay.AIRelayCore
 import com.supernote_quicktoolbar.ui_common.*
 import org.json.JSONArray
 import org.json.JSONObject
 
 class ConfigPanel(
     ctx: ReactApplicationContext,
-    toolbar: FloatingToolbarModule
+    private val toolbar: FloatingToolbarModule
 ) : PanelBase(ctx, toolbar) {
 
     override val tag = "ConfigPanel"
@@ -146,24 +147,136 @@ class ConfigPanel(
                 sh.view
             }
 
+            custom { h ->
+                val row = LinearLayout(h.ctx).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(h.dp(14), h.dp(10), h.dp(14), h.dp(10))
+                    setBackgroundColor(Color.parseColor("#FAFAFA"))
+                }
+                val labelCol = LinearLayout(h.ctx).apply {
+                    orientation = LinearLayout.VERTICAL
+                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                }
+                labelCol.addView(TextView(h.ctx).apply {
+                    text = NativeLocale.t("config_default_peer")
+                    textSize = h.sp(13f)
+                    typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                    setTextColor(Color.parseColor("#222222"))
+                })
+                val valueLabel = TextView(h.ctx).apply {
+                    textSize = h.sp(10f)
+                    setTextColor(Color.parseColor("#888888"))
+                    setPadding(0, h.dp(2), 0, 0)
+                }
+                labelCol.addView(valueLabel)
+                row.addView(labelCol)
+
+                val unbindBtn = TextView(h.ctx).apply {
+                    text = NativeLocale.t("config_default_peer_unbind")
+                    textSize = h.sp(12f)
+                    typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                    setTextColor(Color.BLACK)
+                    gravity = Gravity.CENTER
+                    setPadding(h.dp(12), h.dp(5), h.dp(12), h.dp(5))
+                    background = GradientDrawable().apply {
+                        setColor(Color.WHITE)
+                        setStroke(h.dp(1), Color.BLACK)
+                        cornerRadius = h.dp(3).toFloat()
+                    }
+                }
+                fun refreshDefaultPeerRow() {
+                    val def = LocalSendModule.getDefaultPeer(reactContext)
+                    if (def != null) {
+                        valueLabel.text = "${def.alias} · ${def.ip}:${def.port}"
+                        unbindBtn.visibility = View.VISIBLE
+                    } else {
+                        valueLabel.text = NativeLocale.t("config_default_peer_none")
+                        unbindBtn.visibility = View.GONE
+                    }
+                }
+                unbindBtn.setOnClickListener {
+                    LocalSendModule.setDefaultPeer(reactContext, null)
+                    refreshDefaultPeerRow()
+                }
+                row.addView(unbindBtn)
+                refreshDefaultPeerRow()
+                row
+            }
+
+            custom { h ->
+                val core = AIRelayCore.get(reactContext)
+                val row = LinearLayout(h.ctx).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(h.dp(14), h.dp(10), h.dp(14), h.dp(10))
+                    setBackgroundColor(Color.parseColor("#FAFAFA"))
+                }
+                val labelCol = LinearLayout(h.ctx).apply {
+                    orientation = LinearLayout.VERTICAL
+                    layoutParams = LinearLayout.LayoutParams(
+                        0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
+                    )
+                }
+                labelCol.addView(TextView(h.ctx).apply {
+                    text = NativeLocale.t("config_airrelay_phone")
+                    textSize = h.sp(13f)
+                    typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                    setTextColor(Color.parseColor("#222222"))
+                })
+                val valueLabel = TextView(h.ctx).apply {
+                    textSize = h.sp(10f)
+                    setTextColor(Color.parseColor("#888888"))
+                    setPadding(0, h.dp(2), h.dp(8), 0)
+                }
+                labelCol.addView(valueLabel)
+                row.addView(labelCol)
+
+                val unbindBtn = TextView(h.ctx).apply {
+                    text = NativeLocale.t("config_airrelay_unbind")
+                    textSize = h.sp(12f)
+                    typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                    setTextColor(Color.BLACK)
+                    gravity = Gravity.CENTER
+                    setPadding(h.dp(12), h.dp(5), h.dp(12), h.dp(5))
+                    background = GradientDrawable().apply {
+                        setColor(Color.WHITE)
+                        setStroke(h.dp(1), Color.BLACK)
+                        cornerRadius = h.dp(3).toFloat()
+                    }
+                }
+                fun refreshAirRelayRow() {
+                    val info = core.pairedPhoneInfo()
+                    if (info != null) {
+                        valueLabel.text =
+                            "${info.host}:${info.port} · ${info.fingerprint}"
+                        unbindBtn.visibility = View.VISIBLE
+                    } else {
+                        valueLabel.text = NativeLocale.t("config_airrelay_none")
+                        unbindBtn.visibility = View.GONE
+                    }
+                }
+                unbindBtn.setOnClickListener {
+                    core.unpairPhone()
+                    refreshAirRelayRow()
+                }
+                row.addView(unbindBtn)
+                refreshAirRelayRow()
+                row
+            }
+
             custom { _ ->
                 makeBottomBar(
-                    leftButtons = listOf(
-                        makeOutlinedBtn(NativeLocale.t("config_dock")) {
-                            hide()
-                            toolbarModule.dockToEdge()
-                        }
-                    ),
+                    leftButtons = emptyList(),
                     rightButtons = listOf(
-                        makeOutlinedBtn(NativeLocale.t("config_collapse")) {
-                            saveTools()
+                        makeOutlinedBtn(NativeLocale.t("btn_cancel")) {
                             hide()
-                            showToolbarAndClose()
+                            toolbar.destroyAll()
                         },
-                        makeFilledBtn(NativeLocale.t("config_save")) {
+                        makeFilledBtn(NativeLocale.t("btn_confirm")) {
                             saveTools()
                             hide()
-                            toolbarModule.destroyAll()
+                            toolbar.destroyAll()
                         }
                     )
                 )
@@ -447,8 +560,9 @@ class ConfigPanel(
         val addedIds = tools.map { it.id }.toSet()
         val iconSz = dp(32)
 
-        val filtered = if (catFilter == "all") TOOL_DEFS
-            else TOOL_DEFS.filter { it.category == catFilter }
+        val catalog = TOOL_DEFS.filter { FloatingToolbarModule.isDebugToolCatalogVisible(it.id, it.action) }
+        val filtered = if (catFilter == "all") catalog
+            else catalog.filter { it.category == catFilter }
 
         for (def in filtered) {
             val isAdded = def.id in addedIds
@@ -575,7 +689,19 @@ class ConfigPanel(
             if (BuildConfig.ENABLE_DEBUG) Log.w(tag, "loadTools: ${e.message}")
         }
         if (tools.isEmpty()) {
-            tools.addAll(TOOL_DEFS.filter { it.id != "invert_ink" })
+            tools.addAll(
+                TOOL_DEFS.filter {
+                    it.id != FloatingToolbarModule.PALETTE_TOOL_ID &&
+                        FloatingToolbarModule.isDebugToolCatalogVisible(it.id, it.action)
+                }
+            )
+        } else {
+            val sanitized = FloatingToolbarModule.sanitizeDebugTools(tools, { it.id }, { it.action })
+            if (sanitized.size != tools.size) {
+                tools.clear()
+                tools.addAll(sanitized)
+                saveTools()
+            }
         }
     }
 
@@ -585,6 +711,7 @@ class ConfigPanel(
             for (tool in tools) {
                 arr.put(JSONObject().apply {
                     put("id", tool.id)
+                    put("nameKey", tool.nameKey)
                     put("name", NativeLocale.t(tool.nameKey))
                     put("icon", tool.id)
                     put("action", tool.action)
@@ -598,20 +725,5 @@ class ConfigPanel(
         } catch (e: Exception) {
             if (BuildConfig.ENABLE_DEBUG) Log.e(tag, "saveTools: ${e.message}")
         }
-    }
-
-    private fun showToolbarAndClose() {
-        val arr = JSONArray()
-        for (tool in tools) {
-            arr.put(JSONObject().apply {
-                put("id", tool.id)
-                put("name", NativeLocale.t(tool.nameKey))
-                put("icon", tool.id)
-                put("action", tool.action)
-                put("latches", tool.action in setOf("insert_text", "text_recv_nospacing", "text_recv_paragraph", "voice_transcribe"))
-            })
-        }
-        toolbarModule.show(arr.toString())
-        toolbarModule.requestClosePluginView()
     }
 }

@@ -5,6 +5,7 @@ import com.supernote_quicktoolbar.bubbles.*
 
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
@@ -22,23 +23,36 @@ import com.facebook.react.bridge.*
 import com.facebook.react.modules.core.DeviceEventManagerModule
 import org.json.JSONArray
 import org.json.JSONObject
+import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
 import android.content.res.Configuration
+import android.hardware.display.DisplayManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import java.util.concurrent.TimeUnit
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
 class FloatingToolbarModule(reactContext: ReactApplicationContext) :
-    ReactContextBaseJavaModule(reactContext) {
+    ReactContextBaseJavaModule(reactContext), com.supernote_quicktoolbar.ui_common.ToolbarHost {
 
     override fun getName() = "FloatingToolbar"
+
+    override val screenW: Int get() = screenWidth
+    override val screenH: Int get() = screenHeight
 
     override fun getConstants(): MutableMap<String, Any> =
         mutableMapOf("ENABLE_DEBUG" to BuildConfig.ENABLE_DEBUG)
 
     companion object {
         private const val TAG = "FloatingToolbar"
+        private const val PLUGIN_FILE_READ_PERMISSION = "plugin.permission.FILE:READ"
+        private const val PLUGIN_FILE_WRITE_PERMISSION = "plugin.permission.FILE:WRITE"
+        private const val PLUGIN_FILE_DELETE_PERMISSION = "plugin.permission.FILE:DELETE"
+        private const val PLUGIN_INTERNET_PERMISSION = "plugin.permission.INTERNET"
+        private const val SCREENSHOT_STATE_PREFS = "screenshot_state"
+        private const val STITCH_SESSION_ACTIVE_KEY = "stitch_session_active"
 
         private val RETRY_DELAYS_MS = longArrayOf(50, 250, 750, 1500, 2500)
 
@@ -67,6 +81,17 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         private val LATCHING_ACTIONS: Set<String> = setOf(
             "insert_text", "text_recv_nospacing", "text_recv_paragraph", "voice_transcribe"
         )
+
+        private fun defaultToolNameKey(id: String): String = when (id) {
+            "insert_image" -> "config_tool_image"
+            "insert_doc_screenshot" -> "config_tool_doc"
+            "insert_text" -> "config_tool_text"
+            "send_ai" -> "config_tool_lasso_ai"
+            "insert_link" -> "config_tool_link"
+            "voice_transcribe" -> "config_tool_voice"
+            "invert_ink" -> "config_tool_palette"
+            else -> ""
+        }
         private const val DEFAULT_TOOLS_JSON =
             "[{\"id\":\"insert_image\",\"action\":\"insert_image\",\"icon\":\"Im\"}," +
             "{\"id\":\"insert_doc_screenshot\",\"action\":\"insert_doc_screenshot\",\"icon\":\"Sc\"}," +
@@ -74,6 +99,38 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             "{\"id\":\"send_ai\",\"action\":\"lasso_smart_send\",\"icon\":\"AI\"}," +
             "{\"id\":\"insert_link\",\"action\":\"insert_link\",\"icon\":\"Lk\"}," +
             "{\"id\":\"voice_transcribe\",\"action\":\"voice_transcribe\",\"icon\":\"Vc\"}]"
+
+        internal const val AI_RECEIVE_TOOL_ID = "voice_transcribe"
+        internal const val PALETTE_TOOL_ID = "invert_ink"
+
+        private fun isAiReceiveTool(id: String, action: String) =
+            id == AI_RECEIVE_TOOL_ID || action == AI_RECEIVE_TOOL_ID
+
+        private fun isPaletteTool(id: String, action: String) =
+            id == PALETTE_TOOL_ID || action == PALETTE_TOOL_ID
+
+        internal fun isDebugToolCatalogVisible(id: String, action: String = id): Boolean =
+            BuildConfig.ENABLE_DEBUG || !isAiReceiveTool(id, action)
+
+        internal fun <T> sanitizeDebugTools(
+            items: List<T>,
+            idOf: (T) -> String,
+            actionOf: (T) -> String = idOf
+        ): List<T> {
+            if (BuildConfig.ENABLE_DEBUG) return items
+            val hasReceive = items.any { isAiReceiveTool(idOf(it), actionOf(it)) }
+            val hasPalette = items.any { isPaletteTool(idOf(it), actionOf(it)) }
+            val dropPalette = hasReceive && hasPalette
+            return items.filter { item ->
+                val id = idOf(item)
+                val action = actionOf(item)
+                when {
+                    isAiReceiveTool(id, action) -> false
+                    dropPalette && isPaletteTool(id, action) -> false
+                    else -> true
+                }
+            }
+        }
 
         @JvmStatic
         private val activeModeIds: MutableSet<String> =
@@ -84,6 +141,14 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
         @Volatile @JvmStatic
         private var pendingScreen: String = ""
+
+        @Volatile @JvmStatic
+        private var selfShowPluginViewAt = 0L
+        private const val SELF_SHOW_GRACE_MS = 3_000L
+
+        @JvmStatic
+        private fun isSelfInitiatedHostShow(): Boolean =
+            android.os.SystemClock.elapsedRealtime() - selfShowPluginViewAt < SELF_SHOW_GRACE_MS
 
         @Volatile @JvmStatic
         private var pendingShow: Boolean = false
@@ -105,7 +170,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         private var longPressTriggered = false
 
         private const val AUTO_COLLAPSE_MS = 9000L
-        private const val NEAR_EDGE_THRESHOLD = 50
+        private const val DOCK_FLUSH_TOLERANCE = 6
 
         @JvmStatic
         internal var screenWidth = 1404
@@ -114,6 +179,10 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
         @Volatile @JvmStatic
         private var configCallbackRegistered = false
+        @Volatile @JvmStatic
+        private var displayListenerRegistered = false
+        @Volatile @JvmStatic
+        private var lastDisplayRotation = -1
 
         @Volatile @JvmStatic
         var lastNotePath: String = ""
@@ -122,21 +191,528 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
         @Volatile @JvmStatic
         private var foregroundMonitorRunning = false
-        @Volatile @JvmStatic
-        private var wasVisibleBeforeBackground = false
+        @JvmStatic
+        private var pendingRestoreRunnable: Runnable? = null
         @Volatile @JvmStatic
         private var isInNoteApp = true
 
+        @Volatile @JvmStatic
+        private var lastForegroundKey: String? = null
+
+        /**
+         * elapsedRealtime when the note app last RETURNED to the foreground.
+         * 0 = "long ago" (monitor start assumes we're already in the note).
+         * TextInserter reads this synchronously right before insertText so a
+         * fresh page reload can never race an insert (event delivery through
+         * the RN bridge is too slow to be the only gate).
+         */
+        @Volatile @JvmStatic
+        private var noteForegroundSinceMs = 0L
+
         @JvmStatic
         fun isInNoteApp(): Boolean = isInNoteApp
+
+        @Volatile @JvmStatic
+        private var isPluginHostWindowShowing = false
+
+        @JvmStatic
+        private var windowStateMonitor: WindowStateMonitor? = null
+
+        @Volatile @JvmStatic
+        private var toolbarRestorePending = false
+
+        @Volatile @JvmStatic
+        private var terminateAfterPluginMenuClose = false
+
+        @Volatile @JvmStatic
+        private var hostButtonChannelBroken = false
+
+        @JvmStatic
+        private val subviewListener = object : SubviewLogMonitor.Listener {
+            override fun onSubviewOpened(generation: Int) = onNoteSubviewChanged(true, generation)
+            override fun onSubviewClosed(generation: Int) = onNoteSubviewChanged(false, generation)
+            override fun onToolbarMenuChanged(open: Boolean, pluginListMenu: Boolean, generation: Int) =
+                handleToolbarMenuChanged(open, pluginListMenu, generation)
+            override fun onLassoMenuChanged(open: Boolean, generation: Int) {
+                if (!SubviewLogMonitor.isCurrentGeneration(generation)) return
+                lassoWritableResetPending = false
+                monitorHandler.post {
+                    if (!SubviewLogMonitor.isCurrentGeneration(generation)) return@post
+                    monitorHandler.removeCallbacks(lassoFullScreenReleaseRunnable)
+                    if (open) {
+                        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "host lasso menu full-screen=true")
+                        FloatingPenGuard.setFullScreenActive(true, "host-lasso-menu")
+                        endInsertImageGuard()
+                    } else {
+                        if (BuildConfig.ENABLE_DEBUG) {
+                            Log.i(TAG, "host lasso menu close: schedule full-screen release " +
+                                "delayMs=$LASSO_RELEASE_GRACE_MS")
+                        }
+                        monitorHandler.postDelayed(
+                            lassoFullScreenReleaseRunnable,
+                            LASSO_RELEASE_GRACE_MS
+                        )
+                        endInsertImageGuard()
+                        scheduleRestore(RESTORE_DELAY_NORMAL, "lasso menu closed")
+                    }
+                }
+            }
+            override fun onNativePenAreasChanged(rects: List<Rect>, generation: Int) {
+                if (!SubviewLogMonitor.isCurrentGeneration(generation)) return
+                val isWritableReset = rects.size == 1 && rects[0].let {
+                    it.left == 0 && it.top == 0 && it.right == 18888 && it.bottom == 18888
+                }
+                val isFullScreenSnapshot = rects.size == 1 && rects[0].let {
+                    !isWritableReset && it.left <= 0 && it.top <= 0 &&
+                        it.width() >= 1000 && it.height() >= 1000
+                }
+                if (isWritableReset && SubviewLogMonitor.isLassoMenuOpen()) {
+                    lassoWritableResetPending = true
+                    if (BuildConfig.ENABLE_DEBUG) {
+                        Log.i(TAG, "lasso close candidate: writable reset observed")
+                    }
+                } else if (lassoWritableResetPending && !isFullScreenSnapshot) {
+                    lassoWritableResetPending = false
+                    SubviewLogMonitor.closeLassoMenuFromFallback("writable reset completed")
+                }
+                val rotationWaitingForBaseline = rotationEpoch > 0L &&
+                    rotationUserConfirmed && rotationDialogDismissed
+                val rotationPostDismissCandidate = rotationEpoch > 0L &&
+                    (rotationDialogDismissed || rotationDialogShown) && !isWritableReset &&
+                    !isFullScreenSnapshot && rects.isNotEmpty()
+                if (rotationPostDismissCandidate) {
+                    rotationPostDismissBaseline = rects.map(::Rect)
+                }
+                val transientHostUi = SubviewLogMonitor.isToolbarMenuOpen() ||
+                    SubviewLogMonitor.isLassoMenuOpen() ||
+                    SubviewLogMonitor.isSubviewOpen() ||
+                    SubviewLogMonitor.isOwnedRotationDialogOpen()
+                val accepted = FloatingPenGuard.updateHostPenAreas(
+                    incoming = rects,
+                    commitBaseline = !transientHostUi &&
+                        (rotationEpoch == 0L || rotationWaitingForBaseline)
+                )
+                val guardActive = FloatingPenGuard.hasActiveRects()
+                if (BuildConfig.ENABLE_DEBUG) {
+                    Log.i(TAG, "host native pen snapshot count=${rects.size} rects=$rects " +
+                        "accepted=$accepted transientUi=$transientHostUi " +
+                        "writableReset=$isWritableReset guardActive=$guardActive " +
+                        "guard=${FloatingPenGuard.debugState()}")
+                }
+                if (rotationWaitingForBaseline && accepted && !isWritableReset &&
+                    !isFullScreenSnapshot && rects.isNotEmpty()) {
+                    rotationBaselineReady = false
+                    monitorHandler.removeCallbacks(rotationBaselineStableRunnable)
+                    monitorHandler.postDelayed(
+                        rotationBaselineStableRunnable,
+                        ROTATION_BASELINE_STABLE_MS
+                    )
+                    if (BuildConfig.ENABLE_DEBUG) {
+                        Log.i(TAG, "rotation host baseline candidate epoch=$rotationEpoch " +
+                            "stableDelayMs=$ROTATION_BASELINE_STABLE_MS rects=$rects")
+                    }
+                } else if (accepted && guardActive && !isWritableReset && rotationEpoch == 0L) {
+                    scheduleGuardReassert(
+                        reason = "host native pen snapshot",
+                        delayMs = HOST_SNAPSHOT_REASSERT_DELAY_MS
+                    )
+                } else if (accepted && isWritableReset && rotationEpoch == 0L) {
+                    monitorHandler.removeCallbacks(guardReassertRunnable)
+                    if (guardActive) {
+                        scheduleGuardReassert(
+                            reason = "writable reset fallback",
+                            delayMs = GUARD_REASSERT_DELAY_MS
+                        )
+                    }
+                    if (BuildConfig.ENABLE_DEBUG) {
+                        Log.i(TAG, "writable reset: cancelled stale task, awaiting next host snapshot " +
+                            "fallbackScheduled=$guardActive")
+                    }
+                }
+
+                if (accepted && rotationEpoch != 0L) {
+                    FloatingPenGuard.reassert("rotation full-screen hold")
+                }
+
+                if (insertImageFlowActive && !SubviewLogMonitor.isLassoMenuOpen()) {
+                    if (isWritableReset) {
+                        insertPlacementResetSeen = true
+                    } else if (insertPlacementResetSeen && accepted &&
+                        !isFullScreenSnapshot && rects.isNotEmpty()) {
+                        monitorHandler.post {
+                            if (!insertImageFlowActive) return@post
+                            if (BuildConfig.ENABLE_DEBUG) {
+                                Log.i(TAG, "insert placement settled (reset→baseline fallback)")
+                            }
+                            endInsertImageGuard()
+                            scheduleRestore(RESTORE_DELAY_NORMAL, "insert placement settled")
+                        }
+                    }
+                }
+            }
+
+            override fun onHostFullScreenDisableArea(generation: Int) {
+                if (!SubviewLogMonitor.isCurrentGeneration(generation)) return
+                if (insertImageFlowActive) {
+                    monitorHandler.removeCallbacks(insertGuardTimeoutRunnable)
+                    monitorHandler.postDelayed(insertGuardTimeoutRunnable, INSERT_PLACEMENT_TIMEOUT_MS)
+                }
+                if (rotationEpoch == 0L) scheduleGuardReassert("host pen table rebuild")
+                else FloatingPenGuard.reassert("rotation full-screen hold (host rebuild)")
+            }
+
+            override fun onOwnedRotationDialogChanged(
+                open: Boolean,
+                token: Long,
+                generation: Int
+            ) {
+                if (!SubviewLogMonitor.isCurrentGeneration(generation)) return
+                if (token != rotationEpoch || rotationEpoch == 0L) return
+                rotationDialogShown = open
+                if (!open) {
+                    rotationDialogArmed = false
+                    rotationDialogDismissed = true
+                }
+                monitorHandler.post {
+                    if (token != rotationEpoch || rotationEpoch == 0L) return@post
+                    if (open) {
+                        Log.i(TAG, "owned dialog shown epoch=$token")
+                    } else {
+                        Log.i(TAG, "owned dialog dismissed epoch=$token confirmed=$rotationUserConfirmed")
+                        if (rotationUserConfirmed) {
+                            consumeRotationBaselineCandidate("dialog dismissed")
+                        } else {
+                            monitorHandler.postDelayed(
+                                rotationDialogRetryRunnable,
+                                ROTATION_DIALOG_RETRY_MS
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        @Volatile
+        private var pendingGuardReassertReason = "unknown"
+
+        @Volatile
+        private var lassoWritableResetPending = false
+
+        @JvmStatic
+        private val lassoFullScreenReleaseRunnable = Runnable {
+            if (BuildConfig.ENABLE_DEBUG) {
+                Log.i(TAG, "host lasso menu full-screen release after grace")
+            }
+            FloatingPenGuard.setFullScreenActive(false, "host-lasso-menu")
+        }
+
+        @Volatile @JvmStatic
+        private var insertImageFlowActive = false
+
+        @Volatile @JvmStatic
+        private var insertPlacementResetSeen = false
+
+        @JvmStatic
+        private val insertGuardTimeoutRunnable = Runnable {
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "insert-image guard timeout release")
+            FloatingPenGuard.setFullScreenActive(false, "insert-image")
+            if (insertImageFlowActive) {
+                insertImageFlowActive = false
+                scheduleRestore(RESTORE_DELAY_NORMAL, "insert-image timeout")
+            }
+        }
+
+        @JvmStatic
+        internal fun beginInsertImageGuard() {
+            FloatingPenGuard.setFullScreenActive(true, "insert-image")
+            insertImageFlowActive = true
+            insertPlacementResetSeen = false
+            monitorHandler.removeCallbacks(insertGuardTimeoutRunnable)
+            monitorHandler.postDelayed(insertGuardTimeoutRunnable, INSERT_GUARD_TIMEOUT_MS)
+        }
+
+        @JvmStatic
+        private fun endInsertImageGuard() {
+            if (!insertImageFlowActive) return
+            insertImageFlowActive = false
+            insertPlacementResetSeen = false
+            monitorHandler.removeCallbacks(insertGuardTimeoutRunnable)
+            FloatingPenGuard.setFullScreenActive(false, "insert-image")
+        }
+
+        @JvmStatic
+        private fun scheduleGuardReassert(
+            reason: String,
+            allowEmptyAtSchedule: Boolean = false,
+            delayMs: Long = GUARD_REASSERT_DELAY_MS
+        ) {
+            val active = FloatingPenGuard.hasActiveRects()
+            if (!active && !allowEmptyAtSchedule) {
+                if (BuildConfig.ENABLE_DEBUG) {
+                    Log.i(TAG, "guard reassert not scheduled: no active rects reason=$reason " +
+                        "guard=${FloatingPenGuard.debugState()}")
+                }
+                return
+            }
+            pendingGuardReassertReason = reason
+            monitorHandler.removeCallbacks(guardReassertRunnable)
+            monitorHandler.postDelayed(guardReassertRunnable, delayMs)
+            if (BuildConfig.ENABLE_DEBUG) {
+                Log.i(TAG, "guard reassert scheduled reason=$reason active=$active " +
+                    "allowEmpty=$allowEmptyAtSchedule delayMs=$delayMs " +
+                    "guard=${FloatingPenGuard.debugState()}")
+            }
+        }
+
+        @JvmStatic
+        private val guardReassertRunnable = Runnable {
+            val reason = pendingGuardReassertReason
+            val active = FloatingPenGuard.hasActiveRects()
+            if (BuildConfig.ENABLE_DEBUG) {
+                Log.i(TAG, "guard reassert fired reason=$reason active=$active " +
+                    "guard=${FloatingPenGuard.debugState()}")
+            }
+            FloatingPenGuard.reassert(reason)
+        }
+
+        @JvmStatic
+        private val guardReassertFollowupRunnable = Runnable {
+            if (BuildConfig.ENABLE_DEBUG) {
+                Log.i(TAG, "guard reassert followup fired guard=${FloatingPenGuard.debugState()}")
+            }
+            FloatingPenGuard.reassert("foreground change followup")
+        }
+
+        @JvmStatic
+        private fun scheduleForegroundGuardReassert(fgKey: String) {
+            if (!FloatingPenGuard.hasActiveRects()) return
+            scheduleGuardReassert(
+                reason = "foreground changed: $fgKey",
+                delayMs = HOST_SNAPSHOT_REASSERT_DELAY_MS
+            )
+            monitorHandler.removeCallbacks(guardReassertFollowupRunnable)
+            monitorHandler.postDelayed(guardReassertFollowupRunnable, FOREGROUND_REASSERT_FOLLOWUP_MS)
+        }
+
+        @JvmStatic
+        fun onNoteSubviewChanged(open: Boolean, generation: Int) {
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "onNoteSubviewChanged: open=$open gen=$generation")
+            if (!SubviewLogMonitor.isCurrentGeneration(generation)) return
+            val inst = currentInstance ?: return
+            val applyState = Runnable {
+                if (!SubviewLogMonitor.isCurrentGeneration(generation) ||
+                    SubviewLogMonitor.isSubviewOpen() != open) return@Runnable
+                if (open) {
+                    markToolbarForRestore()
+                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "note subview opened, hiding overlays (toolbarRestorePending=$toolbarRestorePending)")
+                    SubviewLogMonitor.closeLassoMenuFromFallback("subview opened")
+                    FloatingPenGuard.setFullScreenActive(true, "note-subview")
+                    if (rootView != null) inst.removeAll()
+                    inst.suspendAllNativePanels()
+                    FloatingBubbleModule.hideStatic()
+                    AiBubbleModule.hideStatic()
+                    PaletteBubbleModule.hideStatic()
+                    ScreenshotBubble.hideForSettings()
+                    StickyNotes.hideTemp()
+                } else {
+                    FloatingPenGuard.setFullScreenActive(false, "note-subview")
+
+                    if (!isPluginHostWindowShowing && ScreenshotBubble.hiddenBySettings) {
+                        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "note subviews closed, restoring ScreenshotBubble independently")
+                        ScreenshotBubble.reshowIfHiddenBySettings()
+                    }
+                    if (!isPluginHostWindowShowing) StickyNotes.reshowIfTemp()
+
+                    scheduleRestore(RESTORE_DELAY_NORMAL, "note subview closed")
+                    scheduleGuardReassert(
+                        reason = "note subview restored",
+                        allowEmptyAtSchedule = true
+                    )
+                }
+            }
+            if (open) monitorHandler.post(applyState)
+            else monitorHandler.postDelayed(applyState, RESTORE_DELAY_NORMAL)
+        }
+
+        @JvmStatic
+        private fun handleToolbarMenuChanged(open: Boolean, pluginListMenu: Boolean, generation: Int) {
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "handleToolbarMenuChanged: open=$open pluginList=$pluginListMenu gen=$generation isCurrent=${SubviewLogMonitor.isCurrentGeneration(generation)}")
+            if (!SubviewLogMonitor.isCurrentGeneration(generation)) return
+            if (open) {
+                monitorHandler.post {
+                    if (!SubviewLogMonitor.isCurrentGeneration(generation) ||
+                        !SubviewLogMonitor.isToolbarMenuOpen()) {
+                        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "toolbar menu open: state stale, skip")
+                        return@post
+                    }
+                    val inst = currentInstance ?: return@post
+                    val toolbarWasRunning = rootView != null || toolbarRestorePending
+                    if (pluginListMenu && toolbarWasRunning && hostButtonChannelBroken) {
+                        terminateAfterPluginMenuClose = true
+                        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "plugin list menu open: arm Inkling termination on close (button channel broken)")
+                    }
+                    markToolbarForRestore()
+                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "toolbar menu open: hiding overlays toolbarRestorePending=$toolbarRestorePending")
+                    FloatingPenGuard.setFullScreenActive(true, "host-toolbar-menu")
+                    if (rootView != null) inst.removeAll()
+                    FloatingBubbleModule.hideStatic()
+                    AiBubbleModule.hideStatic()
+                    PaletteBubbleModule.hideStatic()
+                }
+            } else {
+                monitorHandler.postDelayed({
+                    if (!SubviewLogMonitor.isCurrentGeneration(generation)) {
+                        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "toolbar menu close: generation stale, skip")
+                        return@postDelayed
+                    }
+                    if (SubviewLogMonitor.isToolbarMenuOpen()) {
+                        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "toolbar menu close: still open (SubviewLogMonitor), skip restore")
+                        return@postDelayed
+                    }
+                    val inst = currentInstance ?: return@postDelayed
+                    if (terminateAfterPluginMenuClose) {
+                        terminateAfterPluginMenuClose = false
+                        toolbarRestorePending = false
+                        cancelScheduledRestore()
+                        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "plugin list menu close: terminating Inkling")
+                        FloatingPenGuard.releaseFullScreenAfterHostBaseline("host-toolbar-menu")
+                        inst.destroyAll()
+                        return@postDelayed
+                    }
+                    if (SubviewLogMonitor.isSubviewOpen()) {
+                        FloatingPenGuard.setFullScreenActive(false, "host-toolbar-menu")
+                    } else {
+                        FloatingPenGuard.releaseFullScreenAfterHostBaseline("host-toolbar-menu")
+                    }
+                    scheduleRestore(RESTORE_DELAY_SHORT, "toolbar menu closed")
+                }, RESTORE_DELAY_LONG)
+            }
+        }
+
+        @JvmStatic
+        private fun onNativePanelActiveEdge(anyShowing: Boolean) {
+            val inst = currentInstance ?: return
+            if (anyShowing) {
+                FloatingBubbleModule.hideStatic()
+                AiBubbleModule.hideStatic()
+                PaletteBubbleModule.hideStatic()
+            } else {
+                monitorHandler.postDelayed({
+                    if (ToolRegistry.anyPanelShowing()) return@postDelayed
+                    evaluateRestore("native panel closed")
+                }, RESTORE_DELAY_NORMAL)
+            }
+        }
+
+        @JvmStatic
+        internal fun anyNativeOverlayOwnsScreen(): Boolean =
+            ToolRegistry.anyPanelShowing() || penLassoOverlay != null
+
+        private val configFallbackRunnable = Runnable {
+            val inst = currentInstance ?: return@Runnable
+            if (isSelfInitiatedHostShow() || pendingScreen.isNotEmpty() ||
+                SendPanel.currentInstance?.isShowing == true) {
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG,
+                    "configFallback: plugin-purpose session active (pendingScreen=$pendingScreen), skip")
+                return@Runnable
+            }
+            val lastShowType = readLastShowType(inst.reactApplicationContext)
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "configFallback: lastShowType=$lastShowType")
+            if (lastShowType != 1) return@Runnable
+            if (ConfigPanel.currentInstance?.isShowing == true) {
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "configFallback: ConfigPanel already showing, keep PluginHost session open")
+                return@Runnable
+            }
+            if (!BuildConfig.ENABLE_DEBUG) return@Runnable
+            Log.i(TAG, "configFallback: lastShowType=1 → opening ConfigPanel from native fallback")
+            inst.collapsePluginHostContainerForNativePanel()
+            inst.removeAll()
+            inst.emitEvent("onNativePanelOpen", Arguments.createMap().apply { putString("panel", "config") })
+            ConfigPanel.getInstance(inst.reactApplicationContext, inst).show()
+        }
+
+        @JvmStatic
+        private fun readLastShowType(ctx: ReactApplicationContext): Int {
+            return try {
+                val pm = ctx.catalystInstance?.getNativeModule("NativePluginManager") ?: return -1
+                val paField = findDeclaredFieldStatic(pm.javaClass, "pluginApp") ?: return -1
+                paField.isAccessible = true
+                val pa = paField.get(pm) ?: return -1
+                val stField = findDeclaredFieldStatic(pa.javaClass, "lastShowType") ?: return -1
+                stField.isAccessible = true
+                (stField.get(pa) as? Number)?.toInt() ?: -1
+            } catch (_: Exception) { -1 }
+        }
+
+        @JvmStatic
+        private fun findDeclaredFieldStatic(cls: Class<*>, name: String): java.lang.reflect.Field? {
+            var c: Class<*>? = cls
+            while (c != null) {
+                c.declaredFields.firstOrNull { it.name == name }?.let { return it }
+                c = c.superclass
+            }
+            return null
+        }
+
+        @JvmStatic
+        fun onPluginHostStateChanged(showing: Boolean) {
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "onPluginHostStateChanged: showing=$showing")
+            isPluginHostWindowShowing = showing
+
+            val inst = currentInstance ?: return
+            if (showing) {
+                val selfInitiated = isSelfInitiatedHostShow() || pendingScreen.isNotEmpty()
+                if (rootView != null) {
+                    markToolbarForRestore()
+                    monitorHandler.post {
+                        inst.removeAll()
+                        if (!selfInitiated) inst.suspendAllNativePanels()
+                        FloatingBubbleModule.hideStatic()
+                        AiBubbleModule.hideStatic()
+                        PaletteBubbleModule.hideStatic()
+                    }
+                }
+                monitorHandler.removeCallbacks(configFallbackRunnable)
+                if (!selfInitiated) {
+                    monitorHandler.postDelayed(configFallbackRunnable, 200)
+                } else if (BuildConfig.ENABLE_DEBUG) {
+                    Log.i(TAG, "onPluginHostStateChanged: self-initiated show (pendingScreen=$pendingScreen), skip panel suspend + config fallback")
+                }
+            } else {
+                monitorHandler.removeCallbacks(configFallbackRunnable)
+                scheduleRestore(RESTORE_DELAY_SHORT, "PluginHost hidden")
+            }
+        }
+
+        @JvmStatic
+        private val deniedPluginPermissions: MutableSet<String> =
+            java.util.Collections.synchronizedSet(mutableSetOf())
 
         private const val NOTE_PACKAGE = "com.ratta.supernote.note"
         private const val NOTE_INSIDE_PAGES_ACTIVITY = "com.ratta.supernote.note.view.NoteInsidePagesActivity"
         private const val PLUGIN_PACKAGE = "com.ratta.supernote.pluginhost"
         private const val DOC_PACKAGE = "com.supernote.document"
+        private const val WEREAD_PACKAGE = "com.tencent.weread.eink"
 
         private const val SETTINGS_PACKAGE = "com.ratta.settings"
+        private const val SETTINGS_ACTIVITY = "com.ratta.settings.SettingsActivity"
+        private const val SETTINGS_PLUGIN_DETAIL_ACTION = "com.ratta.settings.application.PluginDetailFragment"
+        private const val PLUGIN_ID = "Inkling"
         private const val MONITOR_INTERVAL_MS = 800L
+
+        private const val RESTORE_DELAY_SHORT = 150L
+        private const val RESTORE_DELAY_NORMAL = 350L
+        private const val RESTORE_DELAY_LONG = 700L
+
+        private const val GUARD_REASSERT_DELAY_MS = 600L
+        private const val HOST_SNAPSHOT_REASSERT_DELAY_MS = 120L
+        private const val FOREGROUND_REASSERT_FOLLOWUP_MS = 1000L
+        private const val LASSO_RELEASE_GRACE_MS = 300L
+        private const val INSERT_GUARD_TIMEOUT_MS = 2500L
+        private const val INSERT_PLACEMENT_TIMEOUT_MS = 30_000L
+        private const val ROTATION_DISPLAY_SETTLE_MS = 250L
+        private const val ROTATION_BASELINE_STABLE_MS = 180L
+        private const val ROTATION_DIALOG_RETRY_MS = 800L
 
         @Volatile @JvmStatic
         private var titleClipFilled: BooleanArray = BooleanArray(6) { false }
@@ -163,13 +739,71 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         private var insertNextChainActive = false
 
         @Volatile @JvmStatic
+        private var docScreenshotRoutePending = false
+
+        @Volatile @JvmStatic
+        private var stitchCommitPending = false
+
+        @Volatile @JvmStatic
+        private var screenshotCapturePending = false
+
+        @Volatile @JvmStatic
+        private var knownStitchSessionActive = false
+
+        @Volatile @JvmStatic
         private var penLassoOverlay: PenLassoOverlay? = null
 
         @Volatile @JvmStatic
-        private var strokeEraserOverlay: StrokeEraserOverlay? = null
-
+        private var rotationEpoch = 0L
         @Volatile @JvmStatic
-        private var isPenLocked: Boolean = false
+        private var rotationStartForegroundKey: String? = null
+        @Volatile @JvmStatic
+        private var rotationDialogArmed = false
+        @Volatile @JvmStatic
+        private var rotationDialogShown = false
+        @Volatile @JvmStatic
+        private var rotationUserConfirmed = false
+        @Volatile @JvmStatic
+        private var rotationDialogDismissed = false
+        @Volatile @JvmStatic
+        private var rotationViewsReady = false
+        @Volatile @JvmStatic
+        private var rotationBaselineReady = false
+        @Volatile @JvmStatic
+        private var rotationPostDismissBaseline: List<Rect> = emptyList()
+
+        @JvmStatic
+        private val rotationDisplaySettledRunnable = Runnable {
+            currentInstance?.onRotationDisplaySettled(rotationEpoch)
+        }
+
+        @JvmStatic
+        private val rotationBaselineStableRunnable = Runnable {
+            currentInstance?.onRotationBaselineStable(rotationEpoch)
+        }
+
+        @JvmStatic
+        private fun consumeRotationBaselineCandidate(reason: String) {
+            if (rotationEpoch == 0L || !rotationUserConfirmed || !rotationDialogDismissed) return
+            val cached = rotationPostDismissBaseline
+            if (cached.isEmpty()) {
+                Log.i(TAG, "rotation baseline candidate empty reason=$reason epoch=$rotationEpoch")
+                return
+            }
+            val accepted = FloatingPenGuard.updateHostPenAreas(cached, commitBaseline = true)
+            if (accepted) {
+                rotationBaselineReady = false
+                monitorHandler.removeCallbacks(rotationBaselineStableRunnable)
+                monitorHandler.postDelayed(rotationBaselineStableRunnable, ROTATION_BASELINE_STABLE_MS)
+                Log.i(TAG, "rotation cached baseline consumed reason=$reason " +
+                    "epoch=$rotationEpoch rects=$cached")
+            }
+        }
+
+        @JvmStatic
+        private val rotationDialogRetryRunnable = Runnable {
+            currentInstance?.showRotationDialogWhenReady(rotationEpoch)
+        }
 
         @JvmStatic
         private val monitorHandler = Handler(Looper.getMainLooper())
@@ -186,35 +820,145 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 monitorHandler.postDelayed(this, MONITOR_INTERVAL_MS)
             }
         }
+
+        @JvmStatic
+        private fun scheduleRestore(delay: Long, reason: String) {
+            pendingRestoreRunnable?.let { monitorHandler.removeCallbacks(it) }
+            val r = Runnable { pendingRestoreRunnable = null; evaluateRestore(reason) }
+            pendingRestoreRunnable = r
+            monitorHandler.postDelayed(r, delay)
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "scheduleRestore: delay=${delay}ms reason=$reason")
+        }
+
+        @JvmStatic
+        private fun cancelScheduledRestore() {
+            pendingRestoreRunnable?.let { monitorHandler.removeCallbacks(it) }
+            pendingRestoreRunnable = null
+        }
+
+        @JvmStatic
+        private fun evaluateRestore(reason: String) {
+            val inst = currentInstance ?: return
+
+            if (!isInNoteApp) {
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "evaluateRestore[$reason]: blocked, not in note")
+                return
+            }
+            if (SubviewLogMonitor.isSubviewOpen()) {
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "evaluateRestore[$reason]: blocked, subview open")
+                return
+            }
+            if (SubviewLogMonitor.isToolbarMenuOpen()) {
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "evaluateRestore[$reason]: blocked, toolbar menu open")
+                return
+            }
+            if (isPluginHostWindowShowing) {
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "evaluateRestore[$reason]: blocked, PluginHost showing")
+                return
+            }
+            if (docScreenshotRoutePending) {
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "evaluateRestore[$reason]: blocked, doc screenshot route pending")
+                return
+            }
+            if (insertImageFlowActive) {
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "evaluateRestore[$reason]: blocked, insert-image in flight")
+                return
+            }
+            if (SubviewLogMonitor.isLassoMenuOpen()) {
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "evaluateRestore[$reason]: blocked, lasso menu open")
+                return
+            }
+
+            inst.resumeAllNativePanels()
+            val anyPanelOpen = anyNativeOverlayOwnsScreen()
+
+            if (!anyPanelOpen) {
+                if (toolbarRestorePending && rootView == null && tools.isNotEmpty()) {
+                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "evaluateRestore[$reason]: restoring toolbar (collapsed=$collapsed)")
+                    inst.restoreToolbarWindow()
+                }
+                toolbarRestorePending = false
+            }
+
+            if (!anyPanelOpen) {
+                val ctx = inst.reactApplicationContext
+                FloatingBubbleModule.reshowLast(ctx)
+                AiBubbleModule.reshowLast(ctx)
+                PaletteBubbleModule.reshowLast(ctx)
+                FloatingPenGuard.endPark("restore evaluated[$reason]")
+            }
+
+            if (!isPluginHostWindowShowing) StickyNotes.reshowIfTemp()
+
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "evaluateRestore[$reason]: done anyPanel=$anyPanelOpen")
+        }
+
+        @JvmStatic
+        private fun markToolbarForRestore(parkGuards: Boolean = true) {
+            if (parkGuards) FloatingPenGuard.beginPark("hide for restore")
+            toolbarRestorePending = toolbarRestorePending || rootView != null
+        }
     }
 
     init {
         currentInstance = this
+        // Settings can reopen configuration while the RN runtime is mounted but
+        // paused. Start the in-process PluginContainer visibility hook with the
+        // native module itself so that recovery does not depend on the toolbar or
+        // a bubble having been shown earlier.
+        if (windowStateMonitor == null) {
+            windowStateMonitor = WindowStateMonitor(reactApplicationContext)
+        }
+        windowStateMonitor?.start()
+        ToolRegistry.setPanelActiveEdgeListener { anyShowing -> onNativePanelActiveEdge(anyShowing) }
+        knownStitchSessionActive = reactApplicationContext
+            .getSharedPreferences(SCREENSHOT_STATE_PREFS, Context.MODE_PRIVATE)
+            .getBoolean(STITCH_SESSION_ACTIVE_KEY, knownStitchSessionActive)
         if (!configCallbackRegistered) {
             configCallbackRegistered = true
             reactApplicationContext.applicationContext.registerComponentCallbacks(
                 object : android.content.ComponentCallbacks2 {
                     override fun onConfigurationChanged(newConfig: Configuration) {
-                        Handler(Looper.getMainLooper()).post { handleOrientationChange() }
+                        Handler(Looper.getMainLooper()).post {
+                            currentInstance?.handleOrientationChange("configuration")
+                        }
                     }
                     override fun onLowMemory() {}
                     override fun onTrimMemory(level: Int) {}
                 }
             )
         }
-    }
-
-    override fun initialize() {
-        super.initialize()
-        try {
-            ToolRegistry.init(this, reactApplicationContext)
-        } catch (e: Exception) {
-            if (BuildConfig.ENABLE_DEBUG) android.util.Log.e(TAG, "ToolRegistry.init failed: ${e.message}", e)
+        if (!displayListenerRegistered) {
+            try {
+                val displayManager = reactApplicationContext.applicationContext
+                    .getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+                displayManager.registerDisplayListener(
+                    object : DisplayManager.DisplayListener {
+                        override fun onDisplayAdded(displayId: Int) {}
+                        override fun onDisplayRemoved(displayId: Int) {}
+                        override fun onDisplayChanged(displayId: Int) {
+                            if (displayId == android.view.Display.DEFAULT_DISPLAY) {
+                                Handler(Looper.getMainLooper()).post {
+                                    currentInstance?.handleOrientationChange("display-listener")
+                                }
+                            }
+                        }
+                    },
+                    Handler(Looper.getMainLooper())
+                )
+                displayListenerRegistered = true
+            } catch (e: Exception) {
+                Log.w(TAG, "display listener registration failed: ${e.message}")
+            }
+        }
+        Handler(Looper.getMainLooper()).post {
+            if (currentInstance === this) handleOrientationChange("module-init")
         }
     }
 
     override fun invalidate() {
         if (currentInstance === this) {
+            cancelRotationSync("module invalidated")
             currentInstance = null
             foregroundMonitorRunning = false
             monitorHandler.removeCallbacks(staticMonitorRunnable)
@@ -233,7 +977,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     }
 
     private val BTN_SIZE_DP = 54
-    private val BTN_GAP_DP = 4
+    private val BTN_GAP_DP = 2
     private val PANEL_PAD_DP = 8
     private val BORDER_WIDTH = 2
     private val TITLE_ROW_H_DP = 38
@@ -251,42 +995,38 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     private val SIDE_INDICATOR_DP = 4
     private val HANDLE_WIDTH_DP = 4
     private val COLLAPSED_WIDTH_DP = 7
+    // Touch window is wider than the visible stripe: a 7dp target at the very
+    // screen edge was too hard to hit (low expand trigger rate).
+    private val COLLAPSED_HIT_WIDTH_DP = 22
     private val COLLAPSED_HEIGHT_DP = 80
 
     private val SNAP_THRESHOLD = 40
-    private val EDGE_COLLAPSE_THRESHOLD = 60
+    private val EDGE_COLLAPSE_THRESHOLD = 20
     private val LONG_PRESS_MS = 600L
 
     data class ToolItem(
         val id: String,
-        val name: String,
+        val storedName: String,
         val icon: String,
         val action: String,
-        val latches: Boolean = false
-    )
+        val latches: Boolean = false,
+        val nameKey: String = ""
+    ) {
+        val name: String
+            get() {
+                val key = nameKey.ifEmpty { defaultToolNameKey(id) }
+                if (key.isNotEmpty()) {
+                    val translated = NativeLocale.t(key)
+                    if (translated != key) return translated
+                }
+                return storedName
+            }
+    }
 
     private val CLIP_ICON_DP = 32
+    private val CLIP_RADIUS_DP = 3
     private val LAYER_BTN_DP = 20
     private var clipIconViews: Array<TextView?> = arrayOfNulls(6)
-
-    @ReactMethod
-    fun show(toolsJson: String) {
-        pendingShow = true
-        handler.post {
-            try {
-                loadOrientationFromPrefs()
-                parseTools(toolsJson)
-                isPenLocked = false
-                collapsed = false
-                removeAll()
-                createExpandedToolbar()
-
-                stopForegroundMonitor()
-                startForegroundMonitor()
-            } catch (e: Exception) { if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "show: ${e.message}", e) }
-            pendingShow = false
-        }
-    }
 
     @ReactMethod
     fun setOrientation(value: String) {
@@ -344,18 +1084,123 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun showCurrent() {
+    fun toggleFromPluginButton() {
         handler.post {
-            try {
-                ensureToolsLoaded()
-                isPenLocked = false
-                collapsed = false
-                removeAll()
-                createExpandedToolbar()
-                stopForegroundMonitor()
-                startForegroundMonitor()
-            } catch (e: Exception) { if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "showCurrent: ${e.message}", e) }
+            val active = rootView != null || toolbarRestorePending
+            Log.i(TAG, "toggleFromPluginButton active=$active root=${rootView != null} toolbarRestorePending=$toolbarRestorePending")
+            if (active) {
+                toolbarRestorePending = false
+                cancelScheduledRestore()
+                FloatingPenGuard.setFullScreenActive(false, "host-toolbar-menu")
+                destroyAll()
+                closeHostPluginView()
+            } else {
+                showToolbarNow()
+            }
         }
+    }
+
+    @ReactMethod
+    fun inspectAndFlushHostEntry(promise: Promise) {
+        handler.post {
+            var result = "none"
+            try {
+                val pm = reactApplicationContext.catalystInstance
+                    ?.getNativeModule("NativePluginManager")
+                if (pm == null) {
+                    Log.i(TAG, "hostdiag: NativePluginManager module=null")
+                    promise.resolve(result); return@post
+                }
+                val pa = findDeclaredField(pm.javaClass, "pluginApp")
+                    ?.apply { isAccessible = true }?.get(pm)
+                if (pa == null) {
+                    Log.i(TAG, "hostdiag: pluginApp=null")
+                    promise.resolve(result); return@post
+                }
+                fun readField(name: String): Any? = try {
+                    findDeclaredField(pa.javaClass, name)
+                        ?.apply { isAccessible = true }?.get(pa)
+                } catch (_: Exception) { null }
+                val state = readField("state")
+                val stateName = (state as? Enum<*>)?.name ?: state?.toString()
+                val cache = readField("pluginEventCacheList") as? List<*>
+                val eventNames = cache?.map { it?.javaClass?.simpleName ?: "null" } ?: emptyList()
+                val moduleRef = readField("mPluginModule")
+                val lastShowType = (readField("lastShowType") as? Number)?.toInt()
+                Log.i(TAG, "hostdiag: state=$stateName cache=${cache?.size} [${eventNames.joinToString(",")}] pluginModule=${moduleRef != null} lastShowType=$lastShowType")
+
+                fun eventButtonId(event: Any?): Int? {
+                    if (event == null || !event.javaClass.simpleName.contains("PluginButtonEvent")) return null
+                    return try {
+                        val button = findDeclaredField(event.javaClass, "button")
+                            ?.apply { isAccessible = true }?.get(event) ?: return null
+                        (button.javaClass.methods.firstOrNull {
+                            it.name == "getId" && it.parameterCount == 0
+                        }?.invoke(button) as? Number)?.toInt()
+                    } catch (_: Exception) { null }
+                }
+
+                val hasButtonEvent = eventNames.any { it.contains("PluginButtonEvent") }
+                val hasConfigEvent = eventNames.any { it.contains("ConfigButtonPressEvent") }
+                val hasLocalSendEvent = cache?.any { eventButtonId(it) == 200 } == true
+                if (stateName == "initialized" && (hasButtonEvent || hasConfigEvent)) {
+                    Log.i(TAG, "hostdiag: state stuck at initialized, flushing entry events via PluginApp.onMounted()")
+                    try {
+                        pa.javaClass.getMethod("onMounted").invoke(pa)
+                        result = when {
+                            hasConfigEvent -> "config"
+                            hasLocalSendEvent -> "localsend"
+                            else -> "flushed"
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "hostdiag: onMounted invoke failed: ${e.message}")
+                    }
+                } else if (lastShowType == 1) {
+                    val pluginViewVisible = (readField("pluginView") as? View)?.visibility == View.VISIBLE
+                    if (pluginViewVisible && !isSelfInitiatedHostShow()) {
+                        result = "config"
+                    } else if (BuildConfig.ENABLE_DEBUG) {
+                        Log.i(TAG, "hostdiag: stale lastShowType=1 ignored (visible=$pluginViewVisible, selfShow=${isSelfInitiatedHostShow()})")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "hostdiag: error: ${e.message}")
+            }
+            promise.resolve(result)
+        }
+    }
+
+    private fun findDeclaredField(cls: Class<*>, name: String): java.lang.reflect.Field? =
+        findDeclaredFieldStatic(cls, name)
+
+    @ReactMethod
+    fun reportHostButtonChannel(working: Boolean) {
+        hostButtonChannelBroken = !working
+        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "host button channel report working=$working")
+    }
+
+    @ReactMethod
+    fun reportHostButtonRaw(payload: String) {
+        Log.i(TAG, "host button raw: $payload")
+    }
+
+    @ReactMethod
+    fun showCurrent() {
+        handler.post { showToolbarNow() }
+    }
+
+    private fun showToolbarNow() {
+        Log.i(TAG, "showToolbarNow root=${rootView != null} foregroundMonitor=$foregroundMonitorRunning")
+        try {
+            ensureToolsLoaded()
+            collapsed = false
+            removeAll()
+            if (!foregroundMonitorRunning) startForegroundMonitor()
+            createExpandedToolbar()
+        } catch (e: Exception) {
+            Log.e(TAG, "showToolbarNow: ${e.message}", e)
+        }
+        closeHostPluginView()
     }
     private fun ensureToolsLoaded() {
         if (tools.isNotEmpty()) return
@@ -364,7 +1209,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         if (json != null) {
             try {
                 val toolsArr = JSONObject(json).optJSONArray("tools")
-                if (toolsArr != null) parseTools(toolsArr.toString())
+                if (toolsArr != null) parseTools(toolsArr.toString(), persistIfChanged = true)
             } catch (e: Exception) { if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "ensureToolsLoaded parse prefs: ${e.message}") }
         }
         if (tools.isEmpty()) parseTools(DEFAULT_TOOLS_JSON)
@@ -397,13 +1242,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 removeAll()
                 createExpandedToolbar()
             }
-        }
-    }
-
-    @ReactMethod
-    fun setCollapsed(value: Boolean) {
-        handler.post {
-            if (value) switchToCollapsed() else switchToExpanded()
         }
     }
 
@@ -447,38 +1285,62 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    @ReactMethod
-    fun openPenLockView() {
-        handler.post {
-            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "openPenLockView: calling showPluginView(1)")
-            callShowPluginViewWithType(1)
-        }
+    // Single funnel for opening a native panel: every open path must announce
+    // itself to JS via onNativePanelOpen exactly once, so JS can suspend its UI.
+    private fun openNativePanel(name: String, show: () -> Unit) {
+        emitEvent("onNativePanelOpen", Arguments.createMap().apply { putString("panel", name) })
+        show()
     }
 
     @ReactMethod
     fun openPanel(screen: String) {
         handler.post {
             if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[LASSO-DBG/Kt] openPanel screen=$screen (prev pendingScreen=$pendingScreen)")
+
+            // Native fallback and JS plugin_config_event may request the config
+            // panel in the same opening cycle. Deduplicate before hideAllNativePanels:
+            // hiding first queues ConfigPanel.hide(), then the isShowing check skips
+            // the replacement and leaves Settings with a blank full-screen session.
+            if (screen == "config" || screen == "main") {
+                if (!BuildConfig.ENABLE_DEBUG) return@post
+                if (ConfigPanel.currentInstance?.isShowing == true) {
+                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "openPanel config: already showing, keep existing panel")
+                    return@post
+                }
+                hideAllNativePanels()
+                pendingScreen = ""
+                collapsePluginHostContainerForNativePanel()
+                removeAll()
+                openNativePanel("config") {
+                    ConfigPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show()
+                }
+                return@post
+            }
+
             hideAllNativePanels()
 
             if (screen == "nativeSendClipboard") {
                 pendingScreen = "nativeSendHelper"
                 removeAll()
-                emitEvent("onNativePanelOpen", Arguments.createMap().apply { putString("panel", "send") })
-                SendPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show(syncClipboard = true)
+                openNativePanel("send") {
+                    SendPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show(syncClipboard = true)
+                }
                 handler.postDelayed({
+                    if (pendingScreen != "nativeSendHelper") return@postDelayed
                     callShowPluginView()
                     emitOpenMainWithRetries("nativeSendHelper")
                 }, 150)
                 return@post
             }
 
-            if (screen == "config" || screen == "main") {
-                if (!BuildConfig.ENABLE_DEBUG) return@post
+            if (screen == "airRelay" || screen.startsWith("airRelayDetail:")) {
                 pendingScreen = ""
                 removeAll()
-                emitEvent("onNativePanelOpen", Arguments.createMap().apply { putString("panel", "config") })
-                ConfigPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show()
+                val detailId = screen.removePrefix("airRelayDetail:").takeIf { screen.startsWith("airRelayDetail:") }
+                openNativePanel("airRelay") {
+                    val panel = RelayInboxPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule)
+                    if (detailId == null) panel.showList() else panel.showDetail(detailId)
+                }
                 return@post
             }
 
@@ -515,6 +1377,11 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
+    fun setLocale(loc: String) {
+        NativeLocale.setLocale(loc)
+    }
+
+    @ReactMethod
     fun savePreset(num: Int, json: String, promise: Promise) {
         try {
             val prefs = reactApplicationContext.getSharedPreferences("quicktoolbar_presets", 0)
@@ -524,6 +1391,11 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "savePreset: ${e.message}")
             promise.resolve(false)
         }
+    }
+
+    @ReactMethod
+    fun paletteSnapshotsChanged() {
+        com.supernote_quicktoolbar.panels.PalettePanel.currentInstance?.reloadSnapshots()
     }
 
     @ReactMethod
@@ -565,12 +1437,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun checkOverlayPermission(promise: Promise) {
-        if (Build.VERSION.SDK_INT >= 23) promise.resolve(Settings.canDrawOverlays(reactApplicationContext))
-        else promise.resolve(true)
-    }
-
-    @ReactMethod
     fun deleteQueueFile(path: String, promise: Promise) {
         kotlin.concurrent.thread(isDaemon = true) {
             try {
@@ -593,208 +1459,295 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun launchActivity(pkg: String, cls: String, promise: Promise) {
+    fun openPluginSettings() {
         try {
-            val intent = android.content.Intent().apply {
-                component = android.content.ComponentName(pkg, cls)
-                addFlags(
-                    android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
-                    android.content.Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
-                )
+            val intent = Intent(SETTINGS_PLUGIN_DETAIL_ACTION).apply {
+                component = ComponentName(SETTINGS_PACKAGE, SETTINGS_ACTIVITY)
+                putExtra("pluginId", PLUGIN_ID)
+                putExtra("fromAPP", PLUGIN_ID)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             reactApplicationContext.startActivity(intent)
-            promise.resolve(true)
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "openPluginSettings: launched plugin detail for $PLUGIN_ID")
         } catch (e: Exception) {
-            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "launchActivity($pkg/$cls): ${e.message}", e)
-            promise.reject("LAUNCH_ERROR", e.message, e)
-        }
-    }
-
-    @ReactMethod
-    fun requestOverlayPermission() {
-        try {
-            val ctx = reactApplicationContext
-            ctx.startActivity(android.content.Intent(
-                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                android.net.Uri.parse("package:${ctx.packageName}")
-            ).apply { addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK) })
-        } catch (e: Exception) {
-            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "requestOverlayPermission: ${e.message}", e)
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "openPluginSettings plugin detail failed: ${e.message}", e)
             try {
-                reactApplicationContext.startActivity(android.content.Intent(
-                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                    android.net.Uri.parse("package:${reactApplicationContext.packageName}")
-                ).apply { addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK) })
-            } catch (_: Exception) {}
+                reactApplicationContext.startActivity(Intent(Settings.ACTION_SETTINGS).apply {
+                    setPackage(SETTINGS_PACKAGE)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                })
+            } catch (fallback: Exception) {
+                if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "openPluginSettings fallback failed: ${fallback.message}", fallback)
+            }
         }
     }
 
+    fun openPluginSettingsAfterFileReadDenied() {
+        if (shouldOpenPluginSettingsAfterDenied(PLUGIN_FILE_READ_PERMISSION)) openPluginSettings()
+    }
+
+    fun openPluginSettingsAfterFileWriteDenied() {
+        if (shouldOpenPluginSettingsAfterDenied(PLUGIN_FILE_WRITE_PERMISSION)) openPluginSettings()
+    }
+
     @ReactMethod
-    fun dumpNativePluginManagerMethods() {
+    fun openPluginSettingsAfterFileWritePermissionDenied() {
+        openPluginSettingsAfterFileWriteDenied()
+    }
+
+    private fun shouldOpenPluginSettingsAfterDenied(permission: String): Boolean {
+        return if (deniedPluginPermissions.contains(permission)) {
+            true
+        } else {
+            deniedPluginPermissions.add(permission)
+            false
+        }
+    }
+
+    private fun clearPluginPermissionDenied(permission: String) {
+        deniedPluginPermissions.remove(permission)
+    }
+
+    private fun parsePermissionStatus(value: Any?): Int {
+        return when (value) {
+            is Number -> value.toInt()
+            is String -> value.toIntOrNull() ?: 0
+            else -> 0
+        }
+    }
+
+    private fun isPluginPermissionGranted(status: Int): Boolean = status == 1 || status == 2
+
+    private fun permissionRequestDesc(permission: String): String = when (permission) {
+        PLUGIN_INTERNET_PERMISSION -> NativeLocale.t("perm_desc_internet")
+        PLUGIN_FILE_WRITE_PERMISSION -> NativeLocale.t("perm_desc_file_write")
+        PLUGIN_FILE_DELETE_PERMISSION -> NativeLocale.t("perm_desc_file_delete")
+        else -> NativeLocale.t("perm_desc_file_read")
+    }
+
+    private fun closeHostPluginView() {
         try {
-            val catalyst = reactApplicationContext.catalystInstance
-            val pm = catalyst.getNativeModule("NativePluginManager") ?: run {
-                if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "[DUMP] NativePluginManager not found"); return
-            }
-            val clazz = pm::class.java
-            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[DUMP] NativePluginManager class: ${clazz.name}")
-            clazz.declaredMethods.sortedBy { it.name }.forEach { m ->
-                val params = m.parameterTypes.joinToString(", ") { it.simpleName }
-                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[DUMP]   ${m.name}($params) -> ${m.returnType.simpleName}")
-            }
-            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[DUMP] --- inherited ---")
-            clazz.methods
-                .filter { it.declaringClass != Object::class.java }
-                .sortedBy { it.name }
-                .forEach { m ->
-                    val params = m.parameterTypes.joinToString(", ") { it.simpleName }
-                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[DUMP]   ${m.declaringClass.simpleName}.${m.name}($params)")
-                }
-            clazz.declaredFields.forEach { f ->
-                f.isAccessible = true
-                val v = try { f.get(pm) } catch (_: Exception) { "?" }
-                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[DUMP-FIELD] ${f.name}: ${f.type.simpleName} = ${v?.javaClass?.name ?: "null"}")
-            }
+            val pm = reactApplicationContext.catalystInstance
+                ?.getNativeModule("NativePluginManager") ?: return
+            val m = pm::class.java.methods.firstOrNull {
+                it.name == "closePluginView" && it.parameterCount == 1
+            } ?: return
+            m.invoke(pm, PromiseImpl(Callback { }, Callback { }))
         } catch (e: Exception) {
-            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "[DUMP] error: ${e.message}", e)
+            if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "closeHostPluginView: ${e.message}")
         }
     }
 
-    @ReactMethod
-    fun dumpPluginAppFields() {
-        try {
-            val catalyst = reactApplicationContext.catalystInstance
-            val pm = catalyst.getNativeModule("NativePluginManager") ?: run {
-                if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "[DUMP-PA] NativePluginManager not found"); return
-            }
-
-            val paField = pm::class.java.declaredFields.firstOrNull { it.name == "pluginApp" } ?: run {
-                if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "[DUMP-PA] pluginApp field not found"); return
-            }
-            paField.isAccessible = true
-            val pa = paField.get(pm) ?: run { if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "[DUMP-PA] pluginApp is null"); return }
-
-            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[DUMP-PA] pluginApp class: ${pa::class.java.name}")
-
-            pa::class.java.declaredMethods.sortedBy { it.name }.forEach { m ->
-                val params = m.parameterTypes.joinToString(", ") { it.simpleName }
-                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[DUMP-PA]   method: ${m.name}($params) -> ${m.returnType.simpleName}")
-            }
-            pa::class.java.methods
-                .filter { it.declaringClass != Object::class.java }
-                .sortedBy { it.name }
-                .forEach { m ->
-                    val params = m.parameterTypes.joinToString(", ") { it.simpleName }
-                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[DUMP-PA]   inherited: ${m.declaringClass.simpleName}.${m.name}($params)")
+    fun requestPluginPermission(
+        permission: String,
+        onResult: ((Boolean) -> Unit)? = null,
+        requestIfMissing: Boolean = true
+    ) {
+        handler.post {
+            try {
+                val pm = reactApplicationContext.catalystInstance.getNativeModule("NativePluginManager") ?: run {
+                    Log.w(TAG, "requestPluginPermission($permission): NativePluginManager not found")
+                    onResult?.invoke(false)
+                    return@post
                 }
-
-            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[DUMP-PA] --- fields ---")
-            pa::class.java.declaredFields.forEach { f ->
-                f.isAccessible = true
-                val v = try { f.get(pa) } catch (_: Exception) { null }
-                val typeName = v?.javaClass?.name ?: f.type.name
-                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[DUMP-PA]   field: ${f.name}: ${f.type.simpleName} = $typeName")
-
-                val interesting = listOf("hand", "write", "disable", "area", "draw", "paint", "spaint", "client", "presenter", "note")
-                if (v != null && interesting.any { kw ->
-                        f.name.lowercase().contains(kw) || typeName.lowercase().contains(kw)
-                    }) {
-                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[DUMP-PA]   >>> drilling into ${f.name} <<<")
-                    v::class.java.methods
-                        .filter { it.declaringClass != Object::class.java }
-                        .sortedBy { it.name }
-                        .forEach { m ->
-                            val params = m.parameterTypes.joinToString(", ") { it.simpleName }
-                            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[DUMP-PA]     ${v::class.java.simpleName}.${m.name}($params)")
+                val hasMethod = pm::class.java.methods.firstOrNull {
+                    it.name == "hasPermission" && it.parameterCount == 2 && it.parameterTypes[0] == String::class.java
+                } ?: run {
+                    Log.w(TAG, "requestPluginPermission($permission): hasPermission(String, Promise) not found")
+                    onResult?.invoke(false)
+                    return@post
+                }
+                val requestMethod = if (requestIfMissing) {
+                    pm::class.java.methods.firstOrNull {
+                        it.name == "requestPermission" && it.parameterCount == 3 && it.parameterTypes[0] == String::class.java
+                    } ?: pm::class.java.methods.firstOrNull {
+                        it.name == "requestPermission" && it.parameterCount == 2 && it.parameterTypes[0] == String::class.java
+                    } ?: run {
+                        Log.w(TAG, "requestPluginPermission($permission): requestPermission(String, [String,] Promise) not found")
+                        onResult?.invoke(false)
+                        return@post
+                    }
+                } else {
+                    null
+                }
+                val requestPromise = PromiseImpl(
+                    Callback { args ->
+                        val status = parsePermissionStatus(args.firstOrNull())
+                        val granted = isPluginPermissionGranted(status)
+                        if (granted) clearPluginPermissionDenied(permission)
+                        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "requestPluginPermission($permission) request resolved: status=$status granted=$granted")
+                        handler.post { onResult?.invoke(granted) }
+                    },
+                    Callback { args ->
+                        if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "requestPluginPermission($permission) rejected: ${args.joinToString()}")
+                        handler.post { onResult?.invoke(false) }
+                    }
+                )
+                fun doRequest() {
+                    if (requestMethod!!.parameterCount == 3) {
+                        requestMethod.invoke(pm, permission, permissionRequestDesc(permission), requestPromise)
+                    } else {
+                        requestMethod.invoke(pm, permission, requestPromise)
+                    }
+                }
+                val hasPromise = PromiseImpl(
+                    Callback { args ->
+                        val status = parsePermissionStatus(args.firstOrNull())
+                        val alreadyGranted = isPluginPermissionGranted(status)
+                        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "requestPluginPermission($permission) hasPermission resolved: status=$status alreadyGranted=$alreadyGranted")
+                        if (alreadyGranted) {
+                            clearPluginPermissionDenied(permission)
+                            handler.post { onResult?.invoke(true) }
+                        } else if (requestIfMissing) {
+                            doRequest()
+                        } else {
+                            handler.post { onResult?.invoke(false) }
                         }
+                    },
+                    Callback { args ->
+                        if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "requestPluginPermission($permission) hasPermission rejected: ${args.joinToString()}")
+                        if (requestIfMissing) {
+                            doRequest()
+                        } else {
+                            handler.post { onResult?.invoke(false) }
+                        }
+                    }
+                )
+                hasMethod.invoke(pm, permission, hasPromise)
+            } catch (e: Exception) {
+                if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "requestPluginPermission($permission): ${e.message}", e)
+                onResult?.invoke(false)
+            }
+        }
+    }
+
+    fun requestPluginFileReadPermission(onResult: ((Boolean) -> Unit)? = null) {
+        requestPluginPermission(PLUGIN_FILE_READ_PERMISSION, onResult)
+    }
+
+    fun requestPluginFileWritePermission(onResult: ((Boolean) -> Unit)? = null) {
+        requestPluginPermission(PLUGIN_FILE_WRITE_PERMISSION, onResult)
+    }
+
+    fun requestPluginFileDeletePermission(onResult: ((Boolean) -> Unit)? = null) {
+        requestPluginPermission(PLUGIN_FILE_DELETE_PERMISSION, onResult)
+    }
+
+    private fun checkPluginPermission(permission: String, onResult: ((Boolean) -> Unit)? = null) {
+        handler.post {
+            val storedStatus = readStoredPermissionStatus(permission)
+            if (storedStatus == 2) {
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "checkPluginPermission($permission): stored status=2 (always) → granted")
+                onResult?.invoke(true)
+                return@post
+            }
+            requestPluginPermission(permission, onResult, requestIfMissing = true)
+        }
+    }
+
+    private fun readStoredPermissionStatus(permission: String): Int {
+        return try {
+            val pm = reactApplicationContext.catalystInstance?.getNativeModule("NativePluginManager") ?: return -1
+            val pa = findDeclaredField(pm.javaClass, "pluginApp")
+                ?.apply { isAccessible = true }?.get(pm) ?: return -1
+            val perms = findDeclaredField(pa.javaClass, "usesPermissions")
+                ?.apply { isAccessible = true }?.get(pa) as? List<*> ?: return -1
+            for (p in perms) {
+                if (p == null) continue
+                val name = p.javaClass.methods.firstOrNull { it.name == "getName" && it.parameterCount == 0 }
+                    ?.invoke(p) as? String ?: continue
+                if (name == permission) {
+                    val status = p.javaClass.methods.firstOrNull { it.name == "getStatus" && it.parameterCount == 0 }
+                        ?.invoke(p) as? Number ?: return -1
+                    return status.toInt()
                 }
             }
-        } catch (e: Exception) {
-            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "[DUMP-PA] error: ${e.message}", e)
-        }
+            -1
+        } catch (_: Exception) { -1 }
     }
 
-    private fun isAnyNativePanelOpen(): Boolean =
-        ImagePanel.currentInstance != null ||
-        DocLinkPanel.currentInstance != null ||
-        DocScreenshotPanel.currentInstance != null ||
-        SendPanel.currentInstance != null
-
-    private fun callSetFullAuto(enable: Boolean) = withNativePluginManager("callSetFullAuto") { pm ->
-        val m = pm::class.java.methods.firstOrNull {
-            it.name == "setFullAuto" && it.parameterCount == 1 && it.parameterTypes[0] == Boolean::class.java
-        } ?: run {
-            if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "callSetFullAuto: setFullAuto method not found"); return@withNativePluginManager
-        }
-        m.invoke(pm, enable)
-        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "callSetFullAuto($enable) called")
-    }
-
-    @ReactMethod fun enablePenBlock() {
+    private fun showScreenshotMessage(key: String) {
         handler.post {
-            callSetFullAuto(true)
-            callPluginAppShowPluginView(1, "enablePenBlock")
+            android.widget.Toast.makeText(
+                reactApplicationContext,
+                NativeLocale.t(key),
+                android.widget.Toast.LENGTH_LONG
+            ).show()
         }
     }
-    @ReactMethod fun disablePenBlock() {
-        handler.post {
-            callPluginAppShowPluginView(0, "disablePenBlock")
-            callSetFullAuto(false)
-            if (isPenLocked) {
-                isPenLocked = false
-                if (!collapsed && toolContainer != null) rebuildButtons()
+
+    private fun requestScreenshotStoragePermissions(
+        action: String,
+        onGranted: () -> Unit,
+        onDenied: () -> Unit
+    ) {
+        requestPluginFileReadPermission { readGranted ->
+            if (!readGranted) {
+                if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "[CROP-DBG/Kt] $action denied: FILE:READ")
+                showScreenshotMessage("file_read_permission_needed")
+                openPluginSettingsAfterFileReadDenied()
+                onDenied()
+                return@requestPluginFileReadPermission
+            }
+            requestPluginFileWritePermission { writeGranted ->
+                if (!writeGranted) {
+                    if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "[CROP-DBG/Kt] $action denied: FILE:WRITE")
+                    showScreenshotMessage("file_write_permission_needed")
+                    openPluginSettingsAfterFileWriteDenied()
+                    onDenied()
+                    return@requestPluginFileWritePermission
+                }
+                onGranted()
             }
         }
     }
 
-    private fun callPluginAppShowPluginView(showType: Int, label: String) {
-        try {
-            val pm = reactApplicationContext.catalystInstance.getNativeModule("NativePluginManager") ?: run {
-                if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "$label: NativePluginManager not found"); return
-            }
-            val paField = pm::class.java.declaredFields.firstOrNull { it.name == "pluginApp" } ?: run {
-                if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "$label: pluginApp field not found"); return
-            }
-            paField.isAccessible = true
-            val pa = paField.get(pm) ?: run {
-                if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "$label: pluginApp is null"); return
-            }
-            val showM = pa::class.java.methods.firstOrNull {
-                it.name == "showPluginView" && it.parameterCount == 1 &&
-                (it.parameterTypes[0] == Int::class.javaPrimitiveType ||
-                 it.parameterTypes[0] == java.lang.Integer::class.java)
-            } ?: run {
-                if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "$label: PluginApp.showPluginView(int) not found"); return
-            }
-            showM.invoke(pa, showType)
-            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "$label: PluginApp.showPluginView($showType) called")
-        } catch (e: Exception) {
-            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "$label: ${e.message}", e)
-        }
+    fun requestPluginInternetPermission(onResult: ((Boolean) -> Unit)? = null) {
+        requestPluginPermission(PLUGIN_INTERNET_PERMISSION, onResult)
     }
 
     @ReactMethod
-    fun engagePenLock() {
-        handler.post { callPluginAppShowPluginView(1, "engagePenLock") }
+    fun checkFileReadPermission(promise: Promise) {
+        checkPluginPermission(PLUGIN_FILE_READ_PERMISSION) { granted -> promise.resolve(granted) }
     }
 
     @ReactMethod
-    fun releasePenLock() {
-        handler.post { callPluginAppShowPluginView(0, "releasePenLock") }
+    fun checkFileWritePermission(promise: Promise) {
+        checkPluginPermission(PLUGIN_FILE_WRITE_PERMISSION) { granted -> promise.resolve(granted) }
     }
 
-    @ReactMethod(isBlockingSynchronousMethod = true)
-    fun isPenLockedSync(): Boolean = isPenLocked
+    @ReactMethod
+    fun checkFileDeletePermission(promise: Promise) {
+        checkPluginPermission(PLUGIN_FILE_DELETE_PERMISSION) { granted -> promise.resolve(granted) }
+    }
 
     @ReactMethod
-    fun setPenLocked(locked: Boolean) {
-        handler.post {
-            isPenLocked = locked
-            if (!collapsed && toolContainer != null) rebuildButtons()
-        }
+    fun checkInternetPermission(promise: Promise) {
+        checkPluginPermission(PLUGIN_INTERNET_PERMISSION) { granted -> promise.resolve(granted) }
+    }
+
+    @ReactMethod
+    fun requestFileReadPermission(promise: Promise) {
+        requestPluginFileReadPermission { granted -> promise.resolve(granted) }
+    }
+
+    @ReactMethod
+    fun requestFileWritePermission(promise: Promise) {
+        requestPluginFileWritePermission { granted -> promise.resolve(granted) }
+    }
+
+    @ReactMethod
+    fun requestFileDeletePermission(promise: Promise) {
+        requestPluginFileDeletePermission { granted -> promise.resolve(granted) }
+    }
+
+    @ReactMethod
+    fun requestInternetPermission(promise: Promise) {
+        requestPluginInternetPermission { granted -> promise.resolve(granted) }
     }
 
     private fun callShowPluginView() = withNativePluginManager("callShowPluginView") { pm ->
+        selfShowPluginViewAt = android.os.SystemClock.elapsedRealtime()
         val allMethods = pm::class.java.methods.filter { it.name == "showPluginView" }
         if (allMethods.isEmpty()) return@withNativePluginManager
         val noArg = allMethods.firstOrNull { it.parameterCount == 0 }
@@ -803,21 +1756,38 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         if (singleArg != null) { singleArg.invoke(pm, PromiseImpl(null, null)); return@withNativePluginManager }
     }
 
-    private fun callShowPluginViewWithType(showType: Int) = withNativePluginManager("callShowPluginViewWithType") { pm ->
-        val intArgMethod = pm::class.java.methods.firstOrNull {
-            it.name == "showPluginView" && it.parameterCount == 1 &&
-            (it.parameterTypes[0] == Int::class.javaPrimitiveType || it.parameterTypes[0] == java.lang.Integer::class.java)
+    /**
+     * Keep PluginApp/clientUid alive for the Settings transaction, but remove the
+     * host's full-screen TYPE_PHONE shell from the input/display path so that the
+     * native ConfigPanel can be seen and touched. The next Settings press calls
+     * attachPluginContainer(1), which restores MATCH_PARENT before showing again.
+     */
+    private fun collapsePluginHostContainerForNativePanel() {
+        withNativePluginManager("collapsePluginHostContainerForNativePanel") { pm ->
+            try {
+                val pa = getHostPluginApp(pm) ?: return@withNativePluginManager
+                val pluginView = findDeclaredField(pa.javaClass, "pluginView")
+                    ?.apply { isAccessible = true }?.get(pa) as? View ?: return@withNativePluginManager
+                val lp = pluginView.layoutParams as? WindowManager.LayoutParams
+                    ?: return@withNativePluginManager
+                if (lp.width == 0 && lp.height == 0) return@withNativePluginManager
+                lp.width = 0
+                lp.height = 0
+                val wm = reactApplicationContext.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+                wm.updateViewLayout(pluginView, lp)
+                if (BuildConfig.ENABLE_DEBUG) {
+                    Log.i(TAG, "collapsed PluginHost container to 0x0 for native config panel")
+                }
+            } catch (e: Exception) {
+                if (BuildConfig.ENABLE_DEBUG) {
+                    Log.w(TAG, "collapse PluginHost container failed: ${e.message}")
+                }
+            }
         }
-        if (intArgMethod != null) {
-            intArgMethod.invoke(pm, showType)
-            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "callShowPluginViewWithType($showType) called")
-            return@withNativePluginManager
-        }
-        if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "callShowPluginViewWithType: int-arg variant not found, falling back to no-arg")
-        callShowPluginView()
     }
 
     private fun callClosePluginView() = withNativePluginManager("callClosePluginView") { pm ->
+        notifySettingsClientClosed(pm)
         for (name in arrayOf("closePluginView", "hidePluginView")) {
             val methods = pm::class.java.methods.filter { it.name == name }
             if (methods.isEmpty()) continue
@@ -827,6 +1797,75 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             if (singleArg != null) { singleArg.invoke(pm, PromiseImpl(null, null)); if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "$name(promise) called"); return@withNativePluginManager }
         }
         if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "callClosePluginView: no suitable method found")
+    }
+
+    private fun getHostPluginApp(pm: Any): Any? =
+        pm.javaClass.methods.firstOrNull {
+            it.name == "getPluginApp" && it.parameterCount == 0
+        }?.invoke(pm) ?: findDeclaredField(pm.javaClass, "pluginApp")
+            ?.apply { isAccessible = true }?.get(pm)
+
+    private fun getHostClientUid(pluginApp: Any): Int =
+        (pluginApp.javaClass.methods.firstOrNull {
+            it.name == "getClientUid" && it.parameterCount == 0
+        }?.invoke(pluginApp) as? Number)?.toInt() ?: -1
+
+    /**
+     * PluginCore normally reports state=0 from PluginContainer's visibility listener.
+     * The Settings config path can remove that container before the listener dispatches,
+     * leaving Settings stuck in its "plugin showing" state. Notify Settings explicitly
+     * while PluginApp still owns the client uid; ordinary NOTE/DOC closes keep using the
+     * host's normal visibility notification path.
+     */
+    private fun notifySettingsClientClosed(pm: Any) {
+        try {
+            val pa = getHostPluginApp(pm) ?: return
+            val clientUid = getHostClientUid(pa)
+            if (clientUid < 0) return
+
+            val loader = pa.javaClass.classLoader
+            val managerClass = loader.loadClass(
+                "com.ratta.supernote.pluginhost.manager.PluginManager"
+            )
+            val manager = managerClass.getMethod("getInstance").invoke(null)
+            val binder = managerClass.getMethod(
+                "getCurrentClientBinder",
+                Integer.TYPE
+            ).invoke(manager, clientUid) ?: return
+            val packageName = binder.javaClass.methods.firstOrNull {
+                it.name == "getServicePackageName" && it.parameterCount == 0
+            }?.invoke(binder) as? String
+            if (packageName != "com.ratta.settings") return
+
+            val serviceClass = loader.loadClass(
+                "com.ratta.supernote.pluginhost.services.PluginHostService"
+            )
+            val hostContext = findDeclaredField(serviceClass, "mContext")
+                ?.apply { isAccessible = true }?.get(null)
+            val service = when {
+                serviceClass.isInstance(hostContext) -> hostContext
+                hostContext is android.content.ContextWrapper -> hostContext.baseContext
+                else -> null
+            }
+            if (service == null || !serviceClass.isInstance(service)) {
+                if (BuildConfig.ENABLE_DEBUG) {
+                    Log.w(TAG, "settings close state notify skipped: PluginHostService unavailable")
+                }
+                return
+            }
+            serviceClass.getMethod(
+                "notifyClientPluginState",
+                Integer.TYPE,
+                Integer.TYPE
+            ).invoke(service, clientUid, 0)
+            if (BuildConfig.ENABLE_DEBUG) {
+                Log.i(TAG, "settings close state notified: uid=$clientUid state=0")
+            }
+        } catch (e: Exception) {
+            if (BuildConfig.ENABLE_DEBUG) {
+                Log.w(TAG, "settings close state notify failed: ${e.message}")
+            }
+        }
     }
 
     private val autoCollapseRunnable = Runnable { switchToCollapsed() }
@@ -841,9 +1880,9 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             ?: expandedRoot?.width?.takeIf { it > 0 }
             ?: return false
         refreshScreenDimensions()
-        val nearLeft = lp.x <= NEAR_EDGE_THRESHOLD
-        val nearRight = (screenWidth - (lp.x + vw)) <= NEAR_EDGE_THRESHOLD
-        return nearLeft || nearRight
+        val flushLeft = lp.x <= DOCK_FLUSH_TOLERANCE
+        val flushRight = (screenWidth - (lp.x + vw)) <= DOCK_FLUSH_TOLERANCE
+        return flushLeft || flushRight
     }
 
     private fun inferDockSideFromPosition() {
@@ -866,6 +1905,8 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     private fun switchToCollapsed() {
         if (collapsed && collapsedRoot != null) return
         cancelAutoCollapse()
+        val lp = layoutParams as? WindowManager.LayoutParams
+        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "switchToCollapsed: x=${lp?.x} y=${lp?.y} side=$dockSide screen=${screenWidth}x${screenHeight}")
         inferDockSideFromPosition()
         collapsed = true
         removeAll()
@@ -894,7 +1935,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         })
     }
 
-    internal fun refreshScreenDimensions() {
+    override fun refreshScreenDimensions() {
         try {
             val wm = reactApplicationContext.getSystemService(android.content.Context.WINDOW_SERVICE) as WindowManager
             if (Build.VERSION.SDK_INT >= 30) {
@@ -908,11 +1949,54 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         } catch (_: Exception) {}
     }
 
-    private fun handleOrientationChange() {
+    @Suppress("DEPRECATION")
+    private fun readDisplayRotation(): Int = try {
+        val wm = reactApplicationContext.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        wm.defaultDisplay.rotation
+    } catch (_: Exception) {
+        Surface.ROTATION_0
+    }
+
+    private fun handleOrientationChange(reason: String) {
         val oldW = screenWidth; val oldH = screenHeight
+        val oldRotation = lastDisplayRotation
         refreshScreenDimensions()
-        if (oldW == screenWidth && oldH == screenHeight) return
-        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "orientation changed: ${oldW}x${oldH} → ${screenWidth}x${screenHeight}")
+        val rotation = readDisplayRotation()
+        lastDisplayRotation = rotation
+        FloatingPenGuard.onDisplayChanged(screenWidth, screenHeight, rotation, reason)
+        if (oldW == screenWidth && oldH == screenHeight && oldRotation == rotation) return
+        if (BuildConfig.ENABLE_DEBUG) {
+            Log.i(TAG, "orientation changed reason=$reason ${oldW}x${oldH}@${oldRotation} " +
+                "→ ${screenWidth}x${screenHeight}@$rotation")
+        }
+
+        val foreground = foregroundActivity()
+        val supportsHandwriting = foreground?.let {
+            (it.packageName == NOTE_PACKAGE && it.activityName == NOTE_INSIDE_PAGES_ACTIVITY) ||
+                it.packageName == DOC_PACKAGE
+        } == true
+        val foregroundKey = foreground?.let { "${it.packageName}/${it.activityName}" }
+        if (oldRotation >= 0 && supportsHandwriting && foregroundKey != null &&
+            FloatingPenGuard.hasActiveRects()) {
+            rotationEpoch += 1L
+            rotationStartForegroundKey = foregroundKey
+            rotationUserConfirmed = false
+            rotationDialogDismissed = false
+            rotationViewsReady = false
+            rotationBaselineReady = false
+            rotationPostDismissBaseline = emptyList()
+            monitorHandler.removeCallbacks(rotationDisplaySettledRunnable)
+            monitorHandler.removeCallbacks(rotationBaselineStableRunnable)
+            monitorHandler.removeCallbacks(rotationDialogRetryRunnable)
+            if (rotationDialogArmed || rotationDialogShown) {
+                SubviewLogMonitor.retargetOwnedRotationDialog(rotationEpoch)
+            }
+            FloatingPenGuard.beginRotationSync(rotationEpoch, reason)
+            monitorHandler.postDelayed(rotationDisplaySettledRunnable, ROTATION_DISPLAY_SETTLE_MS)
+            Log.i(TAG, "rotation state DISPLAY_SETTLING epoch=$rotationEpoch foreground=$foregroundKey")
+        } else if (rotationEpoch != 0L) {
+            cancelRotationSync("orientation changed outside handwriting page")
+        }
 
         val hadPanelOpen = ToolRegistry.handleRotation()
 
@@ -920,14 +2004,14 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             restoreToolbar()
         }
 
-        val lp = layoutParams ?: return
-        if (collapsed && collapsedRoot != null) {
-            val w = collapsedRoot!!.width.takeIf { it > 0 } ?: dpToPx(COLLAPSED_WIDTH_DP)
+        val lp = layoutParams
+        if (lp != null && collapsed && collapsedRoot != null) {
+            val w = collapsedRoot!!.width.takeIf { it > 0 } ?: dpToPx(COLLAPSED_HIT_WIDTH_DP)
             val h = collapsedRoot!!.height.takeIf { it > 0 } ?: dpToPx(COLLAPSED_HEIGHT_DP)
             lp.x = if (dockSide == "left") 0 else screenWidth - w
             lp.y = lp.y.coerceIn(0, (screenHeight - h).coerceAtLeast(0))
             try { windowManager?.updateViewLayout(rootView, lp) } catch (_: Exception) {}
-        } else if (!collapsed && expandedRoot != null) {
+        } else if (lp != null && !collapsed && expandedRoot != null) {
             val vw = expandedRoot!!.measuredWidth.takeIf { it > 0 } ?: expandedRoot!!.width
             val vh = expandedRoot!!.measuredHeight.takeIf { it > 0 } ?: expandedRoot!!.height
             if (vw > 0 && vh > 0) {
@@ -942,19 +2026,118 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         PaletteBubbleModule.handleOrientationChange()
     }
 
+    private fun onRotationDisplaySettled(epoch: Long) {
+        if (epoch == 0L || epoch != rotationEpoch) return
+        val foreground = foregroundActivity()
+        val currentKey = foreground?.let { "${it.packageName}/${it.activityName}" }
+        if (currentKey != rotationStartForegroundKey) {
+            cancelRotationSync("foreground changed during display settle")
+            return
+        }
+        rotationViewsReady = FloatingPenGuard.refreshAllForRotation(epoch)
+        Log.i(TAG, "display settled epoch=$epoch viewsReady=$rotationViewsReady")
+        if (!rotationViewsReady) {
+            monitorHandler.postDelayed(rotationDisplaySettledRunnable, 80L)
+            return
+        }
+        showRotationDialogWhenReady(epoch)
+    }
+
+    private fun showRotationDialogWhenReady(epoch: Long) {
+        if (epoch == 0L || epoch != rotationEpoch || rotationDialogShown || rotationDialogArmed ||
+            rotationUserConfirmed) return
+        if (SubviewLogMonitor.isSubviewOpen() || SubviewLogMonitor.isToolbarMenuOpen() ||
+            SubviewLogMonitor.isLassoMenuOpen() || ToolRegistry.anyPanelShowing() ||
+            FloatingPenGuard.hasBlockingOwnerForRotation()) {
+            monitorHandler.postDelayed(rotationDialogRetryRunnable, ROTATION_DIALOG_RETRY_MS)
+            return
+        }
+        if (!SubviewLogMonitor.armOwnedRotationDialog(epoch)) {
+            monitorHandler.postDelayed(rotationDialogRetryRunnable, ROTATION_DIALOG_RETRY_MS)
+            return
+        }
+        rotationDialogArmed = true
+        rotationDialogDismissed = false
+        rotationPostDismissBaseline = emptyList()
+        Log.i(TAG, "rotation state WAIT_DIALOG epoch=$epoch")
+        com.supernote_quicktoolbar.ui_common.Dialog.confirmResult(
+            reactApplicationContext,
+            NativeLocale.t("rotation_sync_message"),
+            NativeLocale.t("rotation_sync_wait"),
+            NativeLocale.t("rotation_sync_done")
+        ) { confirmed ->
+            monitorHandler.post {
+                if (epoch != rotationEpoch || rotationEpoch == 0L) return@post
+                rotationUserConfirmed = confirmed
+                rotationBaselineReady = false
+                if (confirmed) {
+                    monitorHandler.removeCallbacks(rotationDialogRetryRunnable)
+                    consumeRotationBaselineCandidate("user confirmed")
+                }
+                Log.i(TAG, "rotation user result epoch=$epoch confirmed=$confirmed")
+            }
+        }
+    }
+
+    private fun onRotationBaselineStable(epoch: Long) {
+        if (epoch == 0L || epoch != rotationEpoch || !rotationUserConfirmed ||
+            !rotationDialogDismissed) return
+        rotationBaselineReady = true
+        rotationViewsReady = FloatingPenGuard.refreshAllForRotation(epoch)
+        maybeCompleteRotationSync(epoch)
+    }
+
+    private fun maybeCompleteRotationSync(epoch: Long) {
+        if (epoch != rotationEpoch || !rotationUserConfirmed || !rotationDialogDismissed ||
+            !rotationBaselineReady || !rotationViewsReady) return
+        val foreground = foregroundActivity()
+        val currentKey = foreground?.let { "${it.packageName}/${it.activityName}" }
+        if (currentKey != rotationStartForegroundKey) {
+            cancelRotationSync("foreground changed before commit")
+            return
+        }
+        if (FloatingPenGuard.completeRotationSync(epoch, "dialog-confirmed stable baseline")) {
+            Log.i(TAG, "rotation state STABLE epoch=$epoch")
+            rotationEpoch = 0L
+            rotationStartForegroundKey = null
+            rotationDialogArmed = false
+            rotationDialogShown = false
+            rotationUserConfirmed = false
+            rotationDialogDismissed = false
+            rotationViewsReady = false
+            rotationBaselineReady = false
+            rotationPostDismissBaseline = emptyList()
+        }
+    }
+
+    private fun cancelRotationSync(reason: String) {
+        val epoch = rotationEpoch
+        if (epoch != 0L) SubviewLogMonitor.cancelOwnedRotationDialog(epoch)
+        monitorHandler.removeCallbacks(rotationDisplaySettledRunnable)
+        monitorHandler.removeCallbacks(rotationBaselineStableRunnable)
+        monitorHandler.removeCallbacks(rotationDialogRetryRunnable)
+        rotationEpoch = 0L
+        rotationStartForegroundKey = null
+        rotationDialogArmed = false
+        rotationDialogShown = false
+        rotationUserConfirmed = false
+        rotationDialogDismissed = false
+        rotationViewsReady = false
+        rotationBaselineReady = false
+        rotationPostDismissBaseline = emptyList()
+        FloatingPenGuard.cancelRotationSync(reason)
+    }
+
     private fun createCollapsedHandle() {
         val ctx = reactApplicationContext
-        if (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(ctx)) {
-            emitEvent("onToolbarPermissionDenied", Arguments.createMap()); return
-        }
-
         windowManager = ctx.getSystemService(android.content.Context.WINDOW_SERVICE) as WindowManager
         refreshScreenDimensions()
 
         val w = dpToPx(COLLAPSED_WIDTH_DP)
+        val hitW = dpToPx(COLLAPSED_HIT_WIDTH_DP)
         val h = dpToPx(COLLAPSED_HEIGHT_DP)
 
-        collapsedRoot = View(ctx).apply {
+        val stripe = View(ctx).apply {
             background = object : android.graphics.drawable.Drawable() {
                 private val paint = android.graphics.Paint().apply { isAntiAlias = false }
                 override fun draw(canvas: android.graphics.Canvas) {
@@ -979,16 +2162,24 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             }
         }
 
+        // Wider transparent container: only the stripe is visible (flush with
+        // the docked edge), the rest widens the touch target.
+        collapsedRoot = android.widget.FrameLayout(ctx).apply {
+            addView(stripe, android.widget.FrameLayout.LayoutParams(w, h).apply {
+                gravity = if (dockSide == "left") Gravity.START else Gravity.END
+            })
+        }
+
         @Suppress("DEPRECATION")
         val wmType = WindowManager.LayoutParams.TYPE_PHONE
 
         layoutParams = WindowManager.LayoutParams(
-            w, h, wmType,
+            hitW, h, wmType,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = if (dockSide == "left") 0 else screenWidth - w
+            x = if (dockSide == "left") 0 else screenWidth - hitW
             y = stickyY.takeIf { it >= 0 } ?: (screenHeight / 2 - h / 2)
             y = y.coerceIn(0, (screenHeight - h).coerceAtLeast(0))
         }
@@ -1007,6 +2198,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
+                    if (!TouchInput.isFinger(event)) return@setOnTouchListener true
                     val dx = event.rawX - startRawX; val dy = event.rawY - startRawY
                     if (!isDragging && (abs(dx) > 10 || abs(dy) > 10)) {
                         isDragging = true
@@ -1016,10 +2208,16 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 }
                 MotionEvent.ACTION_UP -> {
                     handler.removeCallbacks(collapsedLongPressRunnable)
-                    if (!longPressTriggered && isDragging) {
-                        val dx = event.rawX - startRawX
-                        val inward = if (dockSide == "left") dx > SWIPE_THRESHOLD else dx < -SWIPE_THRESHOLD
-                        if (inward) switchToExpanded()
+                    if (!longPressTriggered) {
+                        if (isDragging) {
+                            val dx = event.rawX - startRawX
+                            val inward = if (dockSide == "left") dx > SWIPE_THRESHOLD else dx < -SWIPE_THRESHOLD
+                            if (inward) switchToExpanded()
+                        } else {
+                            // Plain tap expands too — swipe-only made the thin
+                            // handle very hard to trigger.
+                            switchToExpanded()
+                        }
                     }
                     true
                 }
@@ -1033,13 +2231,14 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
         rootView = collapsedRoot
         windowManager?.addView(rootView, layoutParams)
+        rootView?.let { FloatingPenGuard.track("toolbar", it) }
         if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "collapsed handle shown, side=$dockSide")
     }
 
     private fun createExpandedToolbar() {
-        val ctx = reactApplicationContext
-        if (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(ctx)) {
-            emitEvent("onToolbarPermissionDenied", Arguments.createMap()); return
+        val ctx = android.view.ContextThemeWrapper(reactApplicationContext, android.R.style.Theme_DeviceDefault_Light)
+        if (BuildConfig.ENABLE_DEBUG) {
+            Log.i(TAG, "createExpandedToolbar package=${ctx.packageName}")
         }
 
         windowManager = ctx.getSystemService(android.content.Context.WINDOW_SERVICE) as WindowManager
@@ -1060,6 +2259,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                         isDragging = false
                     }
                     MotionEvent.ACTION_MOVE -> {
+                        if (!TouchInput.isFinger(ev)) return false
                         if (!isDragging && (abs(ev.rawX - startRawX) > 10 || abs(ev.rawY - startRawY) > 10)) {
                             isDragging = true
                             return true
@@ -1078,6 +2278,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                         isDragging = false
                     }
                     MotionEvent.ACTION_MOVE -> {
+                        if (!TouchInput.isFinger(ev)) return true
                         val lp = layoutParams as? WindowManager.LayoutParams ?: return true
                         val dx = ev.rawX - startRawX; val dy = ev.rawY - startRawY
                         if (!isDragging && (abs(dx) > 10 || abs(dy) > 10)) {
@@ -1094,11 +2295,14 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                             refreshScreenDimensions()
                             val lp = layoutParams as? WindowManager.LayoutParams ?: return true
                             val vw = expandedRoot?.measuredWidth ?: 0
-                            if (lp.x <= EDGE_COLLAPSE_THRESHOLD) {
+                            val distLeft = lp.x
+                            val distRight = screenWidth - (lp.x + vw)
+                            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "dragEnd: x=${lp.x} y=${lp.y} vw=$vw distLeft=$distLeft distRight=$distRight threshold=$EDGE_COLLAPSE_THRESHOLD")
+                            if (distLeft <= EDGE_COLLAPSE_THRESHOLD) {
                                 dockSide = "left"
                                 savePositionToPrefs(0, lp.y)
                                 switchToCollapsed()
-                            } else if (screenWidth - (lp.x + vw) <= EDGE_COLLAPSE_THRESHOLD) {
+                            } else if (distRight <= EDGE_COLLAPSE_THRESHOLD) {
                                 dockSide = "right"
                                 savePositionToPrefs(screenWidth - vw, lp.y)
                                 switchToCollapsed()
@@ -1143,7 +2347,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 typeface = Typeface.DEFAULT_BOLD
                 background = GradientDrawable().apply {
                     shape = GradientDrawable.RECTANGLE
-                    cornerRadius = dpToPx(3).toFloat()
+                    cornerRadius = dpToPx(CLIP_RADIUS_DP).toFloat()
                     if (filled) {
                         setColor(Color.BLACK)
                     } else {
@@ -1186,56 +2390,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 marginEnd = dpToPx(1)
             }
             view.setOnClickListener { resetAutoCollapse(); action() }
-            return view
-        }
-
-        fun makeSidebarPenLockBtn(sz: Int): View {
-            val locked = isPenLocked
-            val fgColor = if (locked) Color.WHITE else CLR_BTN_FG
-            val iconId = if (locked) "pen_lock_off" else "pen_lock"
-            val iconDrawable = loadIconFromAssets(iconId, sz, fgColor)
-
-            val view: View = if (iconDrawable != null) {
-                ImageView(ctx).apply {
-                    setImageDrawable(iconDrawable)
-                    scaleType = ImageView.ScaleType.CENTER_INSIDE
-                    setPadding(dpToPx(6), dpToPx(6), dpToPx(6), dpToPx(6))
-                    background = GradientDrawable().apply {
-                        setColor(if (locked) CLR_BTN_ACT else Color.TRANSPARENT)
-                        cornerRadius = dpToPx(3).toFloat()
-                    }
-                }
-            } else {
-                TextView(ctx).apply {
-                    text = if (locked) "⊘" else "✏"
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(14f))
-                    setTextColor(fgColor)
-                    gravity = Gravity.CENTER
-                    typeface = Typeface.DEFAULT_BOLD
-                    background = GradientDrawable().apply {
-                        setColor(if (locked) CLR_BTN_ACT else Color.TRANSPARENT)
-                        cornerRadius = dpToPx(3).toFloat()
-                    }
-                }
-            }
-            view.layoutParams = LinearLayout.LayoutParams(sz, sz)
-            view.setOnClickListener {
-                resetAutoCollapse()
-                isPenLocked = !isPenLocked
-                if (isPenLocked) {
-                    handler.post {
-                        callSetFullAuto(true)
-                        callPluginAppShowPluginView(1, "penLockBtn")
-                    }
-                } else {
-                    handler.post {
-                        callPluginAppShowPluginView(0, "penLockBtn")
-                        callSetFullAuto(false)
-                    }
-                }
-                emitEvent(if (isPenLocked) "onPenLockRequest" else "onPenLockRelease", Arguments.createMap())
-                if (rootView != null && !collapsed) { removeAll(); createExpandedToolbar() }
-            }
             return view
         }
 
@@ -1322,38 +2476,66 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 gravity = Gravity.CENTER_HORIZONTAL
                 setBackgroundColor(CLR_SIDEBAR_BG)
                 layoutParams = LinearLayout.LayoutParams(titleColW, LinearLayout.LayoutParams.MATCH_PARENT)
-                setPadding(dpToPx(3), dpToPx(4), dpToPx(3), dpToPx(4))
+                setPadding(dpToPx(3), dpToPx(7), dpToPx(3), dpToPx(4))
             }
 
             dragSpacer = View(ctx)
 
+            val showAllVerticalClips = tools.size >= 7
+            if (showAllVerticalClips) clipPage = 0
+
             var clipSwipeStartY = 0f
+            var clipSwipeStartX = 0f
             var clipSwipeCaptured = false
             val clipCol = object : LinearLayout(ctx) {
                 override fun onInterceptTouchEvent(ev: android.view.MotionEvent): Boolean {
+                    if (showAllVerticalClips) return false
                     when (ev.action) {
                         android.view.MotionEvent.ACTION_DOWN -> {
-                            clipSwipeStartY = ev.rawY; clipSwipeCaptured = false
+                            clipSwipeStartX = ev.rawX
+                            clipSwipeStartY = ev.rawY
+                            clipSwipeCaptured = false
+                            parent?.requestDisallowInterceptTouchEvent(true)
                         }
                         android.view.MotionEvent.ACTION_MOVE -> {
-                            if (!clipSwipeCaptured && Math.abs(ev.rawY - clipSwipeStartY) > dpToPx(12)) {
+                            val dx = Math.abs(ev.rawX - clipSwipeStartX)
+                            val dy = Math.abs(ev.rawY - clipSwipeStartY)
+                            if (!clipSwipeCaptured && dy > dpToPx(12) && dy > dx) {
                                 clipSwipeCaptured = true
                                 return true
+                            } else if (!clipSwipeCaptured && dx > dpToPx(12) && dx >= dy) {
+                                parent?.requestDisallowInterceptTouchEvent(false)
                             }
+                        }
+                        android.view.MotionEvent.ACTION_UP,
+                        android.view.MotionEvent.ACTION_CANCEL -> {
+                            clipSwipeCaptured = false
+                            parent?.requestDisallowInterceptTouchEvent(false)
                         }
                     }
                     return false
                 }
                 override fun onTouchEvent(ev: android.view.MotionEvent): Boolean {
-                    if (ev.action == android.view.MotionEvent.ACTION_UP && clipSwipeCaptured) {
-                        val dy = ev.rawY - clipSwipeStartY
-                        if (dy < -dpToPx(15) && clipPage == 0) {
-                            clipPage = 1; rebuildClipIcons()
-                        } else if (dy > dpToPx(15) && clipPage == 1) {
-                            clipPage = 0; rebuildClipIcons()
+                    if (showAllVerticalClips) return false
+                    when (ev.action) {
+                        android.view.MotionEvent.ACTION_UP -> {
+                            if (clipSwipeCaptured) {
+                                val dy = ev.rawY - clipSwipeStartY
+                                if (dy < -dpToPx(15) && clipPage == 0) {
+                                    clipPage = 1; rebuildClipIcons()
+                                } else if (dy > dpToPx(15) && clipPage == 1) {
+                                    clipPage = 0; rebuildClipIcons()
+                                }
+                            }
+                            clipSwipeCaptured = false
+                            parent?.requestDisallowInterceptTouchEvent(false)
+                        }
+                        android.view.MotionEvent.ACTION_CANCEL -> {
+                            clipSwipeCaptured = false
+                            parent?.requestDisallowInterceptTouchEvent(false)
                         }
                     }
-                    return clipSwipeCaptured
+                    return clipSwipeCaptured || ev.action == android.view.MotionEvent.ACTION_UP
                 }
             }.apply {
                 this.orientation = LinearLayout.VERTICAL
@@ -1363,8 +2545,9 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     LinearLayout.LayoutParams.WRAP_CONTENT
                 )
             }
-            val clipOffset = clipPage * 2
-            for (vi in 0 until 4) {
+            val visibleClipCount = if (showAllVerticalClips) 6 else 4
+            val clipOffset = if (showAllVerticalClips) 0 else clipPage * 2
+            for (vi in 0 until visibleClipCount) {
                 val di = clipOffset + vi
                 val tv = makeClipIcon(di).apply {
                     layoutParams = LinearLayout.LayoutParams(dpToPx(CLIP_ICON_DP), dpToPx(CLIP_ICON_DP)).apply {
@@ -1383,16 +2566,14 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 emitEvent("onTitleLayerAction", Arguments.createMap().apply { putString("direction", "next") })
             })
 
-            titleCol.addView(makeSidebarAppendBtn(clipIconSz).apply {
-                (layoutParams as LinearLayout.LayoutParams).topMargin = dpToPx(12)
-            })
-
-            titleCol.addView(makeSidebarPenLockBtn(clipIconSz).apply {
-                (layoutParams as LinearLayout.LayoutParams).topMargin = dpToPx(2)
-            })
+            if (BuildConfig.ENABLE_DEBUG) {
+                titleCol.addView(makeSidebarAppendBtn(clipIconSz).apply {
+                    (layoutParams as LinearLayout.LayoutParams).topMargin = dpToPx(12)
+                })
+            }
 
             titleCol.addView(makeSidebarSwapBtn(clipIconSz).apply {
-                (layoutParams as LinearLayout.LayoutParams).topMargin = dpToPx(2)
+                (layoutParams as LinearLayout.LayoutParams).topMargin = dpToPx(if (BuildConfig.ENABLE_DEBUG) 2 else 12)
             })
             bodyRow.addView(titleCol)
 
@@ -1449,8 +2630,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 layoutParams = LinearLayout.LayoutParams(0, titleH, 1f)
             })
 
-            titleRow.addView(makeSidebarAppendBtn(layerBtnSz))
-            titleRow.addView(makeSidebarPenLockBtn(layerBtnSz))
+            if (BuildConfig.ENABLE_DEBUG) titleRow.addView(makeSidebarAppendBtn(layerBtnSz))
             titleRow.addView(makeSidebarSwapBtn(layerBtnSz))
             expandedRoot!!.addView(titleRow)
 
@@ -1489,15 +2669,24 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         rootView = expandedRoot
         try {
             windowManager?.addView(rootView, layoutParams)
+            if (BuildConfig.ENABLE_DEBUG) {
+                Log.i(TAG, "createExpandedToolbar addView complete type=$wmType x=${layoutParams?.x} y=${layoutParams?.y}")
+            }
+            startForegroundMonitor()
+            rootView?.let { FloatingPenGuard.track("toolbar", it) }
             if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "expanded toolbar shown (2-row horizontal), ${tools.size} tools")
 
-            startForegroundMonitor()
+            // (Re)arm the near-edge auto-collapse timer here, centrally: every
+            // rebuild path (pen lock toggle, panel restore, retry) goes through
+            // this function, and removeAll() has just cancelled any pending
+            // timer — without this the toolbar never collapses again.
+            expandedRoot?.post { resetAutoCollapse() }
         } catch (e: Exception) {
 
             if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "addView failed (${e.message}), retrying in 500ms")
             rootView = null
             expandedRoot = null; toolContainer = null; layoutParams = null
-            handler.postDelayed({ createExpandedToolbar() }, 500)
+            handler.postDelayed({ if (!isInNoteApp) return@postDelayed; createExpandedToolbar() }, 500)
         }
     }
 
@@ -1510,8 +2699,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             "voice_transcribe"      -> "icons/ic_tool_voice.xml"
             "invert_ink"            -> "icons/ic_tool_invert.xml"
             "send_ai", "screenshot_ai" -> "icons/ic_tool_lasso_ai.xml"
-            "pen_lock"              -> "icons/ic_tool_pen.xml"
-            "pen_lock_off"          -> "icons/ic_tool_pen_off.xml"
             "layer_up"              -> "icons/ic_tool_layer_up.xml"
             "layer_down"            -> "icons/ic_tool_layer_down.xml"
             "sticky_note"           -> "icons/ic_tool_sticky.xml"
@@ -1567,14 +2754,28 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    /**
+     * When a plugin JS exception makes the host destroy our React instance,
+     * the Context's AssetManager is closed — constructing any View then
+     * crashes the whole pluginhost process (ArrayIndexOutOfBoundsException in
+     * TextView's theme lookup). Check before building views.
+     */
+    private fun isReactContextUsable(): Boolean = try {
+        reactApplicationContext.hasActiveReactInstance()
+    } catch (_: Throwable) { false }
+
     private fun rebuildButtons() {
         val c = toolContainer ?: return
+        if (!isReactContextUsable()) {
+            if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "rebuildButtons: react instance destroyed, removing overlays")
+            try { removeAll() } catch (_: Exception) {}
+            return
+        }
         c.removeAllViews()
-
+        try {
         val ctx = reactApplicationContext
         val btnSz = dpToPx(if (orientation == "vertical") 48 else BTN_SIZE_DP)
-        val stride = dpToPx(if (orientation == "vertical") 48 + 3 else BTN_SIZE_DP + BTN_GAP_DP)
-        val gap    = stride - btnSz
+        val gap = dpToPx(BTN_GAP_DP)
 
         val n = tools.size
 
@@ -1620,21 +2821,37 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 marginStart = gap / 2; marginEnd = gap - gap / 2
             }
             view.setOnClickListener { handleToolTap(tool, view) }
+            val hasLongPressAction = tool.action == "insert_doc_screenshot" ||
+                tool.action == "lasso_smart_send" || tool.action == "invert_ink"
+            val pressGuardOwner = "toolbar-long-press:${tool.id}"
+            if (hasLongPressAction) {
+                view.setOnTouchListener { _, event ->
+                    when (event.actionMasked) {
+                        MotionEvent.ACTION_DOWN ->
+                            FloatingPenGuard.setFullScreenActive(true, pressGuardOwner)
+                        MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL ->
+                            handler.postDelayed({
+                                FloatingPenGuard.setFullScreenActive(false, pressGuardOwner)
+                            }, 180L)
+                    }
+                    false
+                }
+            }
             view.setOnLongClickListener {
                 if (tool.action == "insert_doc_screenshot") {
                     openDocScreenshotPanel()
                 } else if (tool.action == "lasso_smart_send") {
                     handleSendLongPress()
                 } else if (tool.action == "invert_ink") {
-                    emitEvent("onToolLongPress", Arguments.createMap().apply {
-                        putString("toolId", tool.id); putString("toolName", tool.name)
-                        putString("toolAction", tool.action)
-                    })
+                    PaletteBubbleModule.toggleStatic()
                 } else {
                     emitEvent("onToolLongPress", Arguments.createMap().apply {
                         putString("toolId", tool.id); putString("toolName", tool.name)
                     })
                 }
+                handler.postDelayed({
+                    FloatingPenGuard.setFullScreenActive(false, pressGuardOwner)
+                }, 350L)
                 true
             }
             return view
@@ -1670,15 +2887,11 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         try {
             windowManager?.updateViewLayout(rootView, layoutParams)
         } catch (_: Exception) {}
-    }
-
-    private fun calcLayout(): Pair<Int, Int> {
-        val n = tools.size
-        val hasPenLock = n != 5
-        val total = n + (if (hasPenLock) 1 else 0)
-        if (total <= 5) return if (orientation == "vertical") Pair(1, total) else Pair(total, 1)
-        val perMajor = (total + 1) / 2
-        return if (orientation == "vertical") Pair(2, perMajor) else Pair(perMajor, 2)
+        } catch (t: Throwable) {
+            // Last-ditch: never let a stale AssetManager kill the pluginhost.
+            Log.w(TAG, "rebuildButtons failed (react context gone?): ${t.message}")
+            try { removeAll() } catch (_: Exception) {}
+        }
     }
 
     private fun snapToEdge() {
@@ -1715,7 +2928,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     }
 
     private fun handleToolTap(tool: ToolItem, view: View) {
-        resetAutoCollapse()
+        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[BUBBLE-DBG] handleToolTap id=${tool.id} action=${tool.action} latches=${tool.latches}")
         if (tool.latches) {
             if (activeModeIds.contains(tool.id)) {
                 activeModeIds.remove(tool.id)
@@ -1734,7 +2947,10 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
 
         if (tool.action == "invert_ink") {
-            PaletteBubbleModule.toggleStatic()
+            emitEvent("onToolTap", Arguments.createMap().apply {
+                putString("toolId", tool.id)
+                putString("toolAction", tool.action)
+            })
             return
         }
 
@@ -1744,16 +2960,38 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             removeAll()
             when {
                 tool.action == "lasso_send" -> {
-                    pendingScreen = "nativeSendHelper"
-                    emitEvent("onNativePanelOpen", Arguments.createMap().apply { putString("panel", "send") })
-                    SendPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show()
-                    handler.postDelayed({
-                        callShowPluginView()
-                        emitOpenMainWithRetries("nativeSendHelper")
-                    }, 150)
+                    // Ask for FILE:READ BEFORE opening the panel: the lasso
+                    // extraction (text/image read) starts as soon as the panel
+                    // opens, so a grant dialog popping mid-extraction comes too
+                    // late — after granting, the already-failed extraction
+                    // cannot be re-triggered from inside the panel.
+                    requestPluginFileReadPermission { granted ->
+                        handler.post {
+                            if (!granted) {
+                                android.widget.Toast.makeText(
+                                    reactApplicationContext,
+                                    NativeLocale.t("file_read_permission_needed"),
+                                    android.widget.Toast.LENGTH_LONG
+                                ).show()
+                                openPluginSettingsAfterFileReadDenied()
+                                restoreToolbar()
+                                return@post
+                            }
+                            pendingScreen = "nativeSendHelper"
+                            openNativePanel("send") {
+                                SendPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show()
+                            }
+                            handler.postDelayed({
+                                if (pendingScreen != "nativeSendHelper") return@postDelayed
+                                callShowPluginView()
+                                emitOpenMainWithRetries("nativeSendHelper")
+                            }, 150)
+                        }
+                    }
                 }
             }
         } else {
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[BUBBLE-DBG] emit onToolTap id=${tool.id} action=${tool.action}")
             emitEvent("onToolTap", Arguments.createMap().apply {
                 putString("toolId", tool.id); putString("toolAction", tool.action)
                 putString("toolName", tool.name)
@@ -1779,13 +3017,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         val ids = synchronized(activeModeIds) { activeModeIds.toList() }
         val pick = ids.firstOrNull { it == "insert_text" } ?: ids.firstOrNull()
         promise.resolve(pick)
-    }
-
-    @ReactMethod
-    fun queryActiveModes(promise: Promise) {
-        val arr = Arguments.createArray()
-        synchronized(activeModeIds) { activeModeIds.forEach { arr.pushString(it) } }
-        promise.resolve(arr)
     }
 
     @ReactMethod
@@ -1843,22 +3074,54 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    private fun parseTools(json: String) {
+    private fun parseTools(json: String, persistIfChanged: Boolean = false) {
         tools.clear()
         try {
             val arr = JSONArray(json)
             for (i in 0 until arr.length()) {
                 val o = arr.getJSONObject(i)
                 val action = o.optString("action", "")
+                val id = o.getString("id")
                 tools.add(ToolItem(
-                    o.getString("id"),
+                    id,
                     o.optString("name",""),
                     o.optString("icon","?"),
                     action,
-                    action in LATCHING_ACTIONS
+                    action in LATCHING_ACTIONS,
+                    o.optString("nameKey", defaultToolNameKey(id))
                 ))
             }
         } catch (e: Exception) { if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "parseTools: ${e.message}") }
+        applyDebugToolFilter(persist = persistIfChanged)
+    }
+
+    private fun applyDebugToolFilter(persist: Boolean) {
+        val sanitized = sanitizeDebugTools(tools, { it.id }, { it.action })
+        if (sanitized.size == tools.size) return
+        tools.clear()
+        tools.addAll(sanitized)
+        if (persist) persistSanitizedTools()
+    }
+
+    private fun persistSanitizedTools() {
+        try {
+            val arr = JSONArray()
+            for (tool in tools) {
+                arr.put(JSONObject().apply {
+                    put("id", tool.id)
+                    put("nameKey", tool.nameKey)
+                    put("name", tool.storedName)
+                    put("icon", tool.icon)
+                    put("action", tool.action)
+                    put("latches", tool.latches)
+                })
+            }
+            val data = JSONObject().put("tools", arr)
+            reactApplicationContext.getSharedPreferences("quicktoolbar_presets", 0)
+                .edit().putString("preset_1", data.toString()).apply()
+        } catch (e: Exception) {
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "persistSanitizedTools: ${e.message}")
+        }
     }
 
     private fun removeAll() {
@@ -1873,26 +3136,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         clipIconViews = arrayOfNulls(6)
     }
 
-    private fun hideFloatingBubble() {
-        try {
-            val bubbleModule = reactApplicationContext.catalystInstance
-                .getNativeModule("FloatingBubble") ?: return
-            val m = bubbleModule::class.java.methods
-                .firstOrNull { it.name == "hide" && it.parameterCount == 0 } ?: return
-            m.invoke(bubbleModule)
-        } catch (_: Exception) {}
-    }
-
-    private fun hideAiBubble() {
-        try {
-            val aiBubbleModule = reactApplicationContext.catalystInstance
-                .getNativeModule("AiBubble") ?: return
-            val m = aiBubbleModule::class.java.methods
-                .firstOrNull { it.name == "hide" && it.parameterCount == 0 } ?: return
-            m.invoke(aiBubbleModule)
-        } catch (_: Exception) {}
-    }
-
     private fun hideAllNativePanels() = ToolRegistry.hideAll()
     private fun suspendAllNativePanels() = ToolRegistry.suspendAll()
     private fun resumeAllNativePanels() = ToolRegistry.resumeAll()
@@ -1905,7 +3148,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         val shortSide = minOf(dm.widthPixels, dm.heightPixels)
         return if (longSide == 2560 && shortSide == 1920) 1.1f else 1.0f
     }
-    private val scaleFactor: Float get() = maxOf(0.86f, com.supernote_quicktoolbar.ui_common.ScreenScale.factor(reactApplicationContext)) * toolbarExtraScale
+    private val scaleFactor: Float get() = maxOf(0.86f, com.supernote_quicktoolbar.ui_common.ScreenScale.toolbarFactor(reactApplicationContext)) * toolbarExtraScale
     private fun dpToPx(dp: Int): Int = (dp * density * scaleFactor).roundToInt()
     private fun sp(v: Float): Float = v * scaleFactor
 
@@ -1930,7 +3173,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    private fun emitEvent(name: String, params: WritableMap) {
+    override fun emitEvent(name: String, params: WritableMap) {
         try {
             reactApplicationContext.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
                 .emit(name, params)
@@ -1945,6 +3188,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     fun requestInsertImage(path: String) {
         if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[INSERT-DBG/Kt] requestInsertImage: $path (currentInstance=${currentInstance === this})")
         insertPluginViewClosed = false
+        beginInsertImageGuard()
 
         handler.post {
             val retryDelays = longArrayOf(0, 300, 750)
@@ -1957,34 +3201,34 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     })
                 }, delay)
             }
-            handler.postDelayed({
-                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[INSERT-DBG/Kt] safety-net: restoreToolbar (tools=${tools.size})")
-                insertNextChainActive = false
-                restoreToolbar()
-
-                callPluginAppShowPluginView(0, "insertImage-safetyNet")
-                callSetFullAuto(false)
-            }, 3500)
         }
     }
 
     @ReactMethod
-    fun restoreToolbar() {
+    override fun restoreToolbar() {
         handler.post {
-            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[INSERT-DBG/Kt] restoreToolbar: tools=${tools.size} currentInstance=${currentInstance === this} rootView=${rootView != null}")
+            if (!isInNoteApp) return@post
+            if (anyNativeOverlayOwnsScreen()) {
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "restoreToolbar: skipped, native overlay on screen")
+                return@post
+            }
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[INSERT-DBG/Kt] restoreToolbar: tools=${tools.size} currentInstance=${currentInstance === this} rootView=${rootView != null} collapsed=$collapsed")
             if (tools.isNotEmpty()) {
-                isPenLocked = false
-                collapsed = false
                 removeAll()
                 try {
-                    createExpandedToolbar()
+                    restoreToolbarWindow()
                 } catch (e: Exception) {
-                    if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "[INSERT-DBG/Kt] restoreToolbar createExpandedToolbar FAILED: ${e.message}", e)
+                    if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "[INSERT-DBG/Kt] restoreToolbar FAILED: ${e.message}", e)
                 }
             }
         }
     }
 
+    internal fun restoreToolbarWindow() {
+        if (collapsed) createCollapsedHandle() else createExpandedToolbar()
+    }
+
+    @ReactMethod
     fun requestClosePluginView() {
         handler.post {
             callClosePluginView()
@@ -2021,6 +3265,20 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    /**
+     * Milliseconds since the note app returned to the foreground.
+     * -1  = note app is NOT in the foreground right now.
+     * Big = has been foreground since before the monitor noticed a switch.
+     * Read synchronously by TextInserter before every insertText.
+     */
+    @ReactMethod(isBlockingSynchronousMethod = true)
+    fun getNoteForegroundElapsedMs(): Double {
+        if (!isInNoteApp()) return -1.0
+        val since = noteForegroundSinceMs
+        if (since == 0L) return 1e9
+        return (android.os.SystemClock.elapsedRealtime() - since).toDouble()
+    }
+
     @ReactMethod(isBlockingSynchronousMethod = true)
     fun drainImageQueue(): String? {
         synchronized(ImagePanel::class.java) {
@@ -2029,6 +3287,17 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             val json = org.json.JSONArray(queue).toString()
             queue.clear()
             if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[QUEUE-DBG] drainImageQueue: drained $json")
+            return json
+        }
+    }
+
+    @ReactMethod(isBlockingSynchronousMethod = true)
+    fun drainReceivedDeletes(): String? {
+        synchronized(ImagePanel::class.java) {
+            val list = ImagePanel.pendingReceivedDeletes
+            if (list.isEmpty()) return null
+            val json = org.json.JSONArray(list).toString()
+            list.clear()
             return json
         }
     }
@@ -2048,18 +3317,21 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun showImagePanel() {
         handler.post {
+            markToolbarForRestore()
             removeAll()
-            emitEvent("onNativePanelOpen", Arguments.createMap().apply { putString("panel", "image") })
-            ImagePanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show()
+            openNativePanel("image") {
+                ImagePanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show()
+            }
         }
     }
 
     @ReactMethod
-    fun showDocLinkPanel() {
+    fun showDocLinkPanel(currentFilePath: String?) {
         handler.post {
             removeAll()
-            emitEvent("onNativePanelOpen", Arguments.createMap().apply { putString("panel", "doc") })
-            DocLinkPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show()
+            openNativePanel("doc") {
+                DocLinkPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show(currentFilePath)
+            }
         }
     }
 
@@ -2067,14 +3339,40 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     fun showPalettePanel(infoJson: String) {
         handler.post {
             removeAll()
-            emitEvent("onNativePanelOpen", Arguments.createMap().apply { putString("panel", "palette") })
-            PalettePanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show(infoJson)
+            openNativePanel("palette") {
+                PalettePanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show(infoJson)
+            }
+        }
+    }
+
+    @ReactMethod
+    fun toggleScreenshotBubble() {
+        handler.post {
+            if (ScreenshotBubble.isShowing) {
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "toggleScreenshotBubble: hiding")
+                ScreenshotBubble.pendingReshow = false
+                ScreenshotBubble.hide()
+            } else {
+                if (stitchCommitPending || screenshotCapturePending || ScreenshotBubble.pendingReshow) {
+                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "toggleScreenshotBubble: ignored, screenshot flow pending")
+                    return@post
+                }
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "toggleScreenshotBubble: showing")
+                startForegroundMonitor()
+                isInNoteApp = checkIsNoteAppForeground()
+                ScreenshotBubble.show(reactApplicationContext, this@FloatingToolbarModule)
+            }
         }
     }
 
     @ReactMethod
     fun handleDocScreenshotCrop() {
         handler.post {
+            if (stitchCommitPending || screenshotCapturePending) {
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[CROP-DBG/Kt] capture ignored while another screenshot operation is pending")
+                return@post
+            }
+            screenshotCapturePending = true
             if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[CROP-DBG/Kt] handleDocScreenshotCrop: starting screencap")
             removeAll()
             val cacheDir = reactApplicationContext.cacheDir.absolutePath
@@ -2083,33 +3381,88 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     val ts = System.currentTimeMillis()
                     val outPath = "$cacheDir/screenshot_crop_$ts.png"
                     val process = Runtime.getRuntime().exec(arrayOf("screencap", "-p", outPath))
-                    val exitCode = process.waitFor()
+                    val completed = process.waitFor(15, TimeUnit.SECONDS)
+                    if (!completed) process.destroyForcibly()
+                    val exitCode = if (completed) process.exitValue() else -1
                     val file = java.io.File(outPath)
-                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[CROP-DBG/Kt] screencap exit=$exitCode size=${file.length()}")
-                    if (exitCode != 0 || !file.exists() || file.length() <= 500) {
+                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[CROP-DBG/Kt] screencap completed=$completed exit=$exitCode size=${file.length()}")
+                    if (!completed || exitCode != 0 || !file.exists() || file.length() <= 500) {
                         if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "[CROP-DBG/Kt] screencap failed")
+                        handler.post {
+                            screenshotCapturePending = false
+                            showScreenshotMessage("screencap_failed")
+                            restoreAfterCropFlow()
+                        }
                         return@thread
                     }
                     val dims = DocScreenshotService.getImageDimensions(outPath)
-                    val imgW = dims?.first ?: 1920
-                    val imgH = dims?.second ?: 2560
-
-                    val activeSession = DocScreenshotService.loadSession()
-                    if (activeSession != null && activeSession.images.isNotEmpty()) {
-                        val updated = DocScreenshotService.addImage(outPath, imgW, imgH)
-                        if (updated != null && updated.images.size >= 2) {
-                            handler.post {
-                                openStitchPanel(updated)
-                            }
-                            return@thread
+                    if (dims == null) {
+                        if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "[CROP-DBG/Kt] screencap decode failed")
+                        handler.post {
+                            screenshotCapturePending = false
+                            showScreenshotMessage("screencap_failed")
+                            restoreAfterCropFlow()
                         }
+                        return@thread
+                    }
+                    val imgW = dims.first
+                    val imgH = dims.second
+                    val mayHaveSession = knownStitchSessionActive || DocScreenshotService.hasActiveSession()
+                    if (!mayHaveSession) {
+                        handler.post {
+                            screenshotCapturePending = false
+                            openCropPanelForDoc(outPath, imgW, imgH)
+                        }
+                        return@thread
                     }
 
                     handler.post {
-                        openCropPanelForDoc(outPath, imgW, imgH)
+                        requestScreenshotStoragePermissions(
+                            action = "append captured stitch image",
+                            onGranted = {
+                                kotlin.concurrent.thread(isDaemon = true) {
+                                    val activeSession = DocScreenshotService.loadSession()
+                                    if (activeSession == null || activeSession.images.isEmpty()) {
+                                        handler.post {
+                                            screenshotCapturePending = false
+                                            setKnownStitchSessionActive(false)
+                                            openCropPanelForDoc(outPath, imgW, imgH)
+                                        }
+                                        return@thread
+                                    }
+                                    val updated = DocScreenshotService.addImage(outPath, imgW, imgH)
+                                    handler.post {
+                                        screenshotCapturePending = false
+                                        if (updated != null && updated.images.size >= 2) {
+                                            setKnownStitchSessionActive(true)
+                                            openStitchPanel(updated)
+                                        } else {
+                                            showScreenshotMessage("screenshot_save_failed")
+                                            restoreAfterCropFlow()
+                                        }
+                                    }
+                                }
+                            },
+                            onDenied = {
+                                screenshotCapturePending = false
+                                restoreAfterCropFlow()
+                            }
+                        )
                     }
                 } catch (e: Exception) {
                     if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "[CROP-DBG/Kt] screencap error: ${e.message}", e)
+                    handler.post {
+                        screenshotCapturePending = false
+                        showScreenshotMessage("screencap_failed")
+                        restoreAfterCropFlow()
+                    }
+                } catch (e: OutOfMemoryError) {
+                    if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "[CROP-DBG/Kt] screencap out of memory", e)
+                    handler.post {
+                        screenshotCapturePending = false
+                        showScreenshotMessage("screencap_failed")
+                        restoreAfterCropFlow()
+                    }
                 }
             }
         }
@@ -2117,83 +3470,182 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
     private fun restoreAfterCropFlow() {
         ScreenshotBubble.reshowIfPending()
+        scheduleRestore(RESTORE_DELAY_SHORT, "crop flow done")
+    }
 
-        isInNoteApp = checkIsNoteAppForeground()
-        if (isInNoteApp && tools.isNotEmpty() && rootView == null) restoreToolbar()
+    private fun setKnownStitchSessionActive(active: Boolean) {
+        knownStitchSessionActive = active
+        reactApplicationContext
+            .getSharedPreferences(SCREENSHOT_STATE_PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(STITCH_SESSION_ACTIVE_KEY, active)
+            .apply()
     }
 
     private fun openCropPanelForDoc(screenshotPath: String, imgW: Int, imgH: Int, fromStitch: Boolean = false) {
-        val hasStitch = DocScreenshotService.hasActiveSession()
+        val hasStitch = fromStitch || knownStitchSessionActive
         CropPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule)
             .showWithFooter(
                 path = screenshotPath,
                 hasStitchSession = hasStitch,
                 onConfirm = { crop, stayOpen ->
                     if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[CROP-DBG/Kt] crop confirm (insertNext): ${crop.width}x${crop.height} multi=$stayOpen")
-                    kotlin.concurrent.thread(isDaemon = true) {
-                        DocScreenshotService.stageToQueue(screenshotPath, crop, insertNext = true)
-                        if (fromStitch) DocScreenshotService.clearSession()
-                    }
-                    if (!stayOpen) restoreAfterCropFlow()
+                    requestScreenshotStoragePermissions(
+                        action = "stage screenshot for insert",
+                        onGranted = {
+                            kotlin.concurrent.thread(isDaemon = true) {
+                                val result = DocScreenshotService.stageToQueue(screenshotPath, crop, insertNext = true)
+                                val clearedSession = result != null && fromStitch && DocScreenshotService.clearSession()
+                                handler.post {
+                                    if (clearedSession) setKnownStitchSessionActive(false)
+                                    if (result == null) showScreenshotMessage("screenshot_save_failed")
+                                    if (!stayOpen) restoreAfterCropFlow()
+                                }
+                            }
+                        },
+                        onDenied = { if (!stayOpen) restoreAfterCropFlow() }
+                    )
                 },
                 onLongScreenshot = {
                     if (fromStitch) {
                         if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[CROP-DBG/Kt] long screenshot: session kept, returning to capture")
-                    } else {
-                        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[CROP-DBG/Kt] long screenshot: saving to stitch session")
-                        kotlin.concurrent.thread(isDaemon = true) {
-                            val existing = DocScreenshotService.loadSession()
-                            if (existing != null) {
-                                DocScreenshotService.addImage(screenshotPath, imgW, imgH)
+                        setKnownStitchSessionActive(true)
+                        CropPanel.currentInstance?.hide()
+                        restoreAfterCropFlow()
+                    } else if (!stitchCommitPending) {
+                        stitchCommitPending = true
+                        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[CROP-DBG/Kt] long screenshot: committing stitch session")
+                        requestScreenshotStoragePermissions(
+                            action = "start long screenshot",
+                            onGranted = {
+                                kotlin.concurrent.thread(isDaemon = true) {
+                                    val existing = DocScreenshotService.loadSession()
+                                    val session = if (existing != null) {
+                                        DocScreenshotService.addImage(screenshotPath, imgW, imgH)
+                                    } else {
+                                        DocScreenshotService.startSession(screenshotPath, imgW, imgH)
+                                    }
+                                    handler.post {
+                                        stitchCommitPending = false
+                                        CropPanel.currentInstance?.hide()
+                                        if (session != null) {
+                                            setKnownStitchSessionActive(true)
+                                            if (existing != null && session.images.size >= 2) {
+                                                openStitchPanel(session)
+                                            } else {
+                                                restoreAfterCropFlow()
+                                            }
+                                        } else {
+                                            showScreenshotMessage("screenshot_save_failed")
+                                            restoreAfterCropFlow()
+                                        }
+                                    }
+                                }
+                            },
+                            onDenied = {
+                                stitchCommitPending = false
+                                CropPanel.currentInstance?.hide()
+                                restoreAfterCropFlow()
+                            }
+                        )
+                    }
+                },
+                onSendToOtherDevices = { crop ->
+                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[CROP-DBG/Kt] send crop: ${crop.width}x${crop.height}")
+                    val cameFromScreenshotBubble = ScreenshotBubble.pendingReshow
+                    kotlin.concurrent.thread(isDaemon = true) {
+                        val croppedPath = "${reactApplicationContext.cacheDir.absolutePath}/doc_crop_send_${System.currentTimeMillis()}.png"
+                        val saved = DocScreenshotService.cropAndSave(screenshotPath, crop, croppedPath)
+                        if (fromStitch) {
+                            val cleared = DocScreenshotService.clearSession()
+                            if (cleared) handler.post { setKnownStitchSessionActive(false) }
+                        }
+                        handler.post {
+                            if (saved) {
+                                val defaultPeer = LocalSendModule.getDefaultPeer(reactApplicationContext)
+                                if (defaultPeer != null) {
+                                    kotlin.concurrent.thread(isDaemon = true) {
+                                        try {
+                                            LocalSendModule.sendFileDirect(
+                                                defaultPeer.ip, defaultPeer.port, croppedPath, defaultPeer.useTls)
+                                            com.supernote_quicktoolbar.ui_common.Dialog.tip(
+                                                reactApplicationContext, NativeLocale.t("send_success"))
+                                        } catch (e: Exception) {
+                                            val msg = if (e.message?.contains("403") == true)
+                                                NativeLocale.t("image_send_rejected")
+                                            else "${NativeLocale.t("send_failed")}: ${e.message}"
+                                            com.supernote_quicktoolbar.ui_common.Dialog.tip(reactApplicationContext, msg)
+                                        } finally {
+                                            try { java.io.File(croppedPath).delete() } catch (_: Exception) {}
+                                            handler.post { restoreAfterCropFlow() }
+                                        }
+                                    }
+                                } else {
+                                    val sendPanel = SendPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule)
+                                    sendPanel.show(
+                                        fromBubble = cameFromScreenshotBubble,
+                                        onShowResult = { shown ->
+                                            if (shown) {
+                                                sendPanel.updateLassoData("", listOf(croppedPath))
+                                            } else {
+                                                showScreenshotMessage("screenshot_panel_failed")
+                                                restoreAfterCropFlow()
+                                            }
+                                        }
+                                    )
+                                }
                             } else {
-                                DocScreenshotService.startSession(screenshotPath, imgW, imgH)
+                                showScreenshotMessage("screenshot_save_failed")
+                                restoreAfterCropFlow()
                             }
                         }
                     }
-                    CropPanel.currentInstance?.hide()
-                    restoreAfterCropFlow()
                 },
                 onAddToHistory = { crop, stayOpen ->
                     if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[CROP-DBG/Kt] add to history: ${crop.width}x${crop.height} multi=$stayOpen")
-                    kotlin.concurrent.thread(isDaemon = true) {
-                        DocScreenshotService.saveToHistory(screenshotPath, crop)
-                        if (fromStitch) DocScreenshotService.clearSession()
-                    }
-                    if (!stayOpen) restoreAfterCropFlow()
-                },
-                onScreenshotToNote = { crop ->
-                    if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[CROP-DBG/Kt] screenshot→note: ${crop.width}x${crop.height} path=$screenshotPath")
-                    CropPanel.currentInstance?.hide()
-                    kotlin.concurrent.thread(isDaemon = true) {
-                        val result = DocScreenshotService.stageToQueue(screenshotPath, crop, insertNext = true)
-                        if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[CROP-DBG/Kt] screenshot→note stageToQueue result=$result")
-                        if (fromStitch) DocScreenshotService.clearSession()
-                        handler.post {
-                            ScreenshotBubble.reshowIfPending()
-                            isInNoteApp = true
-                            if (tools.isNotEmpty() && rootView == null) restoreToolbar()
-                            returnToNoteApp()
-                        }
-                    }
+                    requestScreenshotStoragePermissions(
+                        action = "save screenshot history",
+                        onGranted = {
+                            kotlin.concurrent.thread(isDaemon = true) {
+                                val result = DocScreenshotService.saveToHistory(screenshotPath, crop)
+                                val clearedSession = result != null && fromStitch && DocScreenshotService.clearSession()
+                                handler.post {
+                                    if (clearedSession) setKnownStitchSessionActive(false)
+                                    if (result == null) showScreenshotMessage("screenshot_save_failed")
+                                    if (!stayOpen) restoreAfterCropFlow()
+                                }
+                            }
+                        },
+                        onDenied = { if (!stayOpen) restoreAfterCropFlow() }
+                    )
                 },
                 onCancel = {
                     if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[CROP-DBG/Kt] crop cancel")
-                    if (fromStitch) kotlin.concurrent.thread(isDaemon = true) { DocScreenshotService.clearSession() }
-                    restoreAfterCropFlow()
+                    if (fromStitch || knownStitchSessionActive) {
+                        requestScreenshotStoragePermissions(
+                            action = "clear long screenshot",
+                            onGranted = {
+                                kotlin.concurrent.thread(isDaemon = true) {
+                                    val cleared = DocScreenshotService.clearSession()
+                                    handler.post {
+                                        if (cleared) setKnownStitchSessionActive(false)
+                                        restoreAfterCropFlow()
+                                    }
+                                }
+                            },
+                            onDenied = { restoreAfterCropFlow() }
+                        )
+                    } else {
+                        restoreAfterCropFlow()
+                    }
+                },
+                onShowResult = { shown ->
+                    if (!shown) {
+                        showScreenshotMessage("screenshot_panel_failed")
+                        restoreAfterCropFlow()
+                    }
                 }
             )
-    }
-
-    private fun returnToNoteApp() {
-        try {
-            val intent = android.content.Intent(android.content.Intent.ACTION_MAIN).apply {
-                component = android.content.ComponentName(NOTE_PACKAGE, NOTE_INSIDE_PAGES_ACTIVITY)
-                addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            reactApplicationContext.startActivity(intent)
-        } catch (e: Exception) {
-            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "returnToNoteApp failed: ${e.message}", e)
-        }
     }
 
     private fun openStitchPanel(session: DocScreenshotService.StitchSessionData) {
@@ -2226,7 +3678,14 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                                     }
                                 })
                             }
-                            DocScreenshotService.updateSession(finalSession)
+                            if (!DocScreenshotService.updateSession(finalSession)) {
+                                handler.post {
+                                    StitchPanel.currentInstance?.hide()
+                                    showScreenshotMessage("screenshot_save_failed")
+                                    restoreAfterCropFlow()
+                                }
+                                return@thread
+                            }
                             val compositePath = compositeImagesSync(nativeParams.toString())
                             if (compositePath != null) {
                                 val compDims = DocScreenshotService.getImageDimensions(compositePath)
@@ -2249,9 +3708,18 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                 onCancel = {
                     if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[CROP-DBG/Kt] stitch cancel: clearing session")
                     kotlin.concurrent.thread(isDaemon = true) {
-                        DocScreenshotService.clearSession()
+                        val cleared = DocScreenshotService.clearSession()
+                        handler.post {
+                            if (cleared) setKnownStitchSessionActive(false)
+                            restoreAfterCropFlow()
+                        }
                     }
-                    restoreAfterCropFlow()
+                },
+                onShowResult = { shown ->
+                    if (!shown) {
+                        showScreenshotMessage("screenshot_panel_failed")
+                        restoreAfterCropFlow()
+                    }
                 }
             )
     }
@@ -2430,9 +3898,23 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun handleDocScreenshot() {
         handler.post {
+            docScreenshotRoutePending = true
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[INSERT-DBG/Kt] doc screenshot route pending=true")
+            FloatingPenGuard.setFullScreenActive(true, "insert-image")
+            markToolbarForRestore()
             removeAll()
             kotlin.concurrent.thread(isDaemon = true) {
-                val nextFile = DocScreenshotService.firstInsertNextFile()
+                val nextFile = try {
+                    DocScreenshotService.firstInsertNextFile()
+                } catch (e: Exception) {
+                    handler.post {
+                        docScreenshotRoutePending = false
+                        FloatingPenGuard.setFullScreenActive(false, "insert-image")
+                        if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "[INSERT-DBG/Kt] doc screenshot route failed: ${e.message}", e)
+                        scheduleRestore(RESTORE_DELAY_NORMAL, "doc screenshot route failed")
+                    }
+                    return@thread
+                }
                 handler.post {
                     if (nextFile != null) {
                         val path = nextFile.absolutePath
@@ -2442,14 +3924,42 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                             ImagePanel.saveToInsertCacheStatic(path, lastNotePath, lastPageNum)
                         }
                         handler.postDelayed({
-                            try { requestInsertImage(path) }
-                            catch (e: Exception) { if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "requestInsertImage failed: ${e.message}"); insertNextChainActive = false; restoreToolbar() }
+                            try {
+                                requestInsertImage(path)
+                                docScreenshotRoutePending = false
+                                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[INSERT-DBG/Kt] doc screenshot route handed to insert-image")
+                            } catch (e: Exception) {
+                                docScreenshotRoutePending = false
+                                if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "requestInsertImage failed: ${e.message}")
+                                endInsertImageGuard()
+                                FloatingPenGuard.setFullScreenActive(false, "insert-image")
+                                insertNextChainActive = false; restoreToolbar()
+                            }
                         }, 500)
                     } else {
                         insertNextChainActive = false
                         if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "[INSERT-DBG/Kt] handleDocScreenshot: no insertNext, opening panel")
-                        emitEvent("onNativePanelOpen", Arguments.createMap().apply { putString("panel", "screenshot") })
-                        DocScreenshotPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show("queue")
+                        openNativePanel("screenshot") {
+                            val panel = DocScreenshotPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule)
+                            try {
+                                panel.show("queue") { shown ->
+                                    docScreenshotRoutePending = false
+                                    if (shown && SubviewLogMonitor.isSubviewOpen()) {
+                                        panel.suspendVisibility()
+                                    }
+                                    FloatingPenGuard.setFullScreenActive(false, "insert-image")
+                                    if (BuildConfig.ENABLE_DEBUG) {
+                                        Log.i(TAG, "[INSERT-DBG/Kt] doc screenshot panel settled shown=$shown subview=${SubviewLogMonitor.isSubviewOpen()}")
+                                    }
+                                    if (!shown) scheduleRestore(RESTORE_DELAY_NORMAL, "doc screenshot panel open failed")
+                                }
+                            } catch (e: Exception) {
+                                docScreenshotRoutePending = false
+                                FloatingPenGuard.setFullScreenActive(false, "insert-image")
+                                if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "[INSERT-DBG/Kt] doc screenshot panel open failed: ${e.message}", e)
+                                scheduleRestore(RESTORE_DELAY_NORMAL, "doc screenshot panel open failed")
+                            }
+                        }
                     }
                 }
             }
@@ -2467,20 +3977,47 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     private fun handleSendLongPress() {
         handler.post {
             if (!isWifiConnected()) {
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "handleSendLongPress: no wifi")
                 com.supernote_quicktoolbar.ui_common.Dialog.tip(
                     reactApplicationContext, NativeLocale.t("no_wifi"))
                 return@post
             }
             if (!LocalSendModule.staticIsRunning) {
-                com.supernote_quicktoolbar.ui_common.Dialog.confirm(
-                    reactApplicationContext, NativeLocale.t("localsend_ask_enable")
-                ) {
-                    emitEvent("startLocalSendFromNative",
-                        Arguments.createMap().apply { putBoolean("openClipboardSync", true) })
-                }
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "handleSendLongPress: auto-start LocalSend")
+                emitEvent("startLocalSendFromNative",
+                    Arguments.createMap().apply { putBoolean("openClipboardSync", true) })
                 return@post
             }
+            val defaultPeer = LocalSendModule.getDefaultPeer(reactApplicationContext)
+            if (defaultPeer != null) {
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "handleSendLongPress: direct-send to ${defaultPeer.alias}")
+                directSendClipboard(defaultPeer)
+                return@post
+            }
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "handleSendLongPress: LocalSend running, open panel")
             openSendPanelClipboardSync()
+        }
+    }
+
+    private fun directSendClipboard(peer: LocalSendModule.DiscoveredPeer) {
+        kotlin.concurrent.thread(isDaemon = true) {
+            try {
+                val zipPath = LocalSendModule.packageClipboardStatic(reactApplicationContext)
+                if (zipPath == null) {
+                    com.supernote_quicktoolbar.ui_common.Dialog.tip(
+                        reactApplicationContext, NativeLocale.t("sync_clipboard_empty"))
+                    return@thread
+                }
+                LocalSendModule.sendFileDirect(peer.ip, peer.port, zipPath, peer.useTls)
+                try { java.io.File(zipPath).delete() } catch (_: Exception) {}
+                com.supernote_quicktoolbar.ui_common.Dialog.tip(
+                    reactApplicationContext, NativeLocale.t("send_success"))
+            } catch (e: Exception) {
+                val msg = if (e.message?.contains("403") == true)
+                    NativeLocale.t("sync_rejected")
+                else "${NativeLocale.t("send_failed")}: ${e.message}"
+                com.supernote_quicktoolbar.ui_common.Dialog.tip(reactApplicationContext, msg)
+            }
         }
     }
 
@@ -2489,24 +4026,99 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         handler.post {
             if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "openSendPanelClipboardSync")
             removeAll()
-            emitEvent("onNativePanelOpen", Arguments.createMap().apply { putString("panel", "send") })
-            SendPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show(syncClipboard = true)
+            openNativePanel("send") {
+                SendPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show(syncClipboard = true)
+            }
         }
     }
 
     fun openDocScreenshotPanel() {
         handler.post {
+            markToolbarForRestore()
             removeAll()
-            emitEvent("onNativePanelOpen", Arguments.createMap().apply { putString("panel", "screenshot") })
-            DocScreenshotPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show("queue")
+            openNativePanel("screenshot") {
+                DocScreenshotPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show("queue")
+            }
         }
     }
 
     private fun startAppendPageCapture() {
+        startRegionCapture(mode = "appendPage", fromBubble = false)
+    }
+
+    private fun startRegionCapture(mode: String, fromBubble: Boolean) {
         handler.post {
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "startRegionCapture mode=$mode fromBubble=$fromBubble")
             removeAll()
-            LassoScreenshotPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule)
-                .captureAndShow(fromBubble = false, mode = "appendPage")
+            if (fromBubble) {
+                FloatingBubbleModule.hideStatic()
+                AiBubbleModule.hideStatic()
+            }
+            emitEvent("onNativePanelOpen", Arguments.createMap().apply { putString("panel", "lassoScreenshot") })
+            try {
+                penLassoOverlay?.dismissSilently()
+                penLassoOverlay = null
+                val overlay = PenLassoOverlay(reactApplicationContext)
+                penLassoOverlay = overlay
+                val actions = when (mode) {
+                    "send" -> listOf(
+                        PenLassoOverlay.Action.SEND_TO_DEVICES,
+                        PenLassoOverlay.Action.ADD_TO_DOC_SCREENSHOTS,
+                        PenLassoOverlay.Action.CANCEL,
+                    )
+                    "appendPage" -> listOf(
+                        PenLassoOverlay.Action.INSERT_CURRENT_PAGE,
+                        PenLassoOverlay.Action.ADD_TO_DOC_SCREENSHOTS,
+                        PenLassoOverlay.Action.APPEND_PAGE_WITH_LINK,
+                        PenLassoOverlay.Action.CANCEL,
+                    )
+                    else -> listOf(
+                        PenLassoOverlay.Action.CONFIRM,
+                        PenLassoOverlay.Action.CANCEL,
+                    )
+                }
+                overlay.show(
+                    actions = actions,
+                    onAction = { action, l, t, r, b ->
+                        handler.post { if (penLassoOverlay === overlay) penLassoOverlay = null }
+                        val captureMode = when (action) {
+                            PenLassoOverlay.Action.CONFIRM -> mode
+                            PenLassoOverlay.Action.SEND_TO_DEVICES -> "send"
+                            PenLassoOverlay.Action.ADD_TO_DOC_SCREENSHOTS -> "docScreenshot"
+                            PenLassoOverlay.Action.INSERT_CURRENT_PAGE -> "insertCurrent"
+                            PenLassoOverlay.Action.APPEND_PAGE_WITH_LINK -> "appendPage"
+                            PenLassoOverlay.Action.CANCEL -> return@show
+                        }
+                        if (action == PenLassoOverlay.Action.ADD_TO_DOC_SCREENSHOTS) {
+                            requestScreenshotStoragePermissions(
+                                action = "save region to doc screenshots",
+                                onGranted = {
+                                    RegionCaptureFlow.capture(
+                                        reactApplicationContext, this@FloatingToolbarModule,
+                                        captureMode, fromBubble, l, t, r, b)
+                                },
+                                onDenied = {
+                                    RegionCaptureFlow.emitCloseAndRestore(
+                                        this@FloatingToolbarModule, reactApplicationContext, fromBubble, null)
+                                }
+                            )
+                        } else {
+                            RegionCaptureFlow.capture(
+                                reactApplicationContext, this@FloatingToolbarModule,
+                                captureMode, fromBubble, l, t, r, b)
+                        }
+                    },
+                    onCancel = {
+                        handler.post { if (penLassoOverlay === overlay) penLassoOverlay = null }
+                        RegionCaptureFlow.emitCloseAndRestore(
+                            this@FloatingToolbarModule, reactApplicationContext, fromBubble, null)
+                    }
+                )
+            } catch (e: Exception) {
+                if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "startRegionCapture failed: ${e.message}", e)
+                RegionCaptureFlow.emitCloseAndRestore(
+                    this@FloatingToolbarModule, reactApplicationContext, fromBubble, null)
+            }
         }
     }
 
@@ -2518,6 +4130,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             emitEvent("onNativePanelOpen", Arguments.createMap().apply { putString("panel", "send") })
             SendPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule).show(fromBubble = true)
             handler.postDelayed({
+                if (pendingScreen != "nativeSendHelper") return@postDelayed
                 callShowPluginView()
                 emitOpenMainWithRetries("nativeSendHelper")
             }, 150)
@@ -2526,28 +4139,12 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun showLassoScreenshotPanelFromBubble() {
-        handler.post {
-            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "showLassoScreenshotPanelFromBubble")
-            removeAll()
-            FloatingBubbleModule.hideStatic()
-            AiBubbleModule.hideStatic()
-            emitEvent("onNativePanelOpen", Arguments.createMap().apply { putString("panel", "lassoScreenshot") })
-            LassoScreenshotPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule)
-                .captureAndShow(fromBubble = true, mode = "ai")
-        }
+        startRegionCapture(mode = "ai", fromBubble = true)
     }
 
     @ReactMethod
     fun showLassoScreenshotPanelForSendFromBubble() {
-        handler.post {
-            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "showLassoScreenshotPanelForSendFromBubble")
-            removeAll()
-            FloatingBubbleModule.hideStatic()
-            AiBubbleModule.hideStatic()
-            emitEvent("onNativePanelOpen", Arguments.createMap().apply { putString("panel", "lassoScreenshot") })
-            LassoScreenshotPanel.getInstance(reactApplicationContext, this@FloatingToolbarModule)
-                .captureAndShow(fromBubble = true, mode = "send")
-        }
+        startRegionCapture(mode = "send", fromBubble = true)
     }
 
     fun showPluginView() {
@@ -2557,8 +4154,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     fun closePluginView() {
         handler.post { callClosePluginView() }
     }
-
-    fun emitEventPublic(name: String, params: WritableMap) = emitEvent(name, params)
 
     fun onAppendPageCaptured(
         imagePath: String,
@@ -2599,8 +4194,11 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             removeAll()
 
             ToolRegistry.hideAll()
+            FloatingBubbleModule.hideAndForget()
+            AiBubbleModule.hideAndForget()
             ScreenshotBubble.pendingReshow = false
             ScreenshotBubble.hide()
+            StickyNotes.clearAll()
 
             callClosePluginView()
             if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "destroyAll: done")
@@ -2612,22 +4210,10 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         destroyAll()
     }
 
-    @ReactMethod
-    fun hideAllNativePanelsFromJs() {
-        handler.post { hideAllNativePanels() }
-    }
-
-    private fun forwardTapToClip(overlay: View, event: android.view.MotionEvent) {
-        val loc = IntArray(2); overlay.getLocationOnScreen(loc)
-        val touchY = event.rawY - loc[1]
-        val iconH = dpToPx(CLIP_ICON_DP) + dpToPx(2)
-        val idx = (touchY / iconH).toInt().coerceIn(0, 3)
-        clipIconViews[idx]?.performClick()
-    }
-
     private fun rebuildClipIcons() {
-        val count = if (orientation == "vertical") 4 else 6
-        val offset = if (orientation == "vertical") clipPage * 2 else 0
+        val showAllVerticalClips = orientation == "vertical" && tools.size >= 7
+        val count = if (orientation == "vertical" && !showAllVerticalClips) 4 else 6
+        val offset = if (orientation == "vertical" && !showAllVerticalClips) clipPage * 2 else 0
         for (vi in 0 until count) {
             val tv = clipIconViews[vi] ?: continue
             val di = offset + vi
@@ -2638,7 +4224,7 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             tv.background = if (filled) {
                 GradientDrawable().apply {
                     shape = GradientDrawable.RECTANGLE
-                    cornerRadius = dpToPx(3).toFloat()
+                    cornerRadius = dpToPx(CLIP_RADIUS_DP).toFloat()
                     setColor(Color.BLACK)
                 }
             } else {
@@ -2665,26 +4251,73 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
     }
 
     private fun runMonitorTick() {
-        val fgPkg = foregroundPackage()
+        val foreground = foregroundActivity() ?: return
+        val fgPkg = foreground.packageName
+        val noteCanvasForeground = fgPkg == NOTE_PACKAGE &&
+            foreground.activityName == NOTE_INSIDE_PAGES_ACTIVITY
+        val supportsHandwriting = noteCanvasForeground || fgPkg == DOC_PACKAGE
+        val supportsScreenshotBubble = supportsHandwriting || fgPkg == WEREAD_PACKAGE
+        if (!supportsHandwriting && rotationEpoch != 0L) {
+            cancelRotationSync("left handwriting page")
+        }
+
+        FloatingPenGuard.setFullScreenActive(!supportsHandwriting, "foreign-activity")
+        if (!supportsScreenshotBubble && ScreenshotBubble.isShowing) {
+            monitorHandler.post { ScreenshotBubble.hideForInactiveCanvas() }
+        }
+        if (!supportsScreenshotBubble) StickyNotes.hideTemp()
+
+        val fgKey = "$fgPkg/${foreground.activityName}"
+        if (fgKey != lastForegroundKey) {
+            val previous = lastForegroundKey
+            lastForegroundKey = fgKey
+            if (previous != null) {
+                if (BuildConfig.ENABLE_DEBUG) {
+                    Log.i(TAG, "foreground activity changed: $previous → $fgKey")
+                }
+                scheduleForegroundGuardReassert(fgKey)
+            }
+        }
 
         if (fgPkg == SETTINGS_PACKAGE) {
-            if (ScreenshotBubble.isShowing) {
+            StickyNotes.hideTemp()
+            if (ScreenshotBubble.isShowing && !ScreenshotBubble.hiddenByInactiveCanvas) {
                 if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "foreground monitor: in ratta settings, hiding ScreenshotBubble")
                 monitorHandler.post { ScreenshotBubble.hideForSettings() }
             }
-        } else if (ScreenshotBubble.hiddenBySettings) {
-
-            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "foreground monitor: left ratta settings, restoring ScreenshotBubble")
-            monitorHandler.post { ScreenshotBubble.reshowIfHiddenBySettings() }
+        } else if ((ScreenshotBubble.hiddenBySettings || ScreenshotBubble.hiddenByInactiveCanvas)
+            && supportsScreenshotBubble
+            && !SubviewLogMonitor.isSubviewOpen() && !isPluginHostWindowShowing) {
+            if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "foreground monitor: safe to restore ScreenshotBubble (fg=$fgPkg)")
+            monitorHandler.post {
+                if (ScreenshotBubble.hiddenBySettings) {
+                    ScreenshotBubble.reshowIfHiddenBySettings()
+                } else {
+                    ScreenshotBubble.reshowIfHiddenByInactiveCanvas()
+                }
+                StickyNotes.reshowIfTemp()
+            }
         }
 
-        val inNote = if (fgPkg == null) true else (fgPkg == NOTE_PACKAGE || fgPkg == PLUGIN_PACKAGE)
+        val inNote = fgPkg == PLUGIN_PACKAGE || noteCanvasForeground
         if (inNote != isInNoteApp) {
+            if (inNote) noteForegroundSinceMs = android.os.SystemClock.elapsedRealtime()
             isInNoteApp = inNote
+            // Tell JS: TextInserter must hold inserts while the note app
+            // re-loads its page after returning to the foreground — inserting
+            // during that window can SIGSEGV the note's native redraw.
+            emitEvent("onNoteForegroundChanged", com.facebook.react.bridge.Arguments.createMap().apply {
+                putBoolean("inNote", inNote)
+            })
             if (!inNote) {
-                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "foreground monitor: left note app, hiding overlays")
-                wasVisibleBeforeBackground = rootView != null
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "foreground monitor: left note canvas, hiding overlays")
+                markToolbarForRestore(parkGuards = false)
+                terminateAfterPluginMenuClose = false
+                FloatingPenGuard.setFullScreenActive(false, "host-toolbar-menu")
+                FloatingPenGuard.setFullScreenActive(false, "host-lasso-menu")
+                FloatingPenGuard.setFullScreenActive(false, "note-subview")
                 monitorHandler.post {
+                    FloatingPenGuard.endPark("left note canvas", flush = true)
                     removeAll()
                     suspendAllNativePanels()
                     FloatingBubbleModule.hideStatic()
@@ -2692,24 +4325,8 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
                     PaletteBubbleModule.hideStatic()
                 }
             } else {
-                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "foreground monitor: returned to note app")
-                monitorHandler.post {
-                    resumeAllNativePanels()
-                    val anyPanelOpen = ImagePanel.currentInstance != null
-                        || DocLinkPanel.currentInstance != null
-                        || SendPanel.currentInstance != null
-                        || LassoScreenshotPanel.currentInstance != null
-                        || DocScreenshotPanel.currentInstance != null
-                    if (!anyPanelOpen) {
-                        if ((wasVisibleBeforeBackground || ScreenshotBubble.isShowing || ScreenshotBubble.pendingReshow) && tools.isNotEmpty() && rootView == null) {
-                            collapsed = false
-                            createExpandedToolbar()
-                        }
-                        FloatingBubbleModule.reshowLast(reactApplicationContext)
-                        AiBubbleModule.reshowLast(reactApplicationContext)
-                        PaletteBubbleModule.reshowLast(reactApplicationContext)
-                    }
-                }
+                if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "foreground monitor: returned to note canvas")
+                scheduleRestore(RESTORE_DELAY_SHORT, "returned to note canvas")
             }
         }
     }
@@ -2719,19 +4336,51 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         foregroundMonitorRunning = true
         isInNoteApp = true
 
+        if (windowStateMonitor == null) {
+            windowStateMonitor = WindowStateMonitor(reactApplicationContext)
+        }
+        windowStateMonitor?.start()
+
+        FloatingPenGuard.claimOwnership(reactApplicationContext.filesDir)
+
+        FloatingPenGuard.beginHostBootstrap("foreground monitor start")
+        SubviewLogMonitor.start(subviewListener)
+
         monitorHandler.removeCallbacks(staticMonitorRunnable)
         monitorHandler.postDelayed(staticMonitorRunnable, MONITOR_INTERVAL_MS)
         if (BuildConfig.ENABLE_DEBUG) Log.i(TAG, "foreground monitor started")
     }
 
     fun stopForegroundMonitor() {
+        cancelRotationSync("foreground monitor stopped")
         foregroundMonitorRunning = false
         monitorHandler.removeCallbacks(staticMonitorRunnable)
+        // PluginHost visibility is also the recovery signal for a later Settings
+        // config press. Keep this lightweight in-process hook alive after the
+        // toolbar/panels are destroyed; otherwise the second showType=1 entry has
+        // no native fallback when plugin_config_event is missed by the paused RN
+        // runtime. It will be reused by the next startForegroundMonitor().
+        SubviewLogMonitor.stop()
+        FloatingPenGuard.setFullScreenActive(false, "host-toolbar-menu")
+        monitorHandler.removeCallbacks(lassoFullScreenReleaseRunnable)
+        FloatingPenGuard.setFullScreenActive(false, "host-lasso-menu")
+        FloatingPenGuard.setFullScreenActive(false, "note-subview")
+        FloatingPenGuard.setFullScreenActive(false, "foreign-activity")
+        endInsertImageGuard()
+        FloatingPenGuard.setFullScreenActive(false, "insert-image")
+        docScreenshotRoutePending = false
+        lassoWritableResetPending = false
+        toolbarRestorePending = false
+        cancelScheduledRestore()
+        FloatingPenGuard.endPark("foreground monitor stopped", flush = true)
+        terminateAfterPluginMenuClose = false
     }
+
+    private data class ForegroundActivity(val packageName: String, val activityName: String)
 
     private val resumedActivityRegex = Regex("""mResumedActivity:.*?(\S+)/(\S+)\s""")
 
-    private fun foregroundPackage(): String? {
+    private fun foregroundActivity(): ForegroundActivity? {
         return try {
             val proc = Runtime.getRuntime().exec(arrayOf("dumpsys", "activity", "activities"))
             val reader = proc.inputStream.bufferedReader()
@@ -2746,47 +4395,63 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
             proc.waitFor()
             if (matched != null) {
                 val pkg = matched!!.groupValues[1]
-                if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "foreground: $pkg")
-                pkg
+                val rawActivity = matched!!.groupValues[2]
+                val activity = if (rawActivity.startsWith('.')) pkg + rawActivity else rawActivity
+                if (BuildConfig.ENABLE_DEBUG) Log.d(TAG, "foreground: $pkg/$activity")
+                ForegroundActivity(pkg, activity)
             } else {
-                if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "foregroundPackage: no mResumedActivity found")
+                if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "foregroundActivity: no mResumedActivity found")
                 null
             }
         } catch (e: Exception) {
-            if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "foregroundPackage: ${e.message}")
+            if (BuildConfig.ENABLE_DEBUG) Log.w(TAG, "foregroundActivity: ${e.message}")
             null
         }
     }
 
+    private fun isNoteCanvasForeground(): Boolean {
+        val foreground = foregroundActivity() ?: return false
+        return foreground.packageName == NOTE_PACKAGE &&
+            foreground.activityName == NOTE_INSIDE_PAGES_ACTIVITY
+    }
+
     private fun checkIsNoteAppForeground(): Boolean {
-        val pkg = foregroundPackage() ?: return true
-        return pkg == NOTE_PACKAGE || pkg == PLUGIN_PACKAGE
+        val foreground = foregroundActivity() ?: return true
+        return foreground.packageName == PLUGIN_PACKAGE ||
+            (foreground.packageName == NOTE_PACKAGE && foreground.activityName == NOTE_INSIDE_PAGES_ACTIVITY)
     }
 
     @ReactMethod
     fun showPenLassoOverlay() {
+        Log.i(TAG, "showPenLassoOverlay: bridge call received")
         handler.post {
             try {
-                penLassoOverlay?.dismiss()
-                penLassoOverlay = PenLassoOverlay(reactApplicationContext).apply {
-                    show(
-                        onBbox = { l, t, r, b ->
-                            handler.post {
-                                penLassoOverlay = null
-                                emitEvent("onPenLassoBbox", Arguments.createMap().apply {
-                                    putInt("left", l); putInt("top", t)
-                                    putInt("right", r); putInt("bottom", b)
-                                })
-                            }
-                        },
-                        onCancel = {
-                            handler.post {
-                                penLassoOverlay = null
-                                emitEvent("onPenLassoCancel", Arguments.createMap())
-                            }
+                Log.i(TAG, "showPenLassoOverlay: creating overlay (prev=${penLassoOverlay != null})")
+                penLassoOverlay?.dismissSilently()
+                penLassoOverlay = null
+                val overlay = PenLassoOverlay(reactApplicationContext)
+                penLassoOverlay = overlay
+                overlay.show(
+                    actions = listOf(
+                        PenLassoOverlay.Action.CONFIRM,
+                        PenLassoOverlay.Action.CANCEL,
+                    ),
+                    onAction = { _, l, t, r, b ->
+                        handler.post {
+                            if (penLassoOverlay === overlay) penLassoOverlay = null
+                            emitEvent("onPenLassoBbox", Arguments.createMap().apply {
+                                putInt("left", l); putInt("top", t)
+                                putInt("right", r); putInt("bottom", b)
+                            })
                         }
-                    )
-                }
+                    },
+                    onCancel = {
+                        handler.post {
+                            if (penLassoOverlay === overlay) penLassoOverlay = null
+                            emitEvent("onPenLassoCancel", Arguments.createMap())
+                        }
+                    }
+                )
             } catch (e: Exception) {
                 if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "showPenLassoOverlay failed: ${e.message}", e)
                 emitEvent("onPenLassoCancel", Arguments.createMap())
@@ -2799,51 +4464,6 @@ class FloatingToolbarModule(reactContext: ReactApplicationContext) :
         handler.post {
             penLassoOverlay?.dismiss()
             penLassoOverlay = null
-        }
-    }
-
-    @ReactMethod
-    fun showStrokeEraserOverlay() {
-        handler.post {
-            try {
-                strokeEraserOverlay?.dismiss()
-                strokeEraserOverlay = StrokeEraserOverlay(reactApplicationContext).apply {
-                    show(
-                        onPath = { pts ->
-                            handler.post {
-                                strokeEraserOverlay = null
-                                val arr = Arguments.createArray()
-                                for (p in pts) {
-                                    arr.pushMap(Arguments.createMap().apply {
-                                        putDouble("x", p.x.toDouble())
-                                        putDouble("y", p.y.toDouble())
-                                    })
-                                }
-                                emitEvent("onStrokeEraserPath", Arguments.createMap().apply {
-                                    putArray("points", arr)
-                                })
-                            }
-                        },
-                        onCancel = {
-                            handler.post {
-                                strokeEraserOverlay = null
-                                emitEvent("onStrokeEraserCancel", Arguments.createMap())
-                            }
-                        }
-                    )
-                }
-            } catch (e: Exception) {
-                if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "showStrokeEraserOverlay failed: ${e.message}", e)
-                emitEvent("onStrokeEraserCancel", Arguments.createMap())
-            }
-        }
-    }
-
-    @ReactMethod
-    fun dismissStrokeEraserOverlay() {
-        handler.post {
-            strokeEraserOverlay?.dismiss()
-            strokeEraserOverlay = null
         }
     }
 

@@ -22,43 +22,71 @@ object DocScreenshotService {
     private const val MAX_HISTORY       = 20
 
     fun cropAndSave(srcPath: String, crop: CropPanel.CropResult, destPath: String): Boolean {
+        var source: Bitmap? = null
+        var cropped: Bitmap? = null
         return try {
-            val bmp = BitmapFactory.decodeFile(srcPath) ?: return false
-            val cropped = Bitmap.createBitmap(bmp, crop.offsetX, crop.offsetY, crop.width, crop.height)
+            val decoded = BitmapFactory.decodeFile(srcPath) ?: return false
+            source = decoded
+            val output = Bitmap.createBitmap(decoded, crop.offsetX, crop.offsetY, crop.width, crop.height)
+            cropped = output
             FileOutputStream(destPath).use { fos ->
-                cropped.compress(Bitmap.CompressFormat.PNG, 100, fos)
+                if (!output.compress(Bitmap.CompressFormat.PNG, 100, fos)) return false
             }
-            cropped.recycle()
-            bmp.recycle()
             true
         } catch (e: Exception) {
             if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "cropAndSave failed: ${e.message}", e)
             false
+        } catch (e: OutOfMemoryError) {
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "cropAndSave out of memory", e)
+            false
+        } finally {
+            if (cropped !== source) cropped?.recycle()
+            source?.recycle()
         }
     }
 
-    private fun ensureDirs() {
-        for (d in listOf(STAGING_DIR, QUEUE_DIR, HISTORY_DIR, STITCH_IMAGES_DIR)) {
-            File(d).mkdirs()
+    private fun ensureDirs(): Boolean {
+        return try {
+            for (path in listOf(STAGING_DIR, QUEUE_DIR, HISTORY_DIR, STITCH_IMAGES_DIR)) {
+                val dir = File(path)
+                if (!dir.exists() && !dir.mkdirs()) return false
+            }
+            true
+        } catch (e: Exception) {
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "ensureDirs failed: ${e.message}", e)
+            false
         }
     }
 
     fun stageToQueue(srcPath: String, crop: CropPanel.CropResult, insertNext: Boolean = false): String? {
-        ensureDirs()
-        val ts = System.currentTimeMillis()
-        val dest = "$QUEUE_DIR/$ts.png"
-        if (!cropAndSave(srcPath, crop, dest)) return null
-        if (insertNext) markInsertNext("$ts.png")
-        return dest
+        return try {
+            if (!ensureDirs()) return null
+            val ts = System.currentTimeMillis()
+            val dest = "$QUEUE_DIR/$ts.png"
+            if (!cropAndSave(srcPath, crop, dest)) return null
+            if (insertNext && !markInsertNext("$ts.png")) {
+                try { File(dest).delete() } catch (_: Exception) {}
+                return null
+            }
+            dest
+        } catch (e: Exception) {
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "stageToQueue failed: ${e.message}", e)
+            null
+        }
     }
 
     fun saveToHistory(srcPath: String, crop: CropPanel.CropResult): String? {
-        ensureDirs()
-        val ts = System.currentTimeMillis()
-        val dest = "$HISTORY_DIR/$ts.png"
-        val ok = cropAndSave(srcPath, crop, dest)
-        if (ok) pruneHistory()
-        return if (ok) dest else null
+        return try {
+            if (!ensureDirs()) return null
+            val ts = System.currentTimeMillis()
+            val dest = "$HISTORY_DIR/$ts.png"
+            val ok = cropAndSave(srcPath, crop, dest)
+            if (ok) pruneHistory()
+            if (ok) dest else null
+        } catch (e: Exception) {
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "saveToHistory failed: ${e.message}", e)
+            null
+        }
     }
 
     private fun loadQueueMeta(): MutableSet<String> {
@@ -72,35 +100,50 @@ object DocScreenshotService {
         } catch (_: Exception) { mutableSetOf() }
     }
 
-    private fun saveQueueMeta(set: Set<String>) {
-        ensureDirs()
-        val json = JSONObject().apply {
-            put("insertNext", JSONArray().apply { for (name in set) put(name) })
+    private fun saveQueueMeta(set: Set<String>): Boolean {
+        return try {
+            if (!ensureDirs()) return false
+            val json = JSONObject().apply {
+                put("insertNext", JSONArray().apply { for (name in set) put(name) })
+            }
+            File(QUEUE_META_FILE).writeText(json.toString())
+            true
+        } catch (e: Exception) {
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "saveQueueMeta failed: ${e.message}", e)
+            false
         }
-        File(QUEUE_META_FILE).writeText(json.toString())
     }
 
-    private fun markInsertNext(fileName: String) {
+    private fun markInsertNext(fileName: String): Boolean {
         val set = loadQueueMeta()
         set.add(fileName)
-        saveQueueMeta(set)
+        return saveQueueMeta(set)
     }
 
     fun unmarkInsertNext(fileName: String) {
-        val set = loadQueueMeta()
-        if (set.remove(fileName)) saveQueueMeta(set)
+        try {
+            val set = loadQueueMeta()
+            if (set.remove(fileName)) saveQueueMeta(set)
+        } catch (e: Exception) {
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "unmarkInsertNext failed: ${e.message}", e)
+        }
     }
 
     fun isInsertNext(fileName: String): Boolean = loadQueueMeta().contains(fileName)
 
     fun firstInsertNextFile(): File? {
-        val set = loadQueueMeta()
-        if (set.isEmpty()) return null
-        val dir = File(QUEUE_DIR)
-        if (!dir.exists()) return null
-        return (dir.listFiles() ?: emptyArray())
-            .filter { it.name.endsWith(".png") && set.contains(it.name) }
-            .minByOrNull { it.name.removeSuffix(".png").toLongOrNull() ?: Long.MAX_VALUE }
+        return try {
+            val set = loadQueueMeta()
+            if (set.isEmpty()) return null
+            val dir = File(QUEUE_DIR)
+            if (!dir.exists()) return null
+            (dir.listFiles() ?: emptyArray())
+                .filter { it.name.endsWith(".png") && set.contains(it.name) }
+                .minByOrNull { it.name.removeSuffix(".png").toLongOrNull() ?: Long.MAX_VALUE }
+        } catch (e: Exception) {
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "firstInsertNextFile failed: ${e.message}", e)
+            null
+        }
     }
 
     private fun pruneHistory() {
@@ -137,8 +180,17 @@ object DocScreenshotService {
         val createdAt: Long
     )
 
-    fun hasActiveSession(): Boolean = File(SESSION_FILE).exists()
+    @Synchronized
+    fun hasActiveSession(): Boolean {
+        return try {
+            File(SESSION_FILE).exists()
+        } catch (e: Exception) {
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "hasActiveSession failed: ${e.message}", e)
+            false
+        }
+    }
 
+    @Synchronized
     fun loadSession(): StitchSessionData? {
         return try {
             val f = File(SESSION_FILE)
@@ -176,88 +228,126 @@ object DocScreenshotService {
         }
     }
 
-    private fun saveSession(session: StitchSessionData) {
-        ensureDirs()
-        val json = JSONObject().apply {
-            put("createdAt", session.createdAt)
-            put("params", JSONObject().apply {
-                put("direction", session.params.direction)
-                put("overlap", session.params.overlap)
-                put("topLayerIndex", session.params.topLayerIndex)
-                put("cols", session.params.cols)
-                put("gridOrder", session.params.gridOrder)
-            })
-            put("images", JSONArray().apply {
-                for (img in session.images) {
-                    put(JSONObject().apply {
-                        put("path", img.path)
-                        put("width", img.width)
-                        put("height", img.height)
-                        put("crop", JSONObject().apply {
-                            put("cropTop", img.cropTop.toDouble())
-                            put("cropBottom", img.cropBottom.toDouble())
-                            put("cropLeft", img.cropLeft.toDouble())
-                            put("cropRight", img.cropRight.toDouble())
+    private fun saveSession(session: StitchSessionData): Boolean {
+        return try {
+            if (!ensureDirs()) return false
+            val json = JSONObject().apply {
+                put("createdAt", session.createdAt)
+                put("params", JSONObject().apply {
+                    put("direction", session.params.direction)
+                    put("overlap", session.params.overlap)
+                    put("topLayerIndex", session.params.topLayerIndex)
+                    put("cols", session.params.cols)
+                    put("gridOrder", session.params.gridOrder)
+                })
+                put("images", JSONArray().apply {
+                    for (img in session.images) {
+                        put(JSONObject().apply {
+                            put("path", img.path)
+                            put("width", img.width)
+                            put("height", img.height)
+                            put("crop", JSONObject().apply {
+                                put("cropTop", img.cropTop.toDouble())
+                                put("cropBottom", img.cropBottom.toDouble())
+                                put("cropLeft", img.cropLeft.toDouble())
+                                put("cropRight", img.cropRight.toDouble())
+                            })
                         })
-                    })
-                }
-            })
+                    }
+                })
+            }
+            File(SESSION_FILE).writeText(json.toString())
+            true
+        } catch (e: Exception) {
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "saveSession failed: ${e.message}", e)
+            false
         }
-        File(SESSION_FILE).writeText(json.toString())
     }
 
-    fun startSession(imagePath: String, width: Int, height: Int): StitchSessionData {
-        ensureDirs()
-        val ts = System.currentTimeMillis()
-        val dest = "$STITCH_IMAGES_DIR/${ts}_0.png"
-        File(imagePath).copyTo(File(dest), overwrite = true)
-        val session = StitchSessionData(
-            images = mutableListOf(StitchImage(dest, width, height)),
-            params = StitchParams(),
-            createdAt = ts
-        )
-        saveSession(session)
-        return session
+    @Synchronized
+    fun startSession(imagePath: String, width: Int, height: Int): StitchSessionData? {
+        return try {
+            if (!ensureDirs()) return null
+            val ts = System.currentTimeMillis()
+            val dest = "$STITCH_IMAGES_DIR/${ts}_0.png"
+            File(imagePath).copyTo(File(dest), overwrite = true)
+            val session = StitchSessionData(
+                images = mutableListOf(StitchImage(dest, width, height)),
+                params = StitchParams(),
+                createdAt = ts
+            )
+            if (saveSession(session)) session else {
+                try { File(dest).delete() } catch (_: Exception) {}
+                null
+            }
+        } catch (e: Exception) {
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "startSession failed: ${e.message}", e)
+            null
+        }
     }
 
+    @Synchronized
     fun addImage(imagePath: String, width: Int, height: Int): StitchSessionData? {
-        val session = loadSession() ?: return null
-        ensureDirs()
-        val ts = System.currentTimeMillis()
-        val idx = session.images.size
-        val dest = "$STITCH_IMAGES_DIR/${ts}_$idx.png"
-        File(imagePath).copyTo(File(dest), overwrite = true)
-        session.images.add(StitchImage(dest, width, height))
-        if (session.images.size == 2) {
+        return try {
+            val session = loadSession() ?: return null
+            if (!ensureDirs()) return null
+            val ts = System.currentTimeMillis()
+            val idx = session.images.size
+            val dest = "$STITCH_IMAGES_DIR/${ts}_$idx.png"
+            File(imagePath).copyTo(File(dest), overwrite = true)
+            session.images.add(StitchImage(dest, width, height))
+            if (session.images.size == 2) {
+                session.params.direction = "vertical"
+                session.params.overlap = 100
+                session.params.topLayerIndex = 1
+            } else if (session.images.size > 2 && session.params.cols == 0) {
+                session.params.cols = if (session.params.direction == "vertical") 1 else session.images.size
+            }
+            if (saveSession(session)) session else {
+                try { File(dest).delete() } catch (_: Exception) {}
+                null
+            }
+        } catch (e: Exception) {
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "addImage failed: ${e.message}", e)
+            null
+        }
+    }
+
+    @Synchronized
+    fun keepFirstOnly(): Boolean {
+        return try {
+            val session = loadSession() ?: return false
+            if (session.images.size < 2) return true
+            val removedPath = session.images[1].path
+            session.images.removeAt(1)
             session.params.direction = "vertical"
             session.params.overlap = 100
             session.params.topLayerIndex = 1
-        } else if (session.images.size > 2 && session.params.cols == 0) {
-            session.params.cols = if (session.params.direction == "vertical") 1 else session.images.size
+            if (!saveSession(session)) return false
+            try { File(removedPath).delete() } catch (_: Exception) {}
+            true
+        } catch (e: Exception) {
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "keepFirstOnly failed: ${e.message}", e)
+            false
         }
-        saveSession(session)
-        return session
     }
 
-    fun keepFirstOnly() {
-        val session = loadSession() ?: return
-        if (session.images.size < 2) return
-        try { File(session.images[1].path).delete() } catch (_: Exception) {}
-        session.images.removeAt(1)
-        session.params.direction = "vertical"
-        session.params.overlap = 100
-        session.params.topLayerIndex = 1
-        saveSession(session)
+    @Synchronized
+    fun clearSession(): Boolean {
+        return try {
+            var ok = true
+            val sessionFile = File(SESSION_FILE)
+            if (sessionFile.exists() && !sessionFile.delete()) ok = false
+            File(STITCH_IMAGES_DIR).listFiles()?.forEach { if (!it.delete()) ok = false }
+            ok
+        } catch (e: Exception) {
+            if (BuildConfig.ENABLE_DEBUG) Log.e(TAG, "clearSession failed: ${e.message}", e)
+            false
+        }
     }
 
-    fun clearSession() {
-        try { File(SESSION_FILE).delete() } catch (_: Exception) {}
-        try {
-            File(STITCH_IMAGES_DIR).listFiles()?.forEach { it.delete() }
-        } catch (_: Exception) {}
-    }
-
-    fun updateSession(session: StitchSessionData) = saveSession(session)
+    @Synchronized
+    fun updateSession(session: StitchSessionData): Boolean = saveSession(session)
 
     fun getImageDimensions(path: String): Pair<Int, Int>? {
         val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
